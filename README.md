@@ -78,7 +78,7 @@ lets the same protocol run on a microcontroller and a server.
 flowchart TB
     A["Your application"]
     B["fectp · needs std<br/>Connection · Endpoint<br/>codecs · Zstandard"]
-    C["fectp-core · no_std · ~29 KiB<br/>Noise handshake · framing<br/>replay window · reliability"]
+    C["fectp-core · no_std<br/>~29 KiB of code<br/>Noise handshake · framing<br/>replay window · reliability"]
     D["Transport trait<br/>UDP, or a link you supply"]
     A --> B --> C --> D
 ```
@@ -146,17 +146,15 @@ Full walkthrough, with every snippet compiled and run by
 every branch that costs anything is skipped when it would not pay:
 
 ```mermaid
-flowchart TD
-    P["your bytes"] --> T{"shape declared?"}
-    T -->|yes| TR["transform<br/>split channels, delta"]
-    T -->|no| Z{"worth compressing?"}
-    TR --> Z
-    Z -->|yes| ZS["Zstandard"]
-    Z -->|no| E["encrypt + authenticate<br/>ChaCha20-Poly1305"]
-    ZS --> E
-    E --> W["prepend 14-byte header"]
-    W --> S(["one UDP datagram"])
+flowchart LR
+    P["your bytes"] --> TR["transform<br/>if shape declared"]
+    TR --> Z["compress<br/>if worth it"]
+    Z --> E["encrypt and<br/>authenticate"]
+    E --> S(["UDP datagram<br/>+ 14-byte header"])
 ```
+
+Both middle steps are skipped when they would not pay, and the payload goes
+straight through.
 
 The "worth it?" test is real: a payload under 1 KiB, one that already looks
 compressed, or one the peer cannot decompress goes straight through. If
