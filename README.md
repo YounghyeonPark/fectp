@@ -47,12 +47,11 @@ before any real data may move**.
 sequenceDiagram
     participant A as Your app
     participant B as Peer
-    Note over A,B: once, when the session opens
+    Note over A,B: once per session
     A->>B: handshake + request
     B->>A: handshake + answer
-    Note over A,B: every message after that
+    Note over A,B: every message after — no handshake
     A->>B: data
-    B->>A: data
 ```
 
 **The handshake happens once per session, not per message.** Afterwards each
