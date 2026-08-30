@@ -87,7 +87,9 @@ pub use pipeline::MAX_TICKETS;
 pub use endpoint::{Endpoint, Event, PeerId, MAX_QUEUED_LARGE};
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
-pub use fectp_core::reliability::{MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES};
+pub use fectp_core::reliability::{
+    INITIAL_CWND, MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES, MIN_CWND,
+};
 pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_RELIABLE, CAP_ZSTD};
 pub use fectp_core::{Capabilities, PublicKey as PeerKey};
 pub use udp::{UdpTransport, DEFAULT_MAX_DATAGRAM};

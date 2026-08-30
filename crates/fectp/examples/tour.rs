@@ -213,9 +213,19 @@ fn reliable_delivery() -> fectp::Result<()> {
         conn.flush(Duration::from_secs(2))?;
         assert_eq!(conn.unacknowledged(), 0);
 
+        // More than the congestion window opens at, so this exercises the
+        // waiting a caller has to be ready for.
+        for i in 0..12u32 {
+            while conn.send_reliable(&i.to_le_bytes()).is_err() {
+                conn.flush(Duration::from_secs(2))?;
+            }
+        }
+        conn.flush(Duration::from_secs(2))?;
+
         println!(
-            "reliable: acknowledged, retransmit timeout now {} ms (window {})",
+            "reliable: acknowledged, retransmit timeout now {} ms (opens at {}, memory bound {})",
             conn.rto_ms(),
+            fectp::INITIAL_CWND,
             fectp::MAX_UNACKED
         );
         Ok(())

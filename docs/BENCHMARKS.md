@@ -355,17 +355,21 @@ exempt: this measures data delivery, not connection setup.
 
 | loss | time | vs no loss | throughput |
 |---|---|---|---|
-| 0% | 3.69 ms | — | 67.7 MiB/s |
-| 1% | 61.80 ms | 17x | 4.0 MiB/s |
-| 5% | 261.89 ms | 71x | 1.0 MiB/s |
-| 10% | 357.04 ms | 97x | 0.7 MiB/s |
+| 0% | 4.14 ms | — | 60.4 MiB/s |
+| 1% | 60.73 ms | 15x | 4.1 MiB/s |
+| 5% | 264.85 ms | 64x | 0.9 MiB/s |
+| 10% | 187.15 ms | 45x | 1.3 MiB/s |
 
 **1% loss costs an order of magnitude.** Nothing is resent until a
 retransmission timer fires, and that timer has a 20 ms floor against a loopback
 round trip of about 30 µs — so a single loss costs on the order of a thousand
 round trips. No protocol tuning changes that; only a faster loss signal would,
-and there is none here. There is no congestion response either: the send window
-is 32 whether the path is dropping everything or nothing.
+and there is none here. The congestion window does narrow on these losses
+(D24), but narrowing it does not make a lost fragment arrive sooner.
+
+The loss-free row is about 12% slower than before congestion control, because
+the window now ramps from 4 rather than starting at its memory bound. That is
+the price of the §10 result, and it is stated rather than hidden.
 
 ### The bug this found
 
@@ -453,22 +457,31 @@ A 256 KiB message through a rate-limited link with a finite queue.
 
 | bottleneck | time | queue overflow | goodput |
 |---|---|---|---|
-| 10 Mbit/s, 64 KiB queue | 307.24 ms | 2.5% (8/324) | 0.81 MiB/s |
-| 10 Mbit/s, 32 KiB queue | 227.84 ms | 2.5% (6/236) | 1.10 MiB/s |
-| 10 Mbit/s, 8 KiB queue | 279.13 ms | 10.2% (26/255) | 0.90 MiB/s |
-| 1 Mbit/s, 8 KiB queue | 2443.81 ms | 46.5% (218/469) | 0.10 MiB/s |
+| 10 Mbit/s, 64 KiB queue | 232.72 ms | 0.0% (0/234) | 1.07 MiB/s |
+| 10 Mbit/s, 32 KiB queue | 229.10 ms | 2.1% (5/237) | 1.09 MiB/s |
+| 10 Mbit/s, 8 KiB queue | 263.79 ms | 13.3% (36/271) | 0.95 MiB/s |
+| 1 Mbit/s, 8 KiB queue | 2314.98 ms | 3.9% (10/257) | 0.11 MiB/s |
 
-There is no congestion control: the send window stays at 32 whatever the path
-is doing, so the sender keeps offering frames that a full queue then drops.
-**Those drops are the sender's own doing**, and each is paid for afterwards by a
-retransmission timer. At 1 Mbit/s nearly half of everything sent is discarded
-before it reaches the far side.
+The overflow column counts drops the sender caused itself: frames offered to a
+queue that was already full, each then paid for by a retransmission timer.
+
+**This table is why the protocol has congestion control.** The last row read
+**46.5% (218/469)** when the send window was a fixed 32 whatever the path was
+doing — nearly half of everything sent was discarded before reaching the far
+side, and the link carried it anyway. The window now opens at 4 and widens only
+as acknowledgements arrive, so a sender that has learnt nothing about a path
+does not put a full burst into it (D24).
+
+Goodput barely moved, because the bottleneck rate is the bottleneck. What
+changed is how much of the link is spent on datagrams that will be dropped: the
+total offered fell from 469 to 257.
 
 A first draft of this section reasoned that a queue larger than one window —
 32 frames, about 38 KiB — could not be made to overflow. The 64 KiB row
-disproves it: retransmissions are offered *on top of* the window, so the burst
+disproved it: retransmissions are offered *on top of* the window, so the burst
 is not bounded by it. The run-to-run spread on the middle two rows is wide;
-only the 1 Mbit/s row is far enough outside it to lean on.
+only the 1 Mbit/s row is far enough outside it to lean on, and it holds across
+runs at 2.4-4.7%.
 
 ### A rebinding NAT ends the session
 

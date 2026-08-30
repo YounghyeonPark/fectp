@@ -549,7 +549,6 @@ These are unimplemented, not overlooked.
 
 | Gap | Consequence | Notes |
 |---|---|---|
-| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. Measured against a 1 Mbit/s link with an 8 KiB queue, 46% of datagrams offered are dropped by the full queue and then recovered by timer (BENCHMARKS.md §10). |
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
 | **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
@@ -785,6 +784,54 @@ numbers mean nothing without LTO, size optimisation and section garbage
 collection all on. A conformance test pins the structure sizes, so a change
 that quietly doubles what a constrained peer must hold fails a test rather than
 someone's board.
+
+## D24 — The send window answers to the path, not just to memory
+
+**Problem**: `MAX_IN_FLIGHT` bounded how many messages could be outstanding, and
+it was described as "crude flow control". Measured, it was not flow control at
+all. Against a 1 Mbit/s link with an 8 KiB queue, **46.5% of everything the
+sender offered was dropped by the full queue** and then recovered by a
+retransmission timer (BENCHMARKS.md §10). The sender had no way to learn that
+the path could not take what it was giving it.
+
+The gap is easy to mistake for a small one, because the bound *looks* like a
+window. It is not: it bounds memory, which is a property of this host, and says
+nothing about the path.
+
+**Decision**: a congestion window sits in front of the slot count, and
+`register` refuses when it is full. It opens at 4 messages, doubles per round
+trip while below a threshold, then grows by one message per round trip; a
+retransmission timer firing halves the threshold and collapses the window to 2.
+
+Two details are forced by what this protocol already is.
+
+**The loss signal is the timer alone.** There is no duplicate-acknowledgement
+path, because an acknowledgement here reports the whole receive window rather
+than repeating the last in-order identifier — the same property that makes
+losing an acknowledgement nearly free (BENCHMARKS.md §11). So the only signal
+available is the severe one, and the response is the severe one to match.
+
+**The window is fixed-point, not floating.** Congestion avoidance grows by a
+fraction of a message per acknowledgement, and the core targets
+microcontrollers that may have no FPU. One counter is not worth a soft-float
+dependency.
+
+Measured, the 1 Mbit/s row falls from 46.5% to 2.4-4.7% across runs, and the
+sender offers 257 datagrams where it used to offer 469.
+
+**What it costs**: a loss-free path is about 12% slower on a large transfer,
+because the window ramps from 4 rather than starting at 32. And
+`send_reliable` now fails with `WindowFull` sooner and less predictably — after
+four messages on a new connection rather than thirty-two. That is not a
+regression to hide: a sender that must sometimes wait is what congestion
+control *is*, and `flush` is how it waits.
+
+This is one algorithm, not the right one for every path. It is loss-based, so
+it fills a bottleneck queue before it backs off — which adds the queueing delay
+this protocol otherwise works to avoid. A delay-based controller would suit the
+latency argument better and is the obvious next thing to try; it is also much
+harder to validate without real paths, and this one is measurably better than
+nothing.
 
 ## Not carried over
 

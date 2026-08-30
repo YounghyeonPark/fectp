@@ -115,7 +115,12 @@ fn reliable_delivery_works_across_threads() {
     std::thread::scope(|s| {
         s.spawn(|| {
             for i in 0..20u32 {
-                conn.send_reliable(&i.to_le_bytes()).expect("send_reliable");
+                // The congestion window starts small and widens as
+                // acknowledgements arrive, so a sender has to be prepared to
+                // wait rather than assuming the memory bound is the limit.
+                while conn.send_reliable(&i.to_le_bytes()).is_err() {
+                    conn.flush(TIMEOUT).expect("flush to make room");
+                }
             }
             conn.flush(TIMEOUT).expect("flush");
         });

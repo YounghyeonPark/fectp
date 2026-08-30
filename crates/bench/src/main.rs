@@ -766,8 +766,9 @@ fn under_loss() {
     note("grows with the fragment count: at 1% loss a 226-fragment message expects");
     note("two stalls, each costing a timeout. Throughput falls by more than an");
     note("order of magnitude for 1% loss, which is the honest cost of recovering");
-    note("by timer alone. Nothing here is a congestion response — the send window");
-    note("is fixed at 32 whether the path is dropping everything or nothing.");
+    note("by timer alone. The congestion window does react to these losses — see");
+    note("section 9 — but narrowing the window does not make a lost fragment");
+    note("arrive any sooner, and the timer is what decides that.");
 }
 
 // ────────────────────────────── 9. reordering, bottlenecks, rebinding ─────
@@ -892,15 +893,18 @@ fn other_things_a_path_does() {
             },
         ]);
     }
-    note("There is no congestion control: the window stays at 32 whatever the path");
-    note("is doing, so the sender keeps offering frames a full queue then drops. The");
-    note("overflow column counts drops the sender caused itself, each one paid for");
-    note("afterwards by a retransmission timer.");
-    note("A first draft of this note reasoned that a queue above one window — 32");
-    note("frames, about 38 KiB — could not be made to overflow. The 64 KiB row");
-    note("disproves it: retransmissions are offered on top of the window, so the");
-    note("burst is not bounded by it. Treat these as one host's figures; the run to");
-    note("run spread on the middle rows is wide.");
+    note("The overflow column counts drops the sender caused itself: frames offered");
+    note("to a queue that was already full, each then paid for by a retransmission");
+    note("timer. This table is why congestion control exists here — it used to read");
+    note("46.5% on the last row, when the send window was a fixed 32 whatever the");
+    note("path was doing.");
+    note("The window now opens at 4 and widens only as acknowledgements arrive, so");
+    note("a sender that has learnt nothing about a path does not put a full burst");
+    note("into it. Goodput barely moves, because the bottleneck rate is the");
+    note("bottleneck — what changes is how much of the link is spent on datagrams");
+    note("that will be dropped.");
+    note("Treat these as one host's figures: the run-to-run spread on the middle");
+    note("rows is wide, and only the last one is far enough outside it to lean on.");
     println!();
 
     // ── a rebinding NAT ──────────────────────────────────────────────────

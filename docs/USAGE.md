@@ -202,9 +202,24 @@ then does neither will never retransmit.
 an earlier one is still in flight. Holding it back would be head-of-line
 blocking. If you need order, put a sequence number in your own payload.
 
-**The window is bounded** at 32 unacknowledged messages (`fectp::MAX_UNACKED`).
-Past that, `send_reliable` fails with `Error::Protocol(WindowFull)`; call
-`flush`, or send that message unreliably.
+**The window is bounded, and it moves.** Two limits apply: `fectp::MAX_UNACKED`
+(32) bounds memory and never changes, and a congestion window bounds what the
+path has shown it can carry. The second is the tighter one — it opens at
+`fectp::INITIAL_CWND` (4) on a new connection, widens as acknowledgements
+arrive, and collapses when a message times out.
+
+So `send_reliable` fails with `Error::Protocol(WindowFull)` sooner than the
+memory bound suggests, and how soon depends on the path. Handle it:
+
+```rust
+while conn.send_reliable(&payload).is_err() {
+    conn.flush(Duration::from_secs(2))?;   // wait for room
+}
+```
+
+A sender that must sometimes wait is what congestion control is. Without it,
+against a 1 Mbit/s link, 46% of what this protocol sent was dropped by a full
+queue before it reached the far side.
 
 ```rust
 println!("{} still in flight", conn.unacknowledged());

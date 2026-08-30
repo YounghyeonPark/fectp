@@ -199,13 +199,21 @@ fn the_in_flight_window_is_bounded() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    for _ in 0..fectp::MAX_UNACKED {
+
+    // Nothing is acknowledged, so the congestion window never widens past what
+    // it opens at. That is the bound now, and it is below the memory bound.
+    let opened = fectp::INITIAL_CWND;
+    for _ in 0..opened {
         client.send_reliable(b"never arrives").expect("send");
     }
-    assert_eq!(client.unacknowledged(), fectp::MAX_UNACKED);
+    assert_eq!(client.unacknowledged(), opened);
     assert!(
         client.send_reliable(b"one too many").is_err(),
-        "the window must bound memory rather than growing without limit"
+        "the window must bound sending rather than growing without limit"
+    );
+    assert!(
+        opened <= fectp::MAX_UNACKED,
+        "the congestion window must never exceed the memory bound"
     );
 }
 

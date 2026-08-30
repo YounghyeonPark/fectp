@@ -285,14 +285,44 @@ pub enum Due {
     GaveUp(MessageId),
 }
 
+/// Fixed-point scale for the congestion window.
+///
+/// The window grows by a fraction of a message per acknowledgement during
+/// congestion avoidance, which needs sub-integer resolution; floating point in
+/// a `no_std` core that targets microcontrollers without an FPU is not worth
+/// the trouble for one counter.
+const CWND_SCALE: u32 = 256;
+
+/// Messages the window starts at.
+///
+/// Small on purpose: a sender that opens at its memory bound puts a full burst
+/// into a path it knows nothing about, which is exactly what BENCHMARKS.md §10
+/// measured filling a bottleneck queue.
+pub const INITIAL_CWND: usize = 4;
+
+/// Messages the window will not shrink below.
+///
+/// Below two there is nothing left to halve and the sender stalls waiting for
+/// a timer on every message.
+pub const MIN_CWND: usize = 2;
+
 /// The sender's window of unacknowledged messages.
 ///
 /// Holds only metadata. The message bytes stay with the caller, which is what
 /// lets this be a fixed-size structure with no allocator.
+///
+/// Two limits apply to what may be outstanding. The slot count bounds memory
+/// and never moves. The congestion window bounds what the *path* is willing to
+/// carry, opens small, and is the tighter of the two until acknowledgements
+/// widen it.
 pub struct RetransmitQueue {
     slots: [Option<InFlight>; MAX_IN_FLIGHT],
     rto: Rto,
     next_id: MessageId,
+    /// Congestion window in messages, scaled by [`CWND_SCALE`].
+    cwnd: u32,
+    /// Where slow start ends and congestion avoidance begins, same scale.
+    ssthresh: u32,
 }
 
 impl RetransmitQueue {
@@ -302,7 +332,55 @@ impl RetransmitQueue {
             slots: [None; MAX_IN_FLIGHT],
             rto: Rto::new(),
             next_id: 0,
+            cwnd: INITIAL_CWND as u32 * CWND_SCALE,
+            ssthresh: MAX_IN_FLIGHT as u32 * CWND_SCALE,
         }
+    }
+
+    /// How many messages may be outstanding right now.
+    ///
+    /// The smaller of the congestion window and the slot count. The slots bound
+    /// memory and never move; the window is what the path is telling us it can
+    /// take.
+    pub fn window(&self) -> usize {
+        let messages = (self.cwnd / CWND_SCALE) as usize;
+        messages.clamp(1, MAX_IN_FLIGHT)
+    }
+
+    /// Widens the window by one acknowledgement's worth.
+    ///
+    /// Doubling per round trip while below the threshold, then one message per
+    /// round trip above it — the standard shape, with the round trip implicit
+    /// in how many acknowledgements arrive during one.
+    fn on_delivery(&mut self) {
+        let ceiling = MAX_IN_FLIGHT as u32 * CWND_SCALE;
+        self.cwnd = if self.cwnd < self.ssthresh {
+            self.cwnd.saturating_add(CWND_SCALE)
+        } else {
+            // += 1/cwnd, in the same fixed point.
+            let step = (CWND_SCALE * CWND_SCALE / self.cwnd.max(1)).max(1);
+            self.cwnd.saturating_add(step)
+        }
+        .min(ceiling);
+    }
+
+    /// Halves the window, because something was lost.
+    ///
+    /// The only loss signal here is a retransmission timer, which in TCP terms
+    /// is the severe one — there is no duplicate-acknowledgement path, because
+    /// an acknowledgement reports the whole receive window rather than
+    /// repeating the last in-order identifier. So this collapses the window
+    /// rather than merely halving it, and `ssthresh` remembers where to stop
+    /// growing quickly next time.
+    fn on_loss(&mut self) {
+        let floor = MIN_CWND as u32 * CWND_SCALE;
+        self.ssthresh = (self.cwnd / 2).max(floor);
+        self.cwnd = floor;
+    }
+
+    /// The congestion window in messages, for tests and for reporting.
+    pub fn congestion_window(&self) -> usize {
+        self.window()
     }
 
     /// Number of messages awaiting acknowledgement.
@@ -346,6 +424,14 @@ impl RetransmitQueue {
             }
         }
 
+        // The congestion window bounds this before the slots do. Without it a
+        // sender offers a full burst to a path it knows nothing about, and
+        // whatever the bottleneck cannot buffer it drops — measured at 46% of
+        // everything sent on a 1 Mbit/s link with an 8 KiB queue.
+        if self.in_flight() >= self.window() {
+            return Err(Error::WindowFull);
+        }
+
         let slot = self
             .slots
             .iter_mut()
@@ -387,6 +473,7 @@ impl RetransmitQueue {
     /// retransmitted (Karn's algorithm).
     pub fn on_ack(&mut self, ack: &Ack, now_ms: u64, acked: &mut [MessageId]) -> usize {
         let mut count = 0;
+        let mut delivered = 0usize;
         for slot in self.slots.iter_mut() {
             let Some(entry) = slot else { continue };
             if !ack.covers(entry.id) {
@@ -401,6 +488,11 @@ impl RetransmitQueue {
             }
             count += 1;
             *slot = None;
+            delivered += 1;
+        }
+        // Outside the loop over `slots`, which holds a borrow of `self`.
+        for _ in 0..delivered {
+            self.on_delivery();
         }
         count.min(acked.len())
     }
@@ -413,6 +505,7 @@ impl RetransmitQueue {
     /// been removed.
     pub fn poll(&mut self, now_ms: u64, out: &mut [Due]) -> usize {
         let mut count = 0;
+        let mut lost = false;
         for slot in self.slots.iter_mut() {
             let Some(entry) = slot else { continue };
             if entry.deadline_ms > now_ms {
@@ -430,8 +523,12 @@ impl RetransmitQueue {
                 entry.deadline_ms =
                     now_ms.saturating_add(u64::from(self.rto.with_backoff(entry.retries)));
                 out[count] = Due::Retransmit(entry.id);
+                lost = true;
             }
             count += 1;
+        }
+        if lost {
+            self.on_loss();
         }
         count
     }

@@ -260,15 +260,87 @@ fn only_the_lost_message_is_resent() {
 #[test]
 fn the_window_is_bounded() {
     let mut queue = RetransmitQueue::new();
-    for _ in 0..MAX_IN_FLIGHT {
+
+    // Two bounds apply, and the congestion window is the tighter of them until
+    // acknowledgements widen it. Nothing is acknowledged here, so it stays
+    // where it opened.
+    let opened = queue.congestion_window();
+    assert!(opened <= MAX_IN_FLIGHT);
+    for _ in 0..opened {
         queue.register(0).expect("register");
     }
-    assert!(queue.is_full());
     assert_eq!(
         queue.register(0),
         Err(Error::WindowFull),
-        "the window must bound memory, not grow without limit"
+        "the window must bound sending, not grow without limit"
     );
+}
+
+#[test]
+fn the_congestion_window_opens_on_delivery_and_collapses_on_loss() {
+    let mut queue = RetransmitQueue::new();
+    let opened = queue.congestion_window();
+
+    // Acknowledging what is in flight widens the window, so a path that is
+    // carrying everything offered gets more offered to it.
+    for _ in 0..opened {
+        queue.register(0).expect("register");
+    }
+    for id in 0..opened as u32 {
+        acked(
+            &mut queue,
+            &Ack {
+                highest: id,
+                bitmap: 0,
+            },
+            1,
+        );
+    }
+    let widened = queue.congestion_window();
+    assert!(
+        widened > opened,
+        "delivery must widen the window: {opened} -> {widened}"
+    );
+
+    // A retransmission timer firing is the only loss signal there is, and it
+    // is the severe one — there are no duplicate acknowledgements to read,
+    // because an acknowledgement reports the whole receive window rather than
+    // repeating the last in-order identifier.
+    queue.register(0).expect("register");
+    drain(&mut queue, u64::from(INITIAL_RTO_MS) * 4);
+    assert!(
+        queue.congestion_window() < widened,
+        "a timeout must narrow the window"
+    );
+}
+
+#[test]
+fn the_congestion_window_never_exceeds_the_memory_bound() {
+    let mut queue = RetransmitQueue::new();
+
+    // Acknowledge far more than the slots hold. The window may open as wide as
+    // the path allows, but the slots are the memory it is allowed to use.
+    for round in 0..64u32 {
+        let room = queue.congestion_window() - queue.in_flight();
+        for _ in 0..room {
+            queue.register(u64::from(round)).expect("register");
+        }
+        for id in 0..MAX_IN_FLIGHT as u32 * 2 {
+            acked(
+                &mut queue,
+                &Ack {
+                    highest: id,
+                    bitmap: 0,
+                },
+                u64::from(round) + 1,
+            );
+        }
+        assert!(
+            queue.congestion_window() <= MAX_IN_FLIGHT,
+            "window {} exceeded the {MAX_IN_FLIGHT}-slot bound",
+            queue.congestion_window()
+        );
+    }
 }
 
 #[test]

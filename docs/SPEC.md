@@ -653,11 +653,17 @@ A sender SHOULD:
 6. Derive that timeout from measured round trips (RFC 6298 is suitable) and
    ignore samples from retransmitted messages, whose acknowledgement is
    ambiguous (Karn's algorithm).
-7. Bound how many messages may be unacknowledged at once. This caps memory and
-   serves as crude flow control.
+7. Bound how many messages may be unacknowledged at once. This caps memory.
+8. Bound it again by what the path has shown it can carry, opening small and
+   widening only as acknowledgements arrive. The memory bound is a property of
+   the sender's host and says nothing about the path; treating it as flow
+   control means offering a full window to a link that may not take it, and
+   whatever the bottleneck cannot buffer is dropped. Measured, that was 46% of
+   everything sent on a 1 Mbit/s link.
 
-Points 5 to 7 are sender-side quality of implementation: they are not
-observable by a conforming receiver. Point 4 is not — a receiver conforming to
+Points 5 to 8 are sender-side quality of implementation: they are not
+observable by a conforming receiver, and this specification does not fix an
+algorithm for point 8. Point 4 is not — a receiver conforming to
 rules 2 and 3 will silently fail to deliver what a sender violating it sends.
 
 ### 5.6 Fragmented messages
