@@ -7,7 +7,7 @@ You hand it bytes, the peer gets those bytes. Encryption, framing, and the
 decision of whether compressing is even worth the CPU all happen underneath.
 
 ```rust
-conn.send(b"hello")?;
+conn.send(b"hello", PayloadType::Opaque)?;
 let n = conn.recv(&mut buf)?;
 ```
 
@@ -87,15 +87,23 @@ Against raw UDP and TCP + TLS 1.3, on loopback:
 | **FECTP, encrypted** | **35.8 µs** | **+13%** |
 | TCP + TLS 1.3 | 64.4 µs | +104% |
 
-But the round-trip table above is what actually decides anything: at 150 ms of
-path latency, FECTP gets a first answer 300 ms sooner than TCP + TLS, and
-every microsecond in this table put together is a rounding error beside that.
+The round-trip table above matters more than this one, **on short
+connections**. At 150 ms of path latency FECTP gets a first answer 300 ms
+sooner than TCP + TLS — but that is 300 ms once, per connection. Spread over
+ten thousand messages it is 30 µs each, which is the same order as the
+difference this table measures; over a million it is nothing.
+
+So: decisive for a sensor that wakes, reports and sleeps. Close to irrelevant
+for a connection that opens once and streams.
 
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
 per-message overhead, compression against gzip and Zstandard, behaviour under
 packet loss, reordering, jitter, a bottleneck, a rebinding NAT and a crowded
-endpoint, and an honest account of the encryption trade-offs. It has also changed the implementation four times,
-most seriously when injecting loss found a bug that lost messages outright.
+endpoint, and an honest account of the encryption trade-offs.
+
+It has changed the implementation five times, most seriously when injecting
+packet loss found a bug that lost messages outright, and it records the
+measurements it got wrong before it got them right.
 
 ---
 
@@ -151,14 +159,15 @@ let mut node = Endpoint::bind("0.0.0.0:4433", identity)?;
 
 loop {
     match node.poll(Some(Duration::from_millis(100)))? {
-        Event::Message { peer, data } => node.send(peer, &data)?,   // echo
+        Event::Message { peer, data } =>
+            node.send(peer, &data, PayloadType::Opaque)?,   // echo
         _ => {}
     }
 }
 
 // ── Dialling side ─────────────────────────────────────────────────
 let mut conn = Connection::connect("host:4433", &public_key, &Identity::generate())?;
-conn.send(b"hello")?;
+conn.send(b"hello", PayloadType::Opaque)?;
 
 let mut buf = vec![0u8; 2048];
 let n = conn.recv(&mut buf)?;
@@ -289,7 +298,7 @@ no socket per peer. Try it:
 ## Messages larger than a frame
 
 ```rust
-conn.send_reliable(&recording)?;        // any size, no limit to check
+conn.send_reliable(&recording, PayloadType::Opaque)?;   // any size
 conn.flush(Duration::from_secs(10))?;   // wait for it to arrive
 ```
 
@@ -305,8 +314,8 @@ nine times out of ten.
 ## Reliability, per message
 
 ```rust
-conn.send(b"telemetry")?;             // fire and forget
-conn.send_reliable(b"command")?;      // resent until acknowledged
+conn.send(b"telemetry", PayloadType::Opaque)?;          // fire and forget
+conn.send_reliable(b"command", PayloadType::Opaque)?;   // resent until acknowledged
 conn.flush(Duration::from_secs(2))?;  // wait for what is outstanding
 ```
 
@@ -325,30 +334,35 @@ encrypted payload is what lets the receiver recognise the duplicate.
 ## Typed payloads
 
 A general-purpose compressor sees only bytes. Tell it the shape and a transform
-can run first:
+runs first:
 
 ```rust
-conn.send_typed(&samples, PayloadType::I16 { channels: 4 })?;
-
-// Or, if the connection always carries the same shape:
-conn.send(&samples)?;
+let shape = PayloadType::I16 { channels: 4 };   // 4 channels of 16-bit ADC
+conn.send(&samples, shape)?;
+conn.send(b"a status line", PayloadType::Opaque)?;   // just bytes
 ```
 
-On a 4-channel block of slowly varying `i16` — ordinary instrument data:
+On 8 KiB of 4-channel, slowly varying `i16` — ordinary instrument data:
 
 | | Bytes on the wire |
 |---|---|
-| Zstandard on the raw bytes | 4096 — **no saving at all** |
-| Declared as `I16 { channels: 4 }` | 2055 — **2x** |
+| as `Opaque`, Zstandard alone | 7314 — **1.12x** |
+| declared as `I16 { channels: 4 }` | 2367 — **3.46x** |
 
 Interleaving is why: consecutive bytes come from different channels, so a
 byte-oriented compressor finds nothing. Splitting by channel first exposes the
-redundancy that was there all along.
+redundancy that was there all along. On monotonic `i32` counters the same trick
+reaches 292x.
+
+The shape is named at every send rather than set once on the connection. A
+setting would mean a line's behaviour depended on a call somewhere else, and
+forgetting it would cost compression **silently** — no error, no warning.
+`PayloadType` is two bytes and `Copy`, so bind it to a local and pass it.
 
 Every codec is **lossless** — a payload comes back byte for byte, and samples
 one bit apart stay distinct. The transforms are plain integer code in the
-`no_std` core, so a peer with no room for a Zstandard decoder still gets that
-2x. Declaring the wrong shape costs compression, never correctness.
+`no_std` core, so a peer with no room for a Zstandard decoder still gets 2x on
+that data. Declaring the wrong shape costs compression, never correctness.
 
 Codecs are a registry, not a fixed set: supporting a new data type means writing
 one transform — see [docs/ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md).
@@ -379,14 +393,23 @@ being replayed. Always keep the full-handshake path as a fallback.
 
 ## Status
 
-**Working:** handshake, 0-RTT, authenticated framing, replay protection,
-reorder tolerance, capability negotiation, per-message reliable delivery,
-session resumption, many peers on one socket, outbound dialling on that same
-socket, three security modes, optional length-masking padding, typed payload
-codecs, optional Zstandard compression.
+**Working:** handshake, data sent with the handshake, authenticated framing,
+replay protection, reorder tolerance, capability negotiation, per-message
+reliable delivery, messages split across frames, congestion control, session
+resumption, many peers on one socket, outbound dialling on that same socket,
+three security modes, optional length-masking padding, typed payload codecs,
+optional Zstandard compression.
 
-**Not built:** congestion control, ordered delivery, address migration, ticket
+**Not built:** ordered delivery, path MTU discovery, address migration, ticket
 expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
+[DECISIONS.md](docs/DECISIONS.md) lists each with what it would cost.
+
+**Not audited.** This is `#![forbid(unsafe_code)]`, cross-validated against an
+independent Noise implementation, and has a conformance suite pinning every
+normative constant — none of which is a substitute for review by someone who
+breaks protocols for a living. Injecting packet loss found a bug that lost
+messages outright while 179 tests passed, which is the honest measure of what
+testing alone catches.
 
 189 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
@@ -449,7 +472,8 @@ cargo run -p fectp --example mesh          --features compress   # three peers, 
 | [SPEC.md](docs/SPEC.md) | Normative wire format — everything an independent implementation needs. |
 | [DECISIONS.md](docs/DECISIONS.md) | Why the protocol is shaped this way, and where it departs from the original design note. |
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data type. |
-| [BENCHMARKS.md](docs/BENCHMARKS.md) | Measured against UDP, TLS, gzip and Zstandard — including where it loses. |
+| [BENCHMARKS.md](docs/BENCHMARKS.md) | Measured against UDP, TLS, gzip and Zstandard, and under loss — including where it loses. |
+| [crates/footprint](crates/footprint/README.md) | What it costs on a microcontroller, linked rather than estimated. |
 
 ---
 

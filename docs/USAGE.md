@@ -93,7 +93,8 @@ let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;
 
 loop {
     match server.poll(Some(Duration::from_millis(100)))? {
-        Event::Message { peer, data } => server.send(peer, &data)?,   // echo
+        Event::Message { peer, data } =>
+            server.send(peer, &data, PayloadType::Opaque)?,   // echo
         _ => {}
     }
 }
@@ -105,7 +106,7 @@ Client:
 use fectp::{Connection, Identity};
 
 let mut conn = Connection::connect("server:4433", &server_public, &Identity::generate())?;
-conn.send(b"hello")?;
+conn.send(b"hello", PayloadType::Opaque)?;
 
 let mut buf = vec![0u8; 2048];
 let n = conn.recv(&mut buf)?;
@@ -116,17 +117,15 @@ let n = conn.recv(&mut buf)?;
 
 ## Timeouts
 
-Opening a connection needs none of your attention: every way of doing it gives
-up after `fectp::HANDSHAKE_TIMEOUT` (5 seconds). That is not a convenience —
-a responder that cannot authenticate a frame drops it silently, so a handshake
-aimed at an unreachable peer or the wrong key has nothing to wait for and would
-otherwise wait for ever.
+There are two, and only one of them is yours to set.
 
-`set_read_timeout` is a separate thing: it bounds `recv` on an established
-connection, and defaults to blocking.
+**Opening a connection** needs no attention: every way of doing it gives up
+after `fectp::HANDSHAKE_TIMEOUT` (5 seconds). That is not a convenience. A peer
+that cannot authenticate a frame drops it silently — there is no reply and no
+error on the wire — so a handshake aimed at an unreachable address or the wrong
+key has nothing at all to wait for, and without a deadline would wait for ever.
 
-
-`recv` blocks forever unless a timeout is set. Set one:
+**`recv` blocks** until something arrives, unless you say otherwise:
 
 ```rust
 use std::time::Duration;
@@ -139,20 +138,13 @@ match conn.recv(&mut buf) {
 }
 ```
 
-`connect` blocks until the server answers. If the server is unreachable, or you
-have the wrong public key, it never will — the server cannot authenticate the
-frame, so it simply drops it. Use the timeout variant when that matters:
-
-```rust
-let conn = Connection::connect_with_timeout(
-    addr, &server_public, &identity, Duration::from_secs(2),
-)?;
-```
+`flush` takes its own timeout as an argument, since waiting is the whole point
+of it.
 
 ## Sending data
 
 ```rust
-conn.send(b"fire and forget")?;      // no acknowledgement, no retransmission
+conn.send(b"fire and forget", PayloadType::Opaque)?;   // no acknowledgement
 ```
 
 `send` returns once the datagram is handed to the kernel. It does not wait for
@@ -215,7 +207,7 @@ Send only what is safe to repeat. A sensor reading is; "open the valve" is not.
 ## Reliable delivery
 
 ```rust
-conn.send_reliable(b"this must arrive")?;
+conn.send_reliable(b"this must arrive", PayloadType::Opaque)?;
 conn.flush(Duration::from_secs(2))?;     // wait for acknowledgement
 ```
 
@@ -239,7 +231,7 @@ So `send_reliable` fails with `Error::Protocol(WindowFull)` sooner than the
 memory bound suggests, and how soon depends on the path. Handle it:
 
 ```rust
-while conn.send_reliable(&payload).is_err() {
+while conn.send_reliable(&payload, PayloadType::Opaque).is_err() {
     conn.flush(Duration::from_secs(2))?;   // wait for room
 }
 ```
@@ -261,7 +253,7 @@ after exhausting their retries, or if the timeout expires first.
 There is no separate call and no size to check:
 
 ```rust
-conn.send_reliable(&recording)?;      // any size
+conn.send_reliable(&recording, PayloadType::Opaque)?;   // any size
 conn.flush(Duration::from_secs(10))?; // wait for it to arrive
 ```
 
@@ -404,7 +396,8 @@ loop {
         Event::Connected { peer, initiated, .. } => {
             println!("{peer:?} ({})", if initiated { "we dialled" } else { "they dialled" });
         }
-        Event::Message { peer, data } => node.send(peer, &data)?,
+        Event::Message { peer, data } =>
+            node.send(peer, &data, PayloadType::Opaque)?,
         Event::ConnectFailed { peer } => println!("{peer:?} never answered"),
         _ => {}
     }
@@ -447,7 +440,7 @@ loop {
             println!("{peer:?} connected (resumed: {resumed}), 0-RTT: {zero_rtt:?}");
         }
         Event::Message { peer, data } => {
-            server.send(peer, &data)?;              // echo
+            server.send(peer, &data, PayloadType::Opaque)?;   // echo
         }
         Event::Idle => {}
         _ => {}                                     // `Event` is non-exhaustive
@@ -461,9 +454,8 @@ when idle.
 Per-peer operations take the `PeerId`:
 
 ```rust
-server.send_reliable(peer, b"command")?;
-server.send_typed(peer, &samples, PayloadType::I16 { channels: 4 })?;
-server.set_default_payload_type(peer, PayloadType::I16 { channels: 4 });
+server.send(peer, &samples, PayloadType::I16 { channels: 4 })?;
+server.send_reliable(peer, b"command", PayloadType::Opaque)?;
 
 let who = server.peer_public_key(peer);      // Option<&[u8; 32]>
 let outstanding = server.unacknowledged(peer);
@@ -496,15 +488,17 @@ defence against those is that FECTP compresses every message independently.
 
 ```rust
 pub enum Error {
+    Closed,                      // the connection is over
     Io(std::io::Error),          // socket failure, or a read timeout
     Protocol(fectp_core::Error), // protocol-level failure
     Decompress,                  // a compressed payload could not be decoded
     PayloadTooLarge { len, limit },
-    Handshake,
+    Handshake,                   // the peer never answered, or answered wrongly
     Unacknowledged { count },    // reliable messages were abandoned
     ReliabilityUnsupported,      // the peer does not implement it
     UnknownTicket,               // stale or already-redeemed resumption ticket
-    UnknownPeer,                 // no such connected peer (server only)
+    UnknownPeer,                 // no such connected peer (endpoint only)
+    MissingPeerKey,              // public-key mode needs the peer's key
 }
 ```
 
@@ -568,11 +562,13 @@ Cortex-M4 with 256 KiB of flash that is 9% of it.
 | Reliable messages never arrive | Nothing is calling `recv` or `flush` to drive retransmission. |
 | `recv` hangs forever | No read timeout set. |
 | Resumption always fails | The ticket was already used — store the new one after every connection. |
-| `connect` hangs | Wrong server public key: the server cannot authenticate the frame, so it drops it silently. Use `connect_with_timeout`. |
-| Compression saves nothing | The payload is small, already compressed, or the peer never advertised `CAP_ZSTD`. Declare a `PayloadType` if the data is structured. |
+| `connect` fails with no obvious reason | Wrong peer public key. The peer cannot authenticate the frame so it drops it silently — there is no reply and no error on the wire, only `HANDSHAKE_TIMEOUT` expiring. |
+| Compression saves nothing | The payload is small, already compressed, or the peer never advertised `CAP_ZSTD`. Name a `PayloadType` other than `Opaque` if the data is structured. |
 | `match` on `Event` will not compile | `Event` is `#[non_exhaustive]`; add a `_` arm. |
 | Client and server never connect | They are in different modes. Modes do not interoperate, by design. |
 | `send` after `connect` fails | An `Endpoint` dial is not finished until `Event::Connected` arrives; poll first. |
+| `send_reliable` fails early on a new connection | The congestion window opens at 4, not at the 32-message memory bound. Call `flush` and retry. |
+| A large `send_reliable` never finishes | Nothing is calling `recv` or `flush`, so the queued fragments are never fed out. |
 | `resumption_ticket()` is `None` | Plaintext sessions have nothing to resume. |
 
 ## The whole list
