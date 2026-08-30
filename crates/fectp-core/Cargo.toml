@@ -1,0 +1,25 @@
+[package]
+name = "fectp-core"
+description = "FECTP core: no_std Noise_IK_25519_ChaChaPoly_BLAKE2s session layer and wire format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+blake2.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+rand_core.workspace = true
+
+[features]
+default = []
+# Enables std-only conveniences (error impl, Vec-based helpers).
+std = ["chacha20poly1305/std", "rand_core/std"]
+
+[dev-dependencies]
+snow = "0.9"
+rand_core = { version = "0.6", features = ["getrandom"] }

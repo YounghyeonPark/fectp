@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/fectp-core", "crates/fectp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+repository = "https://github.com/younghyeonpark/fectp"
+authors = ["Younghyeon Park <ypark.dev@gmail.com>"]
+
+[workspace.dependencies]
+x25519-dalek     = { version = "2", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.10", default-features = false }
+blake2           = { version = "0.10", default-features = false }
+zeroize          = { version = "1", default-features = false }
+subtle           = { version = "2", default-features = false }
+rand_core        = { version = "0.6", default-features = false }

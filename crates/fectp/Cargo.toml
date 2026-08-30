@@ -1,0 +1,17 @@
+[package]
+name = "fectp"
+description = "FECTP: fast encrypted transport - std API with UDP transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fectp-core = { path = "../fectp-core", features = ["std"] }
+rand_core = { workspace = true, features = ["std", "getrandom"] }
+zstd = { version = "0.13", optional = true }
+
+[features]
+default = []
+compress = ["dep:zstd"]
