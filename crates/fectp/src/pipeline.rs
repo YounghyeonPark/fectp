@@ -5,8 +5,12 @@
 //! differs. This module holds that shared middle so the two cannot drift
 //! apart.
 
+use std::collections::VecDeque;
+
 use fectp_core::codec::{CodecHeader, CODEC_HEADER_LEN};
-use fectp_core::fragment::{Fragment, FRAGMENT_LEN, MAX_FRAGMENTS, MAX_MESSAGE_LEN};
+use fectp_core::fragment::{
+    fragments_needed, Fragment, FRAGMENT_LEN, MAX_FRAGMENTS, MAX_MESSAGE_LEN,
+};
 use fectp_core::frame::{FrameType, FLAG_COMPRESSED, HEADER_LEN};
 use fectp_core::reliability::{
     Ack, DedupWindow, Due, MessageId, RetransmitQueue, MAX_IN_FLIGHT, MESSAGE_ID_LEN,
@@ -17,6 +21,39 @@ use fectp_core::PublicKey;
 use crate::compress::{self, PayloadType};
 use crate::link::Link;
 use crate::{Error, Result};
+
+
+/// Messages a peer may have part-sent at once.
+///
+/// Each holds its payload until acknowledged, so this bounds what one peer can
+/// make the sender keep.
+pub const MAX_QUEUED: usize = 4;
+
+/// A message being fed out one fragment at a time.
+///
+/// A payload larger than a frame cannot be handed to the kernel in one go: the
+/// congestion window is measured in a handful of messages, so most of it has to
+/// wait for acknowledgements. Keeping it here rather than blocking the caller
+/// is what lets `send_reliable` accept any size and still return promptly.
+pub(crate) struct Queued {
+    message: u32,
+    payload_type: PayloadType,
+    data: Vec<u8>,
+    per_fragment: usize,
+    count: u16,
+    /// Next fragment to hand to the window.
+    next: u16,
+    /// Fragments sent but not yet acknowledged.
+    outstanding: Vec<MessageId>,
+    /// Set when a fragment was given up on, which loses the whole message.
+    lost: bool,
+}
+
+/// What a pass over the outgoing queue finished.
+pub(crate) struct Finished {
+    /// Whether the peer acknowledged every fragment.
+    pub delivered: bool,
+}
 
 /// A reliable message awaiting acknowledgement, kept so it can be resent.
 pub(crate) struct Pending {
@@ -233,6 +270,8 @@ pub(crate) struct Peer {
     pub reassembly: Reassembly,
     /// Identifier for the next fragmented message this side sends.
     pub next_message: u32,
+    /// Messages being fed out fragment by fragment.
+    pub queue: VecDeque<Queued>,
 
     /// Coding scratch space, grown on demand.
     pub primary: Vec<u8>,
@@ -267,6 +306,7 @@ impl Peer {
             abandoned: Vec::new(),
             reassembly: Reassembly::new(),
             next_message: 0,
+            queue: VecDeque::new(),
             primary: vec![0u8; buffer_hint],
             secondary: vec![0u8; buffer_hint],
             coding_misses: 0,
@@ -431,6 +471,138 @@ impl Peer {
         self.primary = primary;
         self.secondary = secondary;
         result
+    }
+
+
+    /// Splits `data` across frames and queues it.
+    ///
+    /// Returns without sending anything; [`drive_queue`](Self::drive_queue)
+    /// does that as the congestion window allows.
+    pub fn queue_message(
+        &mut self,
+        data: &[u8],
+        payload_type: PayloadType,
+        datagram_limit: usize,
+    ) -> Result<()> {
+        if !self.session.peer_capabilities().supports_reliable() {
+            return Err(Error::ReliabilityUnsupported);
+        }
+        if self.queue.len() >= MAX_QUEUED {
+            return Err(Error::Protocol(fectp_core::Error::WindowFull));
+        }
+
+        let per_fragment = self.max_fragment_payload(datagram_limit);
+        let count = fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
+            len: data.len(),
+            limit: MAX_MESSAGE_LEN,
+        })?;
+
+        let message = self.next_message;
+        self.next_message = self.next_message.wrapping_add(1);
+        self.queue.push_back(Queued {
+            message,
+            payload_type,
+            data: data.to_vec(),
+            per_fragment,
+            count,
+            next: 0,
+            outstanding: Vec::new(),
+            lost: false,
+        });
+        Ok(())
+    }
+
+    /// Feeds queued fragments into whatever send window is free.
+    ///
+    /// Returns the outcome of a message that finished during this pass, if one
+    /// did. Only the front message is fed, so a stalled one does not let a
+    /// later one overtake it and confuse which fragments belong to what.
+    pub fn drive_queue<F>(
+        &mut self,
+        now_ms: u64,
+        datagram_limit: usize,
+        tx: &mut [u8],
+        mut send: F,
+    ) -> Result<Option<Finished>>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        // Drained whether or not anything is queued: nothing else reads this,
+        // so leaving it would grow for the life of a peer that loses messages.
+        let lost = core::mem::take(&mut self.abandoned);
+        if self.queue.is_empty() {
+            return Ok(None);
+        }
+
+        {
+            let job = self.queue.front_mut().expect("checked");
+            // Anything given up on takes the whole message with it: the
+            // receiver cannot use the fragments that did arrive.
+            if !lost.is_empty() {
+                if job.outstanding.iter().any(|f| lost.contains(f)) {
+                    job.lost = true;
+                }
+                job.outstanding.retain(|f| !lost.contains(f));
+            }
+        }
+
+        loop {
+            let job = self.queue.front().expect("checked");
+            if job.lost || job.next >= job.count {
+                break;
+            }
+            let id = match self.retransmit.register(now_ms) {
+                Ok(id) => id,
+                // The window is full. Whatever frees it — an acknowledgement,
+                // or a retransmission giving up — brings us back here.
+                Err(fectp_core::Error::WindowFull) => break,
+                Err(e) => return Err(Error::Protocol(e)),
+            };
+
+            let job = self.queue.front().expect("checked");
+            let start = job.next as usize * job.per_fragment;
+            let end = (start + job.per_fragment).min(job.data.len());
+            let chunk = job.data[start..end].to_vec();
+            let payload_type = job.payload_type;
+            let fragment = Fragment {
+                message: job.message,
+                index: job.next,
+                count: job.count,
+            };
+
+            let n = self.seal(&chunk, payload_type, Some(id), Some(fragment), datagram_limit, tx)?;
+            send(&tx[..n])?;
+            self.pending.push(Pending {
+                id,
+                payload_type,
+                data: chunk,
+                fragment: Some(fragment),
+            });
+
+            let job = self.queue.front_mut().expect("checked");
+            job.outstanding.push(id);
+            job.next += 1;
+        }
+
+        // A fragment leaves `pending` when it is acknowledged; the abandoned
+        // ones were taken out above, so what is left is still in flight.
+        let pending = &self.pending;
+        let job = self.queue.front_mut().expect("checked");
+        job.outstanding
+            .retain(|f| pending.iter().any(|p| p.id == *f));
+
+        let done = job.lost || (job.next == job.count && job.outstanding.is_empty());
+        if !done {
+            return Ok(None);
+        }
+        let delivered = !job.lost;
+        self.queue.pop_front();
+        Ok(Some(Finished { delivered }))
+    }
+
+    /// Whether anything is still waiting to be fed out.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
     }
 
     /// Authenticates a frame and works out what it means.

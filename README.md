@@ -288,38 +288,19 @@ no socket per peer. Try it:
 
 ## Messages larger than a frame
 
-`send` refuses a payload above about 1170 bytes, because a datagram past the
-path MTU is cut up by IP — and an IP-fragmented datagram is lost entire if any
-one piece goes missing.
-
-`send_large` cuts the message at the protocol layer instead, where a lost piece
-is retransmitted on its own:
-
 ```rust
-conn.send_large(&recording, Duration::from_secs(10))?;
+conn.send_reliable(&recording)?;        // any size, no limit to check
+conn.flush(Duration::from_secs(10))?;   // wait for it to arrive
 ```
 
-It arrives as one message. Every fragment is reliable, and the send waits for
-acknowledgements — so this returns when the peer actually has the whole thing,
-not when the bytes left the kernel. The ceiling is 1 MiB, because a receiver
-commits memory on the strength of the sender's own fragment count.
+A payload above the frame limit is split across frames, each retransmitted on
+its own, and arrives as one message. There is no separate call and no size for
+you to compare against — the limit depends on what the peer advertised, so you
+could not know it in advance anyway.
 
-An `Endpoint` cannot wait, since it serves many peers from one loop. There
-`send_large` queues the message, `poll` feeds it out, and the outcome arrives
-as `Event::Sent { delivered }`.
-
-## Sending and receiving at once
-
-```rust
-std::thread::scope(|s| {
-    s.spawn(|| loop { conn.recv(&mut buf) });
-    conn.send(b"sent while the other thread is blocked reading")
-})?;
-```
-
-Every method takes `&self`, so a shared reference is all either thread needs —
-no wrapper, no conversion, no clone. The blocking read holds only the receive
-side, so a send never waits behind it.
+`send` stays one frame only: splitting something that cannot be retransmitted
+fails whenever any piece goes missing, which for 200 fragments at 1% loss is
+nine times out of ten.
 
 ## Reliability, per message
 
@@ -408,7 +389,7 @@ codecs, optional Zstandard compression.
 **Not built:** congestion control, ordered delivery, address migration, ticket
 expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
 
-183 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+184 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
 reliable delivery — plus the caller's buffers.
 

@@ -72,7 +72,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
-use fectp_core::fragment::{fragments_needed, Fragment};
 use fectp_core::frame::HEADER_LEN;
 use fectp_core::reliability::MessageId;
 use fectp_core::plain::PlainInitiator;
@@ -84,7 +83,8 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
-pub use endpoint::{Endpoint, Event, PeerId, MAX_QUEUED_LARGE};
+pub use endpoint::{Endpoint, Event, PeerId};
+pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{
@@ -595,7 +595,7 @@ impl Core {
         self.peer.max_payload(self.transport.max_datagram_size())
     }
 
-    /// Largest slice of a [`send_large`](Self::send_large) message that one
+    /// Largest slice of a split message that one
     /// frame carries.
     ///
     /// A fragment gives up room to both the message identifier and the
@@ -610,7 +610,7 @@ impl Core {
     ///
     /// Smaller than [`max_payload`](Self::max_payload) by the message
     /// identifier a reliable frame carries. Anything above this needs
-    /// [`send_large`](Self::send_large), which splits it across frames.
+    /// [`send_reliable`](Self::send_reliable), which splits it across frames.
     pub fn max_reliable_payload(&self) -> usize {
         self.peer
             .payload_room(self.transport.max_datagram_size(), true, false)
@@ -681,8 +681,8 @@ impl Core {
     /// sequence its own payloads.
     ///
     /// Returns as soon as the first transmission is handed to the kernel.
-    /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
-    pub fn send_reliable_typed(
+    /// Sends one reliable frame, for a payload that fits in one.
+    pub fn send_one_reliable(
         &mut self,
         data: &[u8],
         payload_type: PayloadType,
@@ -715,33 +715,6 @@ impl Core {
         let limit = self.transport.max_datagram_size();
         self.peer
             .seal(data, payload_type, message_id, None, limit, &mut self.tx)
-    }
-
-    /// Seals one fragment of a larger message and sends it.
-    fn seal_fragment(
-        &mut self,
-        data: &[u8],
-        payload_type: PayloadType,
-        message_id: MessageId,
-        fragment: Fragment,
-    ) -> Result<()> {
-        let limit = self.transport.max_datagram_size();
-        let n = self.peer.seal(
-            data,
-            payload_type,
-            Some(message_id),
-            Some(fragment),
-            limit,
-            &mut self.tx,
-        )?;
-        self.transport.send(&self.tx[..n])?;
-        self.peer.pending.push(Pending {
-            id: message_id,
-            payload_type,
-            data: data.to_vec(),
-            fragment: Some(fragment),
-        });
-        Ok(())
     }
 
     /// Resends whatever has timed out, and drops whatever has run out of
@@ -958,7 +931,7 @@ impl Connection {
         self.core().map(|c| c.max_reliable_payload()).unwrap_or(0)
     }
 
-    /// Largest slice of a [`send_large`](Self::send_large) message that one
+    /// Largest slice of a split message that one
     /// frame carries.
     pub fn max_fragment_payload(&self) -> usize {
         self.core().map(|c| c.max_fragment_payload()).unwrap_or(0)
@@ -1032,19 +1005,65 @@ impl Connection {
     }
 
     /// Sends `data` and keeps resending it until the peer acknowledges it.
-    pub fn send_reliable(&self, data: &[u8]) -> Result<MessageId> {
-        let mut core = self.core()?;
-        let payload_type = core.default_payload_type();
-        core.send_reliable_typed(data, payload_type)
+    ///
+    /// Any size. A payload larger than one frame is split across several, each
+    /// retransmitted on its own — so a lost piece costs one frame rather than
+    /// the message. There is no separate call for that and no size for the
+    /// caller to check, which matters because the frame limit depends on what
+    /// the *peer* advertised and is not knowable in advance.
+    ///
+    /// Returns once the message is on its way, not once it has arrived. A large
+    /// one will not fit in the congestion window, so the rest is queued and fed
+    /// out by [`recv`](Self::recv), [`flush`](Self::flush) and later sends.
+    /// [`flush`](Self::flush) is how you wait for delivery.
+    ///
+    /// Fails with [`Error::WindowFull`](fectp_core::Error::WindowFull) when too
+    /// many messages are already queued, and with
+    /// [`Error::ReliabilityUnsupported`] if the peer never advertised the
+    /// capability. Payloads above [`MAX_MESSAGE_LEN`] are refused rather than
+    /// split.
+    pub fn send_reliable(&self, data: &[u8]) -> Result<()> {
+        let payload_type = self.core()?.default_payload_type();
+        self.send_reliable_typed(data, payload_type)
     }
 
     /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
-    pub fn send_reliable_typed(
-        &self,
-        data: &[u8],
-        payload_type: PayloadType,
-    ) -> Result<MessageId> {
-        self.core()?.send_reliable_typed(data, payload_type)
+    pub fn send_reliable_typed(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
+        {
+            let mut core = self.core()?;
+            let limit = core.transport.max_datagram_size();
+
+            // One frame is the common case and does not need the queue: it goes
+            // straight out, as it always has.
+            if data.len() <= core.peer.payload_room(limit, true, false) {
+                return core.send_one_reliable(data, payload_type).map(|_| ());
+            }
+            core.peer.queue_message(data, payload_type, limit)?;
+        }
+        // Start it now rather than at the next call, so a caller that queues
+        // and then blocks in `flush` does not wait a round trip for nothing.
+        self.drive_queue()?;
+        Ok(())
+    }
+
+    /// Feeds whatever is queued into the free part of the send window.
+    fn drive_queue(&self) -> Result<()> {
+        let mut core = self.core()?;
+        let now = core.now_ms();
+        let limit = core.transport.max_datagram_size();
+        let Core {
+            peer,
+            transport,
+            tx,
+            ..
+        } = &mut *core;
+        peer.drive_queue(now, limit, tx, |frame| transport.send(frame).map_err(Error::Io))?;
+        Ok(())
+    }
+
+    /// Messages split across frames and not yet fully sent.
+    pub fn queued(&self) -> usize {
+        self.core().map(|c| c.peer.queued()).unwrap_or(0)
     }
 
     /// Receives the next authentic datagram, writing its payload to `out`.
@@ -1086,9 +1105,12 @@ impl Connection {
         self.core()?.peer.abandoned.clear();
 
         loop {
+            // Queued fragments are part of what "unflushed" means, so this has
+            // to keep feeding them or a large message would never finish.
+            self.drive_queue()?;
             {
                 let core = self.core()?;
-                if core.peer.retransmit.in_flight() == 0 {
+                if core.peer.retransmit.in_flight() == 0 && core.peer.queued() == 0 {
                     break;
                 }
                 if Instant::now() >= deadline {
@@ -1107,108 +1129,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Sends a message too large for one frame, and waits for all of it.
-    ///
-    /// [`send`](Self::send) and [`send_reliable`](Self::send_reliable) refuse a
-    /// payload above [`max_payload`](Self::max_payload), because a datagram
-    /// larger than the path MTU is cut up by IP, and an IP-fragmented datagram
-    /// is lost entire if any piece of it is. This cuts the message at the
-    /// protocol layer instead, where a lost piece is retransmitted on its own.
-    ///
-    /// Every fragment is a reliable message, so this needs a peer that
-    /// acknowledges. It returns once the peer has acknowledged all of them,
-    /// which is why it takes a timeout: there is no useful sense in which a
-    /// large message has been "sent" while most of it is still queued behind a
-    /// send window.
-    ///
-    /// Fragments are coded individually rather than the message being coded
-    /// whole, so each frame is self-describing. That costs compression ratio —
-    /// a compressor sees one fragment of context, not the message — and buys a
-    /// receiver that can decode any frame without waiting for the rest.
-    ///
-    /// Messages above [`MAX_MESSAGE_LEN`] are refused rather than fragmented.
-    pub fn send_large(&self, data: &[u8], timeout: Duration) -> Result<()> {
-        let payload_type = self.core()?.default_payload_type();
-        self.send_large_typed(data, payload_type, timeout)
-    }
-
-    /// [`send_large`](Self::send_large), declaring the payload's shape.
-    pub fn send_large_typed(
-        &self,
-        data: &[u8],
-        payload_type: PayloadType,
-        timeout: Duration,
-    ) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        let (per_fragment, count, message) = {
-            let mut core = self.core()?;
-            if !core.peer.session.peer_capabilities().supports_reliable() {
-                return Err(Error::ReliabilityUnsupported);
-            }
-            let limit = core.transport.max_datagram_size();
-            let per_fragment = core.peer.max_fragment_payload(limit);
-            let count =
-                fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
-                    len: data.len(),
-                    limit: MAX_MESSAGE_LEN,
-                })?;
-            let message = core.peer.next_message;
-            core.peer.next_message = core.peer.next_message.wrapping_add(1);
-            (per_fragment, count, message)
-        };
-
-        for index in 0..count {
-            let start = index as usize * per_fragment;
-            let end = (start + per_fragment).min(data.len());
-            let chunk = &data[start..end];
-
-            // The in-flight bound doubles as the send window. Waiting here
-            // rather than failing is what makes this usable for a message of
-            // many more fragments than the window holds — and it is also the
-            // only thing pacing the send, so a burst cannot outrun the
-            // receiver's socket buffer.
-            loop {
-                let sealed = {
-                    let mut core = self.core()?;
-                    let now = core.now_ms();
-                    match core.peer.retransmit.register(now) {
-                        Ok(id) => Some(core.seal_fragment(
-                            chunk,
-                            payload_type,
-                            id,
-                            Fragment {
-                                message,
-                                index,
-                                count,
-                            },
-                        )),
-                        Err(fectp_core::Error::WindowFull) => {
-                            if Instant::now() >= deadline {
-                                return Err(Error::Unacknowledged {
-                                    count: core.peer.retransmit.in_flight(),
-                                });
-                            }
-                            None
-                        }
-                        Err(e) => return Err(Error::Protocol(e)),
-                    }
-                };
-                match sealed {
-                    Some(result) => {
-                        result?;
-                        break;
-                    }
-                    None => {
-                        self.pump(Some(deadline), None)?;
-                    }
-                }
-            }
-        }
-
-        let left = deadline.saturating_duration_since(Instant::now());
-        self.flush(left)
-    }
-
     /// Reads one datagram and applies it, driving retransmission on the way.
     ///
     /// The blocking read holds only the reader lock, so a send on another
@@ -1217,6 +1137,7 @@ impl Connection {
         // Wake for whichever comes first: the caller's timeout or the next
         // retransmission deadline. Sleeping past the latter would leave a lost
         // message unnoticed until some unrelated frame arrived.
+        self.drive_queue()?;
         let wait = {
             let mut core = self.core()?;
             core.drive_retransmits()?;

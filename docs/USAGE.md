@@ -231,100 +231,48 @@ after exhausting their retries, or if the timeout expires first.
 
 ## Large messages
 
-`send` and `send_reliable` both refuse a payload larger than one frame. A
-datagram above the path MTU is cut up by IP, and an IP-fragmented datagram is
-lost entire if any piece of it goes missing — so FECTP never emits one.
-
-`send_large` splits the message at the protocol layer instead, where a lost
-piece is retransmitted on its own:
+There is no separate call and no size to check:
 
 ```rust
-conn.send_large(&recording, Duration::from_secs(10))?;
+conn.send_reliable(&recording)?;      // any size
+conn.flush(Duration::from_secs(10))?; // wait for it to arrive
 ```
 
-It arrives as **one** message, not as pieces:
+A payload larger than one frame is split across several, each acknowledged and
+retransmitted on its own, and it arrives as **one** message:
 
 ```rust
 let n = conn.recv(&mut buf)?;    // the whole thing, reassembled
 ```
 
-Four things to know:
+Why there is no size to check: the frame limit depends on what the peer
+advertised at handshake, so it differs per connection and a microcontroller
+peer will advertise less. Asking the caller to compare against a number they
+cannot know in advance was the wrong shape.
 
-**It waits.** Unlike the other send methods, this returns only once the peer
-has acknowledged every fragment, which is why it takes a timeout. There is no
-useful sense in which a large message has been sent while most of it is still
-queued behind a send window.
+Three things to know:
 
-**Every fragment is reliable**, so the peer must support the reliability layer.
-Without that, one lost fragment would lose the whole message with no way to
-repair it.
+**`send_reliable` does not wait.** A split message will not fit in the
+congestion window, so the rest is queued and fed out by `recv`, `flush` and
+later sends. `flush` is how you wait for it, and it fails with
+`Error::Unacknowledged` if any fragment was abandoned — a message missing one
+piece is not partly delivered, it is not delivered.
+
+**`send` is still one frame only.** Splitting a payload that cannot be
+retransmitted would fail whenever any one piece went missing: for 200 fragments
+at 1% loss, nine times out of ten. It is refused rather than offered.
 
 **There is a ceiling.** `fectp::MAX_MESSAGE_LEN` (1 MiB) and
 `fectp::MAX_FRAGMENTS` (4096) bound what a receiver will reassemble, because a
 receiver commits memory on the strength of the sender's own fragment count.
-Above that, `send_large` fails with `Error::PayloadTooLarge`.
+Above that, `send_reliable` fails with `Error::PayloadTooLarge`.
 
-**Compression is per fragment.** Each frame is coded on its own so that it is
-self-describing, which costs ratio — the compressor sees one fragment of
-context rather than the whole message. For data that compresses well, sending
-it pre-compressed by your own code will beat this.
+Compression is per fragment, so each frame is self-describing. That costs ratio
+— the compressor sees one fragment of context rather than the whole message —
+so data that compresses well is better compressed by your own code first.
 
-### From an endpoint
-
-`Endpoint::send_large` cannot wait — an event loop serving many peers must not
-stall on one of them — so it **queues** the message and returns immediately.
-`poll` feeds it out as the send window frees:
-
-```rust
-server.send_large(peer, &recording)?;      // returns at once
-loop {
-    match server.poll(Some(Duration::from_millis(50)))? {
-        Event::Sent { peer, delivered } => {
-            println!("{peer:?}: {}", if delivered { "arrived" } else { "lost" });
-            break;
-        }
-        _ => {}
-    }
-}
-```
-
-`Event::Sent` reports the outcome. `delivered` is false if any fragment was
-abandoned after exhausting its retries — a fragmented message missing a piece
-is not partially delivered, it is not delivered.
-
-Progress happens only inside `poll`. An endpoint that queues a message and
-never polls sends nothing. The queue is bounded at `fectp::MAX_QUEUED_LARGE`
-messages per peer, since each holds its payload until acknowledged.
-
-## Sending and receiving at once
-
-Every `Connection` method takes `&self`, so one thread can send while another
-is blocked receiving. There is nothing to wrap, convert, or clone:
-
-```rust
-std::thread::scope(|s| {
-    s.spawn(|| loop {
-        let mut buf = [0u8; 2048];
-        if let Ok(n) = conn.recv(&mut buf) {
-            handle(&buf[..n]);
-        }
-    });
-    conn.send(b"sent while the other thread is blocked reading")
-})?;
-```
-
-A shared `&Connection` is all either thread needs. Wrap it in an `Arc` if you
-want `'static` threads instead of scoped ones — that is your choice, not
-something the API asks for.
-
-The blocking read holds only the receive side, so a send never waits behind it.
-The two directions have separate cipher states once the handshake splits, and
-the state they do share — the reliability layer — sits behind a lock held for
-microseconds. Measured, it costs less than this benchmark can resolve.
-
-**Retransmission is still driven by calls**, as it always has been: `recv`,
-`flush` and the send methods each advance it. A program that sends reliably and
-then calls none of them will not retransmit — which is what `flush` is for.
+On an `Endpoint` it is the same call. There is nothing to block on there, so a
+message that had to be split reports its outcome as `Event::Sent { delivered }`.
 
 ## Typed payloads
 

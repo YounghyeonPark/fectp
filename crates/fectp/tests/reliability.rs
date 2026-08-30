@@ -280,7 +280,7 @@ fn a_fragmented_message_survives_a_dropped_fragment() {
             .collect()
     };
 
-    client.send_large(&payload, FLUSH).expect("send_large");
+    client.send_reliable(&payload).and_then(|()| client.flush(FLUSH)).expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert_eq!(received.len(), 1, "delivered once, not once per fragment");
@@ -302,7 +302,7 @@ fn a_fragmented_message_whose_fragment_never_arrives_is_reported() {
     // peer will never be able to assemble is the worst available outcome.
     assert!(
         matches!(
-            client.send_large(&payload, FLUSH),
+            client.send_reliable(&payload).and_then(|()| client.flush(FLUSH)),
             Err(fectp::Error::Unacknowledged { .. })
         ),
         "a message that cannot be delivered must not report success"
@@ -330,11 +330,12 @@ fn an_early_loss_is_recovered_in_a_stream_far_longer_than_the_ack_window() {
     // easy to miss: the stuck message holds one of thirty-two slots while the
     // other thirty-one keep cycling, and the identifier space runs away from
     // it. This needs a send that keeps going as slots free rather than waiting
-    // for all of them, which is exactly what `send_large` does.
+    // for all of them, which is exactly what a split message does.
     let payload = vec![0x3Cu8; client.max_fragment_payload() * 200];
 
     client
-        .send_large(&payload, FLUSH)
+        .send_reliable(&payload)
+        .and_then(|()| client.flush(FLUSH))
         .expect("a single early loss must not lose the message");
 
     let received = echo.messages(1, TIMEOUT);

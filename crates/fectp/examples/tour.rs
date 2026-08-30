@@ -264,10 +264,10 @@ fn large_messages() -> fectp::Result<()> {
 
         // Comfortably past what one frame carries, so the outbound trip
         // genuinely fragments. The filler is repetitive on purpose: the echo
-        // server is an `Endpoint`, which has no `send_large`, so the reply only
+        // server is an `Endpoint`, and the reply only
         // gets back because it codes down into a single frame.
         let recording = vec![0x5Au8; conn.max_payload() * 5];
-        conn.send_large(&recording, Duration::from_secs(10))?;
+        conn.send_reliable(&recording).and_then(|()| conn.flush(Duration::from_secs(10)))?;
 
         let mut buf = vec![0u8; recording.len()];
         let n = conn.recv(&mut buf)?;
@@ -301,7 +301,7 @@ fn large_from_an_endpoint() -> fectp::Result<()> {
                 Event::Connected { peer, .. } => {
                     // Returns at once: an endpoint serving many peers cannot
                     // wait on one of them.
-                    server.send_large(peer, &recording)?;
+                    server.send_reliable(peer, &recording)?;
                 }
                 Event::Sent { delivered, .. } => return Ok(delivered),
                 _ => {}
@@ -318,7 +318,7 @@ fn large_from_an_endpoint() -> fectp::Result<()> {
     let delivered = worker.join().expect("worker thread")?;
     println!(
         "large from endpoint: {n} bytes queued and fed out by poll, delivered {delivered} (queue limit {} per peer)",
-        fectp::MAX_QUEUED_LARGE
+        fectp::MAX_QUEUED
     );
     Ok(())
 }

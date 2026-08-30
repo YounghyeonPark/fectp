@@ -730,7 +730,7 @@ fn under_loss() {
         const SIZE: usize = 256 * 1024;
         let payload = datasets::incompressible(SIZE);
         let start = std::time::Instant::now();
-        let outcome = conn.send_large(&payload, Duration::from_secs(60));
+        let outcome = conn.send_reliable(&payload).and_then(|()| conn.flush(Duration::from_secs(60)));
         let elapsed = start.elapsed();
         let ms_taken = elapsed.as_secs_f64() * 1000.0;
         drop(conn);
@@ -865,7 +865,7 @@ fn other_things_a_path_does() {
         const SIZE: usize = 256 * 1024;
         let payload = datasets::incompressible(SIZE);
         let start = std::time::Instant::now();
-        let outcome = conn.send_large(&payload, Duration::from_secs(60));
+        let outcome = conn.send_reliable(&payload).and_then(|()| conn.flush(Duration::from_secs(60)));
         let elapsed = start.elapsed();
 
         let offered = relay.offered.load(std::sync::atomic::Ordering::Relaxed);

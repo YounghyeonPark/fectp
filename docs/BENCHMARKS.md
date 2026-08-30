@@ -401,7 +401,7 @@ is wrong.
 
 It was not specific to fragmentation — any reliable stream that keeps sending
 while one message is stuck would lose it. Fragmentation just made it easy to
-reach, because `send_large` keeps feeding the window rather than waiting.
+reach, because a split message keeps feeding the window rather than waiting.
 
 ### And a second one
 

@@ -634,8 +634,8 @@ undeliverable, so fragments that could vanish without recovery would make the
 whole thing pointless. This is the first place the coding layer depends on the
 reliability layer.
 
-**The in-flight bound doubles as the send window.** `send_large` waits when 32
-fragments are outstanding rather than queueing the lot. That is what keeps a
+**The in-flight bound doubles as the send window.** A split message waits when
+the window is full rather than queueing the lot. That is what keeps a
 burst from outrunning the receiver's socket buffer — a 6 MB message emitted at
 line rate would overflow a default 64 KB buffer many times over and lose most
 of itself. It also caps throughput at one window per round trip, which is the
@@ -645,17 +645,14 @@ honest limit of doing this without congestion control.
 which a receiver can act on without waiting for the rest, at the cost of the
 compressor seeing one fragment of context instead of the whole message.
 
-**On an endpoint the waiting is not available.** `Connection::send_large` can
-block; an event loop serving many peers cannot, so `Endpoint::send_large`
-queues the message and `poll` feeds it out as the window frees. The outcome
-arrives as `Event::Sent { delivered }` rather than as a return value, and the
-queue is bounded per peer because each entry holds its payload until
+**Neither side waits.** Both types queue what will not fit and feed it out —
+`Connection` from `recv`, `flush` and later sends, `Endpoint` from `poll`. On an
+endpoint the outcome arrives as `Event::Sent { delivered }`, since there is
+nothing there to block on; on a connection `flush` reports it. The queue is
+bounded per peer either way, because each entry holds its payload until
 acknowledged.
 
-That difference is deliberate rather than an oversight of symmetry: the two
-types have different obligations. A `Connection` owes its caller one answer; an
-`Endpoint` owes every peer forward progress, and the fastest way to break that
-promise is to let one slow peer own the loop.
+See D25 for why this ended up as one method rather than two.
 
 ## D20 — A sender may not outrun the acknowledgement window
 
@@ -832,6 +829,38 @@ this protocol otherwise works to avoid. A delay-based controller would suit the
 latency argument better and is the obvious next thing to try; it is also much
 harder to validate without real paths, and this one is measurably better than
 nothing.
+
+## D25 — One reliable send, whatever the size
+
+**Problem**: `send_reliable` refused anything above one frame and `send_large`
+existed beside it, so the caller had to choose. Choosing meant comparing their
+payload against `max_reliable_payload()` — a number that **depends on what the
+peer advertised at handshake** and therefore differs per connection. A
+microcontroller peer advertises less than a desktop one.
+
+Asking an application to branch on a number it cannot know in advance is the
+wrong shape, and it is exactly the kind of thing this protocol set out not to
+make people think about.
+
+**Decision**: `send_reliable` takes any size and splits when it has to.
+`send_large` is gone.
+
+Two consequences worth stating.
+
+**`send_reliable` returns `()` rather than a `MessageId`.** A split message is
+many reliable messages, so there is no single identifier to hand back. Nothing
+was lost: no API ever accepted a `MessageId`, so it was a value nobody could
+act on. `flush` is how delivery is observed, as it always was.
+
+**`send` still refuses anything larger than a frame.** Splitting a payload that
+cannot be retransmitted fails whenever any one piece goes missing — for 200
+fragments at 1% loss, nine times out of ten. Unreliable fragmentation is a trap
+rather than a feature, so the unreliable call keeps the limit and the reliable
+one does not. That also answers the question the old API left open: for a large
+payload there is only one call that accepts it.
+
+The queue that feeds fragments out moved from `Endpoint` into `Peer`, so both
+types share it rather than growing two of them.
 
 ## Not carried over
 

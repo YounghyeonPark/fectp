@@ -40,7 +40,7 @@ fn an_endpoint_sends_a_message_larger_than_a_frame() {
         loop {
             match server.poll(Some(TICK)).expect("poll") {
                 Event::Connected { peer, .. } => {
-                    server.send_large(peer, &outgoing).expect("send_large");
+                    server.send_reliable(peer, &outgoing).expect("send_reliable");
                 }
                 Event::Sent { delivered, .. } => return delivered,
                 _ => {}
@@ -80,7 +80,7 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
                 Event::Connected { peer, .. } => {
                     if first.is_none() {
                         first = Some(peer);
-                        server.send_large(peer, &payload).expect("send_large");
+                        server.send_reliable(peer, &payload).expect("send_reliable");
                         let _ = ready.send(());
                     }
                 }
@@ -124,10 +124,10 @@ fn queueing_more_than_the_limit_is_refused() {
                 // Each queued message holds its payload until acknowledged, so
                 // the queue has to be bounded or one peer could make the
                 // endpoint keep any amount of memory.
-                for _ in 0..fectp::MAX_QUEUED_LARGE {
-                    server.send_large(peer, &payload).expect("within the limit");
+                for _ in 0..fectp::MAX_QUEUED {
+                    server.send_reliable(peer, &payload).expect("within the limit");
                 }
-                return server.send_large(peer, &payload).is_err();
+                return server.send_reliable(peer, &payload).is_err();
             }
         }
     });
@@ -154,8 +154,8 @@ fn two_queued_messages_both_arrive_in_order() {
         loop {
             match server.poll(Some(TICK)).expect("poll") {
                 Event::Connected { peer, .. } => {
-                    server.send_large(peer, &a).expect("first");
-                    server.send_large(peer, &b).expect("second");
+                    server.send_reliable(peer, &a).expect("first");
+                    server.send_reliable(peer, &b).expect("second");
                 }
                 Event::Sent { delivered, .. } => {
                     assert!(delivered);

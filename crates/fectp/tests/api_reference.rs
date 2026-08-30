@@ -20,11 +20,11 @@ fn the_documented_constants_are_the_real_ones() {
     assert_eq!(fectp::MAX_RETRIES, 5, "API.md says 5");
     assert_eq!(fectp::MAX_MESSAGE_LEN, 1 << 20, "API.md says 1 MiB");
     assert_eq!(fectp::MAX_FRAGMENTS, 4096, "API.md says 4096");
-    assert_eq!(fectp::MAX_QUEUED_LARGE, 4, "API.md says 4 per peer");
+    assert_eq!(fectp::MAX_QUEUED, 4, "API.md says 4 per peer");
     assert_eq!(fectp::CODEC_OVERHEAD, 4, "API.md says 4 bytes");
 }
 
-/// API.md — "Sending": three kinds, each with a `_typed` twin.
+/// API.md — "Sending": two kinds, each with a `_typed` twin, any size.
 #[test]
 fn every_send_has_the_shape_the_reference_claims() {
     let echo = Echo::start();
@@ -39,23 +39,38 @@ fn every_send_has_the_shape_the_reference_claims() {
     conn.send(&small).expect("send");
     conn.send_typed(&small, shape).expect("send_typed");
 
-    // Reliable, and its twin. Both hand back an identifier.
-    let first = conn.send_reliable(&small).expect("send_reliable");
-    let second = conn
-        .send_reliable_typed(&small, shape)
+    // Reliable, and its twin. Neither takes a size and neither waits.
+    conn.send_reliable(&small).expect("send_reliable");
+    conn.send_reliable_typed(&small, shape)
         .expect("send_reliable_typed");
-    assert_ne!(first, second, "each reliable message gets its own identifier");
-    conn.flush(Duration::from_secs(5)).expect("flush");
 
-    // Large, and its twin. These are the ones that wait, which is why they
-    // take a timeout and the others do not.
-    conn.send_large(&small, Duration::from_secs(5))
-        .expect("send_large");
-    conn.send_large_typed(&small, shape, Duration::from_secs(5))
-        .expect("send_large_typed");
+    // The same calls with a payload far past the frame limit. That is the
+    // whole point of the shape: the caller never has to know where the limit
+    // is, which matters because it depends on what the peer advertised.
+    // High-entropy, or it would code down under the frame limit and the
+    // unreliable case below would wrongly succeed.
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let big: Vec<u8> = (0..conn.max_payload() * 5)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    conn.send_reliable(&big).expect("a large payload needs no other method");
+    conn.flush(Duration::from_secs(10)).expect("flush");
+
+    // Unreliable is still one frame only. Splitting a payload that cannot be
+    // retransmitted would fail whenever any one piece went missing, which for
+    // a message of two hundred fragments is most of the time.
+    match conn.send(&big) {
+        Err(fectp::Error::PayloadTooLarge { .. }) => {}
+        other => panic!("expected PayloadTooLarge, got {other:?}"),
+    }
 }
 
-/// API.md — "Sending": the three payload limits, in the order it claims.
+/// API.md — "Asking": the payload limits, in the order the reference claims.
 #[test]
 fn the_payload_limits_are_ordered_as_documented() {
     let echo = Echo::start();
@@ -94,8 +109,8 @@ fn one_receive_method_covers_every_kind_of_message() {
     assert_eq!(&buf[..n], &samples[..], "coded payloads arrive decoded");
 
     let big = vec![0x7Eu8; conn.max_payload() * 3];
-    conn.send_large(&big, Duration::from_secs(5))
-        .expect("send_large");
+    conn.send_reliable(&big).and_then(|()| conn.flush(Duration::from_secs(5)))
+        .expect("send_reliable");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(n, big.len(), "fragmented messages arrive whole");
 }

@@ -33,22 +33,30 @@ Two types do the work:
 
 ### Sending
 
-| | returns | if it is lost |
+| | size | if it is lost |
 |---|---|---|
-| `send(data)` | `()` | gone |
-| `send_reliable(data)` | `MessageId` | resent until acknowledged |
-| `send_large(data, timeout)` | `()` | resent; waits for all of it |
+| `send(data)` | one frame | gone |
+| `send_reliable(data)` | **any** | resent until acknowledged |
 
 Each has a `_typed` twin taking a `PayloadType`, for a message whose shape
-differs from the connection's default: `send_typed`, `send_reliable_typed`,
-`send_large_typed`.
+differs from the connection's default: `send_typed`, `send_reliable_typed`.
 
-`send` and `send_reliable` refuse anything above the frame limit.
-`send_large` splits it across frames instead, and is the only one that waits.
+**There is no size for you to check.** `send_reliable` splits a payload larger
+than a frame across several, each retransmitted on its own. That matters
+because the frame limit depends on what the *peer* advertised at handshake, so
+the caller cannot know it in advance.
 
-`send_reliable` fails with `Error::Protocol(WindowFull)` when the congestion
-window is full — sooner than you might expect on a new connection. Call
-`flush` and retry.
+Neither call waits. A split message will not fit in the congestion window, so
+the rest is queued and fed out by `recv`, `flush` and later sends — `flush` is
+how you wait for delivery.
+
+`send` is one frame only, and refuses anything larger. Splitting a payload that
+cannot be retransmitted would fail whenever any one piece went missing: for a
+message of 200 fragments at 1% loss, that is nine times out of ten. It is a
+trap rather than a feature.
+
+`send_reliable` fails with `Error::Protocol(WindowFull)` when too many messages
+are already queued, and refuses anything above `MAX_MESSAGE_LEN`.
 
 ### Receiving
 
@@ -78,9 +86,10 @@ its retries, or if the timeout expires.
 | `resumption_ticket()` | A single-use ticket for resuming later, if encrypted. |
 | `max_payload()` | Largest `send`. |
 | `max_reliable_payload()` | Largest `send_reliable` — smaller, by the message identifier. |
-| `max_fragment_payload()` | What one frame of a `send_large` carries. |
+| `max_fragment_payload()` | What one frame of a split message carries. |
 | `unacknowledged()` | Reliable messages still in flight. |
-| `reassembling()` | Fragmented messages half-arrived. |
+| `reassembling()` | Split messages half-arrived. |
+| `queued()` | Split messages not yet fully sent. |
 | `rto_ms()` | The current retransmission timeout estimate. |
 | `default_payload_type()` | What `send` assumes. |
 
@@ -116,7 +125,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::Connected { peer, zero_rtt, resumed, initiated } => {}
     Event::Message { peer, data } => {}
-    Event::Sent { peer, delivered } => {}      // a send_large finished
+    Event::Sent { peer, delivered } => {}      // a split message finished
     Event::ConnectFailed { peer } => {}
     Event::Idle => {}                          // nothing arrived
 }
@@ -139,18 +148,16 @@ hole punching possible at all.
 
 ### Sending
 
-The same three kinds as `Connection`, each taking a `PeerId` first, each with a
+The same two kinds as `Connection`, each taking a `PeerId` first, each with a
 `_typed` twin:
 
-| | |
-|---|---|
-| `send(peer, data)` | Fire and forget. |
-| `send_reliable(peer, data)` | Resent until acknowledged. |
-| `send_large(peer, data)` | **Queued, not waited for.** The outcome arrives as `Event::Sent`. |
+| | size | |
+|---|---|---|
+| `send(peer, data)` | one frame | Fire and forget. |
+| `send_reliable(peer, data)` | **any** | Resent until acknowledged. |
 
-`send_large` is the one that differs from `Connection`: an event loop serving
-many peers must not stall on one, so it queues and returns. Bounded at
-`MAX_QUEUED_LARGE` messages per peer.
+A message that had to be split reports its outcome as `Event::Sent`, since
+there is nothing here to block on. Progress happens inside `poll`.
 
 ### Asking
 
@@ -180,9 +187,9 @@ many peers must not stall on one, so it queues and returns. Bounded at
 | `INITIAL_CWND` | 4 | Where the congestion window opens. |
 | `MIN_CWND` | 2 | Where it collapses to on loss. |
 | `MAX_RETRIES` | 5 | Attempts before a message is abandoned. |
-| `MAX_MESSAGE_LEN` | 1 MiB | Largest `send_large`. |
+| `MAX_MESSAGE_LEN` | 1 MiB | Largest `send_reliable`. |
 | `MAX_FRAGMENTS` | 4096 | Pieces one message may be cut into. |
-| `MAX_QUEUED_LARGE` | 4 | Large messages queued per peer on an `Endpoint`. |
+| `MAX_QUEUED` | 4 | Split messages queued per peer. |
 | `CODEC_OVERHEAD` | 4 | Bytes a coded payload adds. |
 
 ---
@@ -197,10 +204,13 @@ modes and two 0-RTT variants, and the timeout argument is not applied evenly:
 `connect_psk` and `connect_plain` require one. There is no reason for that
 difference other than the order the modes were added.
 
-**`_typed` doubles every send.** Three kinds of send become six on each type,
-twelve across both, and the twin differs by one argument. Rust has no default
+**`_typed` doubles every send.** Two kinds of send become four on each type,
+eight across both, and the twin differs by one argument. Rust has no default
 arguments, so the alternatives are a builder — which adds a concept — or making
 the type argument mandatory everywhere, which taxes the common case to tidy the
 list.
 
-Neither is a correctness problem, and neither is fixed here.
+Neither is a correctness problem, and neither is fixed here. There used to be
+three kinds rather than two: `send_large` was a separate call, and the caller
+had to compare their payload against `max_reliable_payload()` to know which to
+use. That comparison is gone.
