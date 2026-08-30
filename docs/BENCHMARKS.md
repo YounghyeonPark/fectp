@@ -483,13 +483,78 @@ is the control: it must succeed, or the test proves nothing. An earlier version
 rebound after the third datagram, by which point the test had already finished —
 so it reported the session surviving something that never happened.
 
+## 11. Jitter, an asymmetric path, and a crowded endpoint
+
+### Jitter does not fool the retransmission timer
+
+200 reliable messages through a relay that delays each datagram by a random
+amount. **Nothing is dropped**, so every datagram past 201 is one the sender
+resent while the first copy was still in flight.
+
+| jitter | time | datagrams sent | spurious |
+|---|---|---|---|
+| none | 5.10 ms | 201 | 0 (0.0%) |
+| 0–2 ms | 109.90 ms | 201 | 0 (0.0%) |
+| 0–10 ms | 109.19 ms | 201 | 0 (0.0%) |
+| 0–40 ms | 525.73 ms | 204 | 3 (1.5%) |
+
+There are no spurious retransmissions until the jitter reaches twice the
+initial timeout, and three even then. The estimator carries a variation term
+(RFC 6298's RTTVAR) and is evidently using it — one that averaged round trips
+without it would retransmit every time a datagram took longer than usual, which
+under this much jitter is constantly.
+
+### Losing an acknowledgement is nearly free; losing data is not
+
+| loss | time | vs no loss | delivered |
+|---|---|---|---|
+| none | 5.57 ms | — | all |
+| 2% on data only | 121.33 ms | 21.8x | all |
+| **2% on acks only** | **5.65 ms** | **1.0x** | all |
+| 2% both ways | 170.97 ms | 30.7x | all |
+| **none again (control)** | **5.39 ms** | **1.0x** | all |
+
+The control puts the noise floor at about 1.0x on this run, and the ack-loss
+row sits inside it. That asymmetry is a property of the design rather than
+luck: **each acknowledgement reports the whole receive window**, so a lost one
+is repaired by the next to arrive, while lost data has to be sent again and
+waits for a timer before anyone notices.
+
+It is worth knowing which direction of a path matters. A link that is lossy
+only on the return leg costs this protocol almost nothing.
+
+### A crowded endpoint spares the median and not the tail
+
+One connection's round trip, measured while other peers work the same endpoint.
+
+| other peers busy | round trip | vs idle | p95 |
+|---|---|---|---|
+| 0 | 30.0 µs | — | 43.6 µs |
+| 7 | 31.6 µs | 1.05x | 107.6 µs |
+| 23 | 30.5 µs | 1.02x | **232.0 µs** |
+
+**Read the p95 column.** The median barely moves, so a typical request is
+unaffected by two dozen busy neighbours — but the tail grows about fivefold,
+because one socket and one event loop serve everyone and a request arriving
+behind a burst waits for it. That is the shape of a single-threaded loop, and
+it is the price of the one-socket design (D14) rather than a defect in it.
+
+Client and server share this machine's cores here, so the load threads compete
+for CPU as well as for the endpoint. Treat the figures as an upper bound.
+
+An earlier version of this table sent to every peer and then read from every
+peer, and reported per-peer latency *falling* as peers were added — which was
+the batching amortising the syscall, not the endpoint getting faster. It could
+not have answered the question, which is what one peer waits for.
+
 ---
 
 ## What this measured, and what it did not
 
 Loopback removes the network. Loss (§9), reordering, bottlenecks and rebinding
-(§10) are now injected; jitter, asymmetric paths, and multi-peer contention are
-not.
+(§10), jitter, path asymmetry and multi-peer contention (§11) are now injected.
+What remains unmeasured is a real path: none of this involves a second machine,
+a switch, a wireless link, or a middlebox with opinions.
 
 **There is still no comparison against TCP under loss.** Dropping datagrams at a
 relay is fair to a datagram protocol and meaningless for a stream — the same

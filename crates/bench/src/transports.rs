@@ -687,3 +687,143 @@ impl Drop for RebindingRelay {
         self.stop.store(true, Ordering::Relaxed);
     }
 }
+
+/// A relay that varies how long each datagram takes.
+///
+/// Delay is uniform in `[0, spread]`, which both jitters and reorders — that is
+/// what variable queueing actually does. It counts what passes so a caller can
+/// tell retransmissions from first transmissions: nothing is dropped here, so
+/// every datagram above the expected count is one the sender resent for no
+/// reason.
+pub struct JitterRelay {
+    pub addr: SocketAddr,
+    /// Datagrams forwarded towards the server.
+    pub forwarded: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+}
+
+impl JitterRelay {
+    pub fn spawn(server: SocketAddr, spread: Duration, seed: u64) -> Self {
+        let (front, back, addr, stop, client) = relay_sockets(server);
+        let forwarded = Arc::new(AtomicU64::new(0));
+
+        let front_rx = front.try_clone().expect("clone");
+        let back_tx = back.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        let counted = Arc::clone(&forwarded);
+        thread::spawn(move || {
+            let mut rng = seed | 1;
+            let mut buf = [0u8; 65535];
+            let mut held: Vec<(Vec<u8>, Instant)> = Vec::new();
+            while !flag.load(Ordering::Relaxed) {
+                // Released by time, and not necessarily in the order received:
+                // that reordering is part of what jitter is.
+                let now = Instant::now();
+                held.retain(|(frame, due)| {
+                    if *due <= now {
+                        let _ = back_tx.send(frame);
+                        false
+                    } else {
+                        true
+                    }
+                });
+
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                counted.fetch_add(1, Ordering::Relaxed);
+
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let share = (rng >> 40) as f64 / (1u64 << 24) as f64;
+                let wait = spread.mul_f64(share);
+                if wait.is_zero() {
+                    let _ = back_tx.send(&buf[..n]);
+                } else {
+                    held.push((buf[..n].to_vec(), Instant::now() + wait));
+                }
+            }
+        });
+
+        spawn_return_path(back, front, client, flag_clone(&stop));
+        Self {
+            addr,
+            forwarded,
+            stop,
+        }
+    }
+}
+
+impl Drop for JitterRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A [`LossyRelay`] that drops at different rates in each direction.
+///
+/// Losing an acknowledgement and losing the data it would have acknowledged are
+/// not the same event, and a protocol can be much better at one than the other.
+pub struct AsymmetricRelay {
+    pub addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl AsymmetricRelay {
+    pub fn spawn(server: SocketAddr, forward_per_mille: u32, back_per_mille: u32, seed: u64) -> Self {
+        let (front, back, addr, stop, client) = relay_sockets(server);
+
+        let front_rx = front.try_clone().expect("clone");
+        let back_tx = back.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut rng = seed | 1;
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                seen += 1;
+                if seen > 1 && drops(&mut rng, forward_per_mille) {
+                    continue;
+                }
+                let _ = back_tx.send(&buf[..n]);
+            }
+        });
+
+        let flag = flag_clone(&stop);
+        let learn = Arc::clone(&client);
+        thread::spawn(move || {
+            let mut rng = (seed ^ 0x9E37_79B9_7F4A_7C15) | 1;
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let Ok(n) = back.recv(&mut buf) else {
+                    continue;
+                };
+                seen += 1;
+                if seen > 1 && drops(&mut rng, back_per_mille) {
+                    continue;
+                }
+                let Some(dest) = *learn.lock().expect("lock") else {
+                    continue;
+                };
+                let _ = front.send_to(&buf[..n], dest);
+            }
+        });
+
+        Self { addr, stop }
+    }
+}
+
+impl Drop for AsymmetricRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}

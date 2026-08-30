@@ -556,6 +556,7 @@ These are unimplemented, not overlooked.
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
 | **Path MTU discovery** | Frame size is fixed at 1200 bytes or the peer's advertised limit. | Fine on a LAN; a real network path may be smaller. |
+| **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
 | **Linked footprint figure** | Only a pre-link upper bound has been measured. | `fectp-core`'s own code is ~21 KiB for `thumbv7em-none-eabihf`; the crypto dependencies add roughly 95 KiB before dead-code elimination, dominated by `curve25519-dalek`. A real figure needs a firmware image linked with LTO and `--gc-sections`. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam. |

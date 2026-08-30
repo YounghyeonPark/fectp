@@ -93,8 +93,8 @@ every microsecond in this table put together is a rounding error beside that.
 
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
 per-message overhead, compression against gzip and Zstandard, behaviour under
-packet loss, reordering, a bottleneck and a rebinding NAT, and an honest account
-of the encryption trade-offs. It has also changed the implementation four times,
+packet loss, reordering, jitter, a bottleneck, a rebinding NAT and a crowded
+endpoint, and an honest account of the encryption trade-offs. It has also changed the implementation four times,
 most seriously when injecting loss found a bug that lost messages outright.
 
 ---

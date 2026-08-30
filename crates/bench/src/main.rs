@@ -20,8 +20,8 @@ use datasets::Shape;
 use fectp::{Capabilities, Connection, Identity, PayloadType};
 use timing::{measure, measure_batched, throughput_mib};
 use transports::{
-    BottleneckRelay, FectpEcho, LossyRelay, RebindingRelay, ReorderingRelay, TlsEcho, TlsSetup,
-    UdpEcho,
+    AsymmetricRelay, BottleneckRelay, FectpEcho, JitterRelay, LossyRelay, RebindingRelay,
+    ReorderingRelay, TlsEcho, TlsSetup, UdpEcho,
 };
 
 const SECRET: &[u8] = b"benchmark-secret";
@@ -48,6 +48,7 @@ fn main() {
     compression_level();
     under_loss();
     other_things_a_path_does();
+    jitter_asymmetry_and_crowding();
 
     println!("\n{}", "=".repeat(72));
     println!("Absolute times are loopback figures; see the round-trip table for");
@@ -936,4 +937,209 @@ fn other_things_a_path_does() {
     note("what stops one client's chosen identifier colliding with another's, so");
     note("this is a consequence of that choice rather than an oversight — but it");
     note("does mean a NAT rebinding ends the session.");
+}
+
+// ─────────────────────── 10. jitter, asymmetry, and a crowded endpoint ────
+
+/// The last three conditions, and the only one of them that is a real test of
+/// the round-trip estimator.
+fn jitter_asymmetry_and_crowding() {
+    heading(
+        "10. Jitter, an asymmetric path, and a crowded endpoint",
+        "variable delay, loss in one direction only, and many peers at once",
+    );
+
+    const MESSAGES: usize = 200;
+    let payload = datasets::incompressible(256);
+
+    // ── jitter ───────────────────────────────────────────────────────────
+    //
+    // Nothing is dropped here, so every datagram above `MESSAGES + 1` is a
+    // retransmission the sender decided on for no reason. That is the number
+    // worth having: it says whether the round-trip estimator is tracking the
+    // variation or being fooled by it.
+    row_header(&["jitter", "200 reliable msgs", "datagrams sent", "spurious"]);
+    for (label, spread) in [
+        ("none", Duration::ZERO),
+        ("0-2 ms", Duration::from_millis(2)),
+        ("0-10 ms", Duration::from_millis(10)),
+        ("0-40 ms", Duration::from_millis(40)),
+    ] {
+        let echo = FectpEcho::public_key();
+        let public = echo.public.expect("identity");
+        let relay = JitterRelay::spawn(echo.addr, spread, 0x5EED_1234);
+
+        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+            .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(60)))
+            .expect("timeout");
+
+        let start = std::time::Instant::now();
+        for _ in 0..MESSAGES {
+            loop {
+                match conn.send_reliable(&payload) {
+                    Ok(_) => break,
+                    Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
+                }
+            }
+        }
+        conn.flush(Duration::from_secs(60)).expect("flush");
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        let sent = relay.forwarded.load(std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        let expected = MESSAGES as u64 + 1;
+        let extra = sent.saturating_sub(expected);
+        row(&[
+            label,
+            &ms(elapsed),
+            &format!("{sent}"),
+            &format!("{extra} ({:.1}%)", extra as f64 * 100.0 / expected as f64),
+        ]);
+    }
+    note("Nothing is dropped in this table, so every datagram past 201 is one the");
+    note("sender resent although the first copy was still on its way. There are");
+    note("none at all until the jitter reaches four times the timer's floor, and");
+    note("three even then. The round-trip estimator carries a variation term and is");
+    note("evidently using it: an estimator that averaged without one would retransmit");
+    note("the moment a datagram took longer than usual, which here is constantly.");
+    println!();
+
+    // ── asymmetry ────────────────────────────────────────────────────────
+    row_header(&["loss", "200 reliable msgs", "vs no loss", "delivered"]);
+    let mut baseline = 0.0;
+    for (label, fwd, back) in [
+        ("none", 0u32, 0u32),
+        ("2% on data only", 20, 0),
+        ("2% on acks only", 0, 20),
+        ("2% both ways", 20, 20),
+        ("none again (control)", 0, 0),
+    ] {
+        let echo = FectpEcho::public_key();
+        let public = echo.public.expect("identity");
+        let relay = AsymmetricRelay::spawn(echo.addr, fwd, back, 0xC0FF_EE01);
+
+        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+            .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(60)))
+            .expect("timeout");
+
+        let start = std::time::Instant::now();
+        for _ in 0..MESSAGES {
+            loop {
+                match conn.send_reliable(&payload) {
+                    Ok(_) => break,
+                    Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
+                }
+            }
+        }
+        let ok = conn.flush(Duration::from_secs(60)).is_ok();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        let first = baseline == 0.0;
+        if first {
+            baseline = elapsed;
+        }
+        row(&[
+            label,
+            &ms(elapsed),
+            &if first {
+                "—".to_string()
+            } else {
+                format!("{:.1}x", elapsed / baseline)
+            },
+            if ok { "all" } else { "INCOMPLETE" },
+        ]);
+    }
+    note("The last row repeats the first with nothing changed, and its distance from");
+    note("1.0x is the noise floor. Losing an acknowledgement lands inside it, which");
+    note("is the expected result rather than a surprising one: each acknowledgement");
+    note("reports the whole receive window, so the next repairs a lost one, while");
+    note("lost data has to be sent again and waits for a timer first.");
+    println!();
+
+    // ── a crowded endpoint ───────────────────────────────────────────────
+    //
+    // One connection's round trip, measured while others hammer the same
+    // endpoint. An earlier version sent to every peer and then read from every
+    // peer, and reported the per-peer figure *falling* as peers were added —
+    // which was the batching amortising the syscall, not the endpoint getting
+    // faster. The question is what one peer waits for, so only one is timed.
+    row_header(&["other peers busy", "round trip", "vs idle", "p95"]);
+    let mut baseline = 0.0;
+    for others in [0usize, 7, 23] {
+        let echo = FectpEcho::public_key();
+        let public = echo.public.expect("identity");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let load: Vec<std::thread::JoinHandle<()>> = (0..others)
+            .map(|_| {
+                let addr = echo.addr;
+                let flag = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let Ok(mut conn) =
+                        Connection::connect(addr, &public, &Identity::generate())
+                    else {
+                        return;
+                    };
+                    let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
+                    let filler = vec![0x22u8; 256];
+                    let mut buf = vec![0u8; 4096];
+                    // Paced rather than a spin loop. Unpaced, thirty-one of
+                    // these saturate every core and the table measures CPU
+                    // starvation on a shared machine instead of what a peer
+                    // waits for at the endpoint.
+                    while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        if conn.send(&filler).is_err() {
+                            break;
+                        }
+                        let _ = conn.recv(&mut buf);
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                })
+            })
+            .collect();
+
+        let mut conn =
+            Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("timeout");
+        let mut buf = vec![0u8; 4096];
+        let stats = measure(20, 150, || {
+            transports::fectp_round_trip(&mut conn, &payload, &mut buf);
+        });
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
+        for handle in load {
+            let _ = handle.join();
+        }
+        drop(echo);
+
+        if others == 0 {
+            baseline = stats.median_us();
+        }
+        row(&[
+            &format!("{others}"),
+            &us(stats.median_us()),
+            &if others == 0 {
+                "—".to_string()
+            } else {
+                format!("{:.2}x", stats.median_us() / baseline)
+            },
+            &us(stats.p95.as_secs_f64() * 1e6),
+        ]);
+    }
+    note("Read the p95 column, not the median. The median barely moves, so a typical");
+    note("request is unaffected by two dozen busy neighbours — but the tail grows");
+    note("about fivefold, because one socket and one loop serve everyone and a");
+    note("request that arrives behind a burst waits for it. That is the shape of a");
+    note("single-threaded event loop, and it is the cost of the design in D14.");
+    note("Client and server share this machine's cores, so the load threads compete");
+    note("for CPU as well as for the endpoint: treat this as an upper bound.");
 }
