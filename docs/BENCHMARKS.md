@@ -19,9 +19,10 @@ path they are the only thing that matters.
 **Read §3 first.** Sections 1, 2, 4 and 5 measure things that turn out not to
 decide anything.
 
-This benchmark has changed the implementation twice: §7 is why the default
-compression level moved from −4 to 1, and §8 is why the send path stopped
-attempting compression on data that has already refused to compress.
+This benchmark has changed the implementation four times. §7 is why the default
+compression level moved from −4 to 1, §8 is why the send path stopped
+attempting compression on data that has already refused to compress, and §9 is
+where injecting packet loss found a bug that lost messages outright.
 
 ---
 
@@ -323,15 +324,99 @@ attempt more expensive, and skipping makes the failed attempts rare — the case
 where a higher level costs more and returns nothing is now the one case that
 stops being paid for on every message.
 
+## 9. Under packet loss
+
+Everything above runs over loopback, which never drops anything — so it
+exercises the parts of the protocol that are cheap and leaves the reliability
+layer, the only part with a hard job, untested. Loss here is injected by a
+relay from a seeded generator, so a run is reproducible. The handshake is
+exempt: this measures data delivery, not connection setup.
+
+**100 reliable 256-byte messages, sent and acknowledged:**
+
+| loss | time | vs no loss | per lost message |
+|---|---|---|---|
+| 0% | 3.02 ms | — | — |
+| 1% | 278.66 ms | 92x | 276 ms |
+| 5% | 232.77 ms | 77x | 46 ms |
+| 10% | 297.19 ms | 98x | 29 ms |
+
+**A 256 KiB message, fragmented across 226 frames:**
+
+| loss | time | vs no loss | throughput |
+|---|---|---|---|
+| 0% | 3.69 ms | — | 67.7 MiB/s |
+| 1% | 61.80 ms | 17x | 4.0 MiB/s |
+| 5% | 261.89 ms | 71x | 1.0 MiB/s |
+| 10% | 357.04 ms | 97x | 0.7 MiB/s |
+
+**1% loss costs an order of magnitude.** Nothing is resent until a
+retransmission timer fires, and that timer has a 20 ms floor against a loopback
+round trip of about 30 µs — so a single loss costs on the order of a thousand
+round trips. No protocol tuning changes that; only a faster loss signal would,
+and there is none here. There is no congestion response either: the send window
+is 32 whether the path is dropping everything or nothing.
+
+### The bug this found
+
+At 1% loss a 256 KiB message did not merely slow down — it **failed**, every
+time, after exhausting its retries. That is not a probabilistic outcome for a
+fragment with five retries at 1% loss, so it was worth chasing.
+
+Dropping exactly one fragment of a 199-fragment message, varying which:
+
+| fragment dropped | outcome |
+|---|---|
+| 6, 20, 60, 100 | **message lost** |
+| 140, 180, 195 | recovered in ~215 ms |
+
+The boundary sits between 100 and 140, and 199 − 140 = 59, just under 64.
+
+An acknowledgement names a highest identifier plus a bitmap of the 64 below it.
+Once the sender has run further ahead than that, the stuck message cannot be
+named by any acknowledgement — and its retransmission now falls outside the
+receiver's replay window, so it is discarded as stale rather than delivered.
+The message is lost however many retries remain.
+
+**Bounding how many messages are unacknowledged at once does not prevent this**,
+which is what made it easy to miss: the stuck message holds one of 32 slots
+while the other 31 keep cycling, and the identifier space runs hundreds past
+it. The bound has to be on the distance between identifiers. `SPEC.md` §5.5
+now requires that as a sender MUST, and says why the obvious alternative reading
+is wrong.
+
+It was not specific to fragmentation — any reliable stream that keeps sending
+while one message is stuck would lose it. Fragmentation just made it easy to
+reach, because `send_large` keeps feeding the window rather than waiting.
+
+### And a second one
+
+With that fixed, every loss still cost about 200 ms rather than the 20 ms the
+measured round trip justified. The first transmission's timeout was computed as
+`max(INITIAL_RTO_MS, current)` — but `current` already answers `INITIAL_RTO_MS`
+while no round trip has been measured, so the maximum only pinned the first
+timeout at 200 ms for the life of the session and made the 20 ms floor
+unreachable exactly where it mattered.
+
+Removing it is the difference between the tables above and these:
+
+| | before | after |
+|---|---|---|
+| 100 messages, 1% loss | 463 ms | **279 ms** |
+| 100 messages, 10% loss | 808 ms | **297 ms** |
+| 256 KiB fragmented, 1% loss | 419 ms | **62 ms** |
+
 ---
 
 ## What this measured, and what it did not
 
-Loopback removes the network. It says nothing about behaviour under loss,
-reordering, congestion, or NAT rebinding — FECTP's selective-repeat ARQ and RTO
-are exercised by the test suite but not by this benchmark. A comparison under
-real packet loss would be a more demanding test than any table above, and it
-has not been run.
+Loopback removes the network. Loss is now injected (§9), but reordering,
+congestion, and NAT rebinding still are not. Nor is there any comparison
+against TCP under loss: dropping datagrams at a relay is fair to a datagram
+protocol and meaningless for a stream, where the same relay would corrupt the
+stream rather than exercise TCP's own recovery. Doing that fairly needs loss
+injected below the transport, which is not portable, so it has not been done —
+the §9 tables are FECTP against itself, not against an alternative.
 
 The TLS figures use rustls with a self-signed certificate and `TCP_NODELAY`. A
 production TLS deployment with session tickets and a warm connection pool would

@@ -627,18 +627,38 @@ A receiver MUST:
 3. Treat an identifier older than that window as already delivered. Handing the
    application a duplicate is the worse failure.
 
+A sender MUST:
+
+4. Not issue a `message_id` more than `ACK_WINDOW` ahead of its oldest
+   unacknowledged one.
+
+Rule 4 is what makes rules 2 and 3 safe, and it is easy to get wrong. An
+acknowledgement can only name identifiers within `ACK_WINDOW` of the highest
+seen (§5.7), and by rule 3 a receiver discards anything older. A sender that
+runs further ahead than the window has therefore put its own outstanding
+message beyond rescue: no acknowledgement can mention it, and its
+retransmissions are discarded as stale rather than delivered. It is lost
+however many retries remain.
+
+Bounding how many messages are unacknowledged *at once* does not achieve this,
+which is the trap. One stuck message occupies one slot while the others keep
+cycling, so a sender with a 32-message limit will still run hundreds of
+identifiers past it. The bound has to be on the distance between identifiers,
+not on how many are outstanding.
+
 A sender SHOULD:
 
-4. Retransmit an unacknowledged message after a timeout, with exponential
+5. Retransmit an unacknowledged message after a timeout, with exponential
    backoff, and abandon it after a bounded number of attempts.
-5. Derive that timeout from measured round trips (RFC 6298 is suitable) and
+6. Derive that timeout from measured round trips (RFC 6298 is suitable) and
    ignore samples from retransmitted messages, whose acknowledgement is
    ambiguous (Karn's algorithm).
-6. Bound how many messages may be unacknowledged at once. This caps memory and
+7. Bound how many messages may be unacknowledged at once. This caps memory and
    serves as crude flow control.
 
-Points 4 to 6 are sender-side quality of implementation: they are not
-observable by a conforming receiver.
+Points 5 to 7 are sender-side quality of implementation: they are not
+observable by a conforming receiver. Point 4 is not — a receiver conforming to
+rules 2 and 3 will silently fail to deliver what a sender violating it sends.
 
 ### 5.6 Fragmented messages
 

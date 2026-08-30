@@ -328,6 +328,24 @@ impl RetransmitQueue {
     /// Fails with [`Error::WindowFull`] when [`MAX_IN_FLIGHT`] messages are
     /// already outstanding.
     pub fn register(&mut self, now_ms: u64) -> Result<MessageId> {
+        // A free slot is not enough. The receiver reports what it has seen as a
+        // highest identifier plus a bitmap of the `ACK_WINDOW` below it, so once
+        // the sender has run further ahead than that, an older outstanding
+        // message can no longer be *named* by any acknowledgement — and its
+        // retransmission now falls outside the receiver's replay window too, so
+        // it is discarded rather than delivered. The message is then lost for
+        // good, however many retries remain.
+        //
+        // Slot count does not prevent this and it is tempting to think it does:
+        // one stuck message holds a single slot while the other thirty-one keep
+        // cycling, and the identifier space runs away from it. The bound has to
+        // be on the identifier distance, not on how many are outstanding.
+        if let Some(oldest) = self.oldest_unacked() {
+            if self.next_id.wrapping_sub(oldest) >= ACK_WINDOW {
+                return Err(Error::WindowFull);
+            }
+        }
+
         let slot = self
             .slots
             .iter_mut()
@@ -337,11 +355,29 @@ impl RetransmitQueue {
         self.next_id = self.next_id.wrapping_add(1);
         *slot = Some(InFlight {
             id,
-            deadline_ms: now_ms.saturating_add(u64::from(INITIAL_RTO_MS.max(self.rto.current()))),
+            // `current` already answers INITIAL_RTO_MS while no round trip has
+            // been measured, so taking a maximum with it only pins the first
+            // timeout at 200 ms for the life of the session — which would make
+            // MIN_RTO_MS unreachable exactly where it matters, on the first
+            // transmission, and leave a loss on a fast path costing ten times
+            // what the measured round trip justifies.
+            deadline_ms: now_ms.saturating_add(u64::from(self.rto.current())),
             sent_at_ms: now_ms,
             retries: 0,
         });
         Ok(id)
+    }
+
+    /// The outstanding identifier the rest have run furthest ahead of.
+    ///
+    /// Identifiers wrap, so "oldest" is measured as distance behind the next
+    /// one to be issued rather than by numeric order.
+    fn oldest_unacked(&self) -> Option<MessageId> {
+        self.slots
+            .iter()
+            .flatten()
+            .map(|entry| entry.id)
+            .max_by_key(|id| self.next_id.wrapping_sub(*id))
     }
 
     /// Applies an acknowledgement, writing the newly acknowledged identifiers

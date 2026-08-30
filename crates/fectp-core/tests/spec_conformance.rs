@@ -177,6 +177,38 @@ fn replay_and_padding_constants() {
     assert_eq!(PAD_BLOCK, 64);
 }
 
+/// SPEC §5.5 rule 4 — a sender may not outrun the acknowledgement window.
+#[test]
+fn identifiers_stay_within_the_acknowledgement_window() {
+    use fectp_core::reliability::{RetransmitQueue, ACK_WINDOW};
+
+    let mut queue = RetransmitQueue::new();
+    let stuck = queue.register(0).expect("first");
+
+    // Everything after the first is acknowledged immediately, so slots keep
+    // freeing and only `stuck` stays outstanding. A sender bounded by slot
+    // count alone would issue identifiers indefinitely.
+    let mut issued = 1u32;
+    while let Ok(id) = queue.register(0) {
+        let ack = fectp_core::reliability::Ack {
+            highest: id,
+            bitmap: 0,
+        };
+        let mut acked = [0u32; 32];
+        queue.on_ack(&ack, 0, &mut acked);
+        issued += 1;
+        assert!(
+            issued < ACK_WINDOW * 4,
+            "the sender must stop issuing identifiers, not run away from {stuck}"
+        );
+    }
+
+    assert!(
+        issued <= ACK_WINDOW,
+        "issued {issued} identifiers past an unacknowledged one, but an          acknowledgement can only reach back {ACK_WINDOW}"
+    );
+}
+
 /// SPEC §5.6 — the fragment descriptor.
 #[test]
 fn fragment_descriptor_layout() {

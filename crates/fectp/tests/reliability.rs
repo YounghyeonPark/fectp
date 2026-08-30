@@ -300,3 +300,36 @@ fn a_fragmented_message_whose_fragment_never_arrives_is_reported() {
         "a message that cannot be delivered must not report success"
     );
 }
+
+#[test]
+fn an_early_loss_is_recovered_in_a_stream_far_longer_than_the_ack_window() {
+    let echo = server();
+    // Drop the first data frame — the message's first fragment. What matters
+    // is not the drop but how far the stream runs on afterwards.
+    let relay = spawn_relay(echo.addr(), vec![1], vec![]);
+
+    let mut client =
+        Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
+
+    // A receiver reports what it has seen as a highest identifier plus a bitmap
+    // of the 64 below it. A sender that runs further ahead than that leaves the
+    // lost message unnameable: no acknowledgement can mention it, and its
+    // retransmission now falls outside the receiver's replay window, so it is
+    // discarded rather than delivered. It is then lost however many retries
+    // remain.
+    //
+    // Bounding in-flight *count* does not prevent this, which is what makes it
+    // easy to miss: the stuck message holds one of thirty-two slots while the
+    // other thirty-one keep cycling, and the identifier space runs away from
+    // it. This needs a send that keeps going as slots free rather than waiting
+    // for all of them, which is exactly what `send_large` does.
+    let payload = vec![0x3Cu8; client.max_fragment_payload() * 200];
+
+    client
+        .send_large(&payload, FLUSH)
+        .expect("a single early loss must not lose the message");
+
+    let received = echo.messages(1, TIMEOUT);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0], payload, "and it must arrive intact");
+}

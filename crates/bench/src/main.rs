@@ -19,7 +19,7 @@ use std::time::Duration;
 use datasets::Shape;
 use fectp::{Capabilities, Connection, Identity, PayloadType};
 use timing::{measure, measure_batched, throughput_mib};
-use transports::{FectpEcho, TlsEcho, TlsSetup, UdpEcho};
+use transports::{FectpEcho, LossyRelay, TlsEcho, TlsSetup, UdpEcho};
 
 const SECRET: &[u8] = b"benchmark-secret";
 const WARMUP: usize = 50;
@@ -43,6 +43,7 @@ fn main() {
     crypto_cost();
     compression();
     compression_level();
+    under_loss();
 
     println!("\n{}", "=".repeat(72));
     println!("Absolute times are loopback figures; see the round-trip table for");
@@ -620,3 +621,146 @@ fn ratio(raw: usize, coded: usize) -> String {
     format!("{:.2}x", raw as f64 / coded as f64)
 }
 
+
+// ───────────────────────────────────────────────────────── 8. loss ────────
+
+/// What everything above does not measure.
+///
+/// Sections 1 to 7 run over loopback, which never drops anything — so they
+/// exercise the parts of the protocol that are cheap and leave the reliability
+/// layer, the only part with a hard job, entirely untested. This injects loss
+/// so the numbers include the cost of recovering from it.
+fn under_loss() {
+    heading(
+        "8. Under packet loss",
+        "loss injected by a relay; the handshake is exempt so this measures data",
+    );
+
+    const RATES: &[u32] = &[0, 10, 50, 100];
+    const MESSAGES: usize = 100;
+
+    row_header(&[
+        "loss",
+        "100 reliable msgs",
+        "vs no loss",
+        "1 lost costs",
+    ]);
+
+    let mut baseline = 0.0;
+    for &rate in RATES {
+        let echo = FectpEcho::public_key();
+        let relay = LossyRelay::spawn(echo.addr, rate, 0x1234_5678 + u64::from(rate));
+        let public = echo.public.expect("identity");
+
+        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+            .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("timeout");
+
+        let payload = datasets::incompressible(256);
+        let start = std::time::Instant::now();
+        for _ in 0..MESSAGES {
+            // The window is 32, so this blocks partway through and the send
+            // rate becomes whatever acknowledgements allow.
+            loop {
+                match conn.send_reliable(&payload) {
+                    Ok(_) => break,
+                    Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
+                }
+            }
+        }
+        conn.flush(Duration::from_secs(30)).expect("flush");
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        if rate == 0 {
+            baseline = elapsed;
+        }
+        // Roughly how much each lost datagram added, spread over the ones this
+        // rate should have dropped.
+        let expected_losses = (MESSAGES as f64 * f64::from(rate) / 1000.0).max(1.0);
+        let per_loss = if rate == 0 {
+            "—".to_string()
+        } else {
+            format!("{:.0} ms", (elapsed - baseline) / expected_losses)
+        };
+
+        row(&[
+            &format!("{:.1}%", f64::from(rate) / 10.0),
+            &ms(elapsed),
+            &if rate == 0 {
+                "—".to_string()
+            } else {
+                format!("{:.1}x", elapsed / baseline)
+            },
+            &per_loss,
+        ]);
+    }
+
+    note("Nothing is resent until a retransmission timer fires, and that timer has");
+    note("a 20 ms floor against a loopback round trip of about 30 us. Recovery is");
+    note("governed by the timer, not by the path — one loss costs on the order of");
+    note("a thousand round trips, and no amount of protocol tuning changes that.");
+    note("The per-loss column falls as the rate rises because the fixed cost of the");
+    note("first timeout is shared over more of them.");
+    println!();
+
+    // The same again for a fragmented message, where every fragment is a
+    // reliable message and one loss stalls the whole thing.
+    row_header(&["loss", "256 KiB fragmented", "vs no loss", "throughput"]);
+
+    let mut baseline = 0.0;
+    for &rate in RATES {
+        let echo = FectpEcho::public_key();
+        let relay = LossyRelay::spawn(echo.addr, rate, 0xABCD_EF01 + u64::from(rate));
+        let public = echo.public.expect("identity");
+
+        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+            .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(60)))
+            .expect("timeout");
+
+        const SIZE: usize = 256 * 1024;
+        let payload = datasets::incompressible(SIZE);
+        let start = std::time::Instant::now();
+        let outcome = conn.send_large(&payload, Duration::from_secs(60));
+        let elapsed = start.elapsed();
+        let ms_taken = elapsed.as_secs_f64() * 1000.0;
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        if rate == 0 {
+            baseline = ms_taken;
+        }
+        let (time, ratio, rate_col) = match outcome {
+            Ok(()) => (
+                ms(ms_taken),
+                if rate == 0 {
+                    "—".to_string()
+                } else {
+                    format!("{:.1}x", ms_taken / baseline)
+                },
+                format!("{:.1} MiB/s", throughput_mib(SIZE, elapsed)),
+            ),
+            // Every fragment gets MAX_RETRIES attempts; past some loss rate one
+            // of them runs out and the message is lost entire.
+            Err(_) => ("gave up".to_string(), "—".to_string(), "—".to_string()),
+        };
+        row(&[
+            &format!("{:.1}%", f64::from(rate) / 10.0),
+            &time,
+            &ratio,
+            &rate_col,
+        ]);
+    }
+
+    note("A fragmented message needs every fragment, so its chance of stalling");
+    note("grows with the fragment count: at 1% loss a 226-fragment message expects");
+    note("two stalls, each costing a timeout. Throughput falls by more than an");
+    note("order of magnitude for 1% loss, which is the honest cost of recovering");
+    note("by timer alone. Nothing here is a congestion response — the send window");
+    note("is fixed at 32 whether the path is dropping everything or nothing.");
+}

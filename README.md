@@ -92,10 +92,10 @@ path latency, FECTP answers a first request 300 ms sooner than TCP + TLS, and
 every microsecond in this table put together is a rounding error beside that.
 
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
-per-message overhead, compression against gzip and Zstandard, and an honest
-account of the encryption trade-offs. It has also changed the implementation
-twice: it is why the default compression level moved from −4 to 1, and why the
-send path stopped trying to compress data that has already refused to.
+per-message overhead, compression against gzip and Zstandard, behaviour under
+packet loss, and an honest account of the encryption trade-offs. It has also
+changed the implementation four times, most seriously when injecting loss
+found a bug that lost messages outright.
 
 ---
 

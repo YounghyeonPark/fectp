@@ -549,7 +549,7 @@ These are unimplemented, not overlooked.
 
 | Gap | Consequence | Notes |
 |---|---|---|
-| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. It does pace `send_large` (D19), but as a fixed window, not a response to loss. |
+| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. It does pace `send_large` (D19), but as a fixed window, not a response to loss — measured at 1% loss, throughput falls by an order of magnitude and the window does not change. |
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. |
 | **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
@@ -657,6 +657,56 @@ That difference is deliberate rather than an oversight of symmetry: the two
 types have different obligations. A `Connection` owes its caller one answer; an
 `Endpoint` owes every peer forward progress, and the fastest way to break that
 promise is to let one slow peer own the loop.
+
+## D20 — A sender may not outrun the acknowledgement window
+
+**Problem**: found by injecting packet loss into the benchmark. A 256 KiB
+fragmented message did not merely slow down at 1% loss — it failed, every time.
+Dropping exactly one fragment of a 199-fragment message showed why: dropping
+fragment 6, 20, 60 or 100 lost the message; dropping 140, 180 or 195 recovered
+it in about 215 ms. The boundary sits where the remaining stream is 64 long.
+
+An acknowledgement names a highest identifier plus a bitmap of the 64 below it
+(D12). Once the sender has issued more than that many identifiers past a stuck
+message, no acknowledgement can name it, and its retransmissions arrive outside
+the receiver's replay window and are discarded as stale. It is lost however many
+retries remain.
+
+**The trap** is that bounding how many messages are unacknowledged *at once*
+looks like it prevents this, and does not. The stuck message holds one of 32
+slots while the other 31 keep cycling, so the identifier space runs hundreds
+past it. `MAX_IN_FLIGHT` is a memory bound; it is not a window.
+
+**Decision**: `register` refuses an identifier more than `ACK_WINDOW` ahead of
+the oldest unacknowledged one, so the sender stalls until that message is
+resolved one way or the other. `SPEC.md` §5.5 states it as a sender MUST rather
+than as quality of implementation, because a receiver conforming to the
+deduplication rules will silently fail to deliver what a violating sender
+sends — the failure is invisible on the receiving side.
+
+This was never specific to fragmentation. Any reliable stream that keeps sending
+while one message is stuck would lose it; `send_large` merely reaches the
+condition easily, because it feeds the window rather than waiting on it.
+
+## D21 — The first retransmission uses the measured timeout
+
+**Problem**: with D20 fixed, a single loss still cost about 200 ms where the
+measured round trip justified 20 ms.
+
+A message's first timeout was `max(INITIAL_RTO_MS, current)`. But `current`
+already answers `INITIAL_RTO_MS` while no round trip has been measured, so the
+maximum did nothing except pin the first timeout at 200 ms for the life of the
+session — making `MIN_RTO_MS` unreachable exactly where it decides how fast a
+loss is noticed. Retransmissions after the first used the measured value, so the
+backoff was not even monotonic: 200 ms, then 40 ms.
+
+**Decision**: use `current` alone. Measured over the loss benchmark, 100
+messages at 1% loss went from 463 ms to 279 ms, and a 256 KiB fragmented message
+at 1% loss from 419 ms to 62 ms.
+
+The conservatism this removes is real but misplaced. Guarding against spurious
+retransmission is what the round-trip estimate is *for*; refusing to use it
+below 200 ms discards the measurement rather than acting on it.
 
 ## Not carried over
 

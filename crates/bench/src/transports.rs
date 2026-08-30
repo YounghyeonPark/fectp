@@ -336,3 +336,93 @@ pub fn tls_round_trip(client: &mut TlsClient, payload: &[u8], buf: &mut [u8]) {
     let len = u32::from_le_bytes(back) as usize;
     client.stream.read_exact(&mut buf[..len]).expect("read body");
 }
+
+// ───────────────────────────────────────────────────────── lossy path ─────
+
+/// A UDP relay that drops a fixed proportion of what passes through it.
+///
+/// Loss is the one thing loopback cannot supply, and it is the condition the
+/// reliability layer exists for — so it has to be manufactured. The drop
+/// decision comes from a seeded generator rather than the system's, so a run is
+/// reproducible and two protocols can be given the same pattern of loss.
+///
+/// The opening datagram in each direction is exempt. These measure steady-state
+/// delivery, and a dropped handshake would measure connection setup instead.
+pub struct LossyRelay {
+    pub addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl LossyRelay {
+    pub fn spawn(server: SocketAddr, per_mille: u32, seed: u64) -> Self {
+        let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
+        let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
+        back.connect(server).expect("connect back");
+        front
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("timeout");
+        back.set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("timeout");
+        let addr = front.local_addr().expect("addr");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let client: Arc<std::sync::Mutex<Option<SocketAddr>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let front_rx = front.try_clone().expect("clone");
+        let back_tx = back.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut rng = seed;
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                seen += 1;
+                if seen > 1 && drops(&mut rng, per_mille) {
+                    continue;
+                }
+                let _ = back_tx.send(&buf[..n]);
+            }
+        });
+
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let Ok(n) = back.recv(&mut buf) else {
+                    continue;
+                };
+                seen += 1;
+                if seen > 1 && drops(&mut rng, per_mille) {
+                    continue;
+                }
+                let Some(dest) = *client.lock().expect("lock") else {
+                    continue;
+                };
+                let _ = front.send_to(&buf[..n], dest);
+            }
+        });
+
+        Self { addr, stop }
+    }
+}
+
+impl Drop for LossyRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn drops(state: &mut u64, per_mille: u32) -> bool {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state >> 33) % 1000 < u64::from(per_mille)
+}
