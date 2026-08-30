@@ -16,22 +16,30 @@ Two types do the work:
 
 ### Opening one
 
-Four modes, each with a variant that carries a payload in the first packet.
-None takes a timeout: they all use `HANDSHAKE_TIMEOUT`.
+Four modes. Three of them have a variant that sends data in the very first
+packet, saving the round trip the handshake would otherwise cost. None takes a
+timeout: they all use `HANDSHAKE_TIMEOUT`, and all return `Result<Self>`.
 
 | | |
 |---|---|
 | `connect(addr, peer_public, identity)` | Public-key mode. You must already know the peer's key. |
-| `connect_with_zero_rtt(addr, peer_public, identity, zero_rtt)` | The same, carrying a payload; returns the reply too. |
+| `connect_and_send(addr, peer_public, identity, first)` | The same, sending `first` with the handshake. |
 | `resume(addr, ticket, peer_public)` | Redeems a ticket, sparing three of the four key agreements. |
-| `resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt)` | The same, carrying a payload. |
+| `resume_and_send(addr, ticket, peer_public, first)` | The same, sending `first` with the handshake. |
 | `connect_psk(addr, secret)` | Pre-shared-key mode. No public keys involved. |
-| `connect_psk_with_zero_rtt(addr, secret, zero_rtt)` | The same, carrying a payload. |
+| `connect_psk_and_send(addr, secret, first)` | The same, sending `first` with the handshake. |
 | `connect_plain(addr)` | **No encryption.** Loopback and trusted links only. |
-| `connect_plain_with_data(addr, data)` | The same, carrying a payload. |
 
-> 0-RTT data is encrypted but **replayable** and has no forward secrecy. Put
-> idempotent requests there, or nothing. See `SPEC.md` §4.4.1.
+Plaintext has no `_and_send`: it is for loopback and trusted links, where
+saving a round trip is not worth a way of connecting.
+
+> Data sent with the handshake is encrypted but **replayable** — an attacker
+> who captures the packet can send it again — and has no forward secrecy. Send
+> only what is safe to repeat. A sensor reading is; "open the valve" is not.
+> See `SPEC.md` §4.4.1.
+>
+> It saves one round trip *once per connection*, so it is worth reaching for
+> when connections are short and worth ignoring when they stay open.
 
 ### Sending
 
@@ -141,7 +149,7 @@ An endpoint that is not polled does nothing.
 | | |
 |---|---|
 | `connect(addr, peer_public)` | Starts a handshake; the result arrives as `Event::Connected`. |
-| `connect_with_zero_rtt(addr, peer_public, zero_rtt)` | The same, carrying a payload. |
+| `connect_and_send(addr, peer_public, zero_rtt)` | The same, carrying a payload. |
 | `connecting()` | Handshakes started here and still unanswered. |
 | `disconnect(peer)` | Drops one peer. |
 

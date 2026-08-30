@@ -177,23 +177,40 @@ let limit = conn.max_reliable_payload();   // typically 1166 bytes
 
 For anything above either limit, see [Large messages](#large-messages).
 
-## Zero-RTT
+## Sending with the handshake
 
-The first handshake message can already carry data, so a request reaches the
-server in one flight:
+Opening a connection normally costs a round trip before any data moves. If you
+have data ready, it can ride along in the very first packet:
 
 ```rust
-let (conn, reply) = Connection::connect_with_zero_rtt(
-    addr, &server_public, &identity, b"GET /status",
+let conn = Connection::connect_and_send(
+    addr, &server_public, &identity, &reading,
 )?;
 ```
 
-The server receives it as the second element of `accept()`, or as
-`Event::Connected { zero_rtt, .. }`.
+The peer receives it as `Event::Connected { zero_rtt, .. }`, or as the second
+element of `accept()`. Anything it sends back arrives through `recv` like any
+other message.
 
-**This data is replayable.** It is encrypted, but an attacker who captures the
-frame can resend it, and it has no forward secrecy. Put only idempotent
-requests here.
+**When this is worth using.** It saves exactly one round trip, once, per
+connection. On a connection that stays open and carries thousands of messages
+that is nothing. It matters when connections are short:
+
+- a battery-powered sensor that wakes, reports one reading, and sleeps
+- reconnecting after a NAT mapping expires, which ends a session
+- anywhere the very first answer's latency is what somebody notices
+
+If your program connects once and streams, use plain `connect` and ignore this.
+
+**What it costs.** That first payload is encrypted, but:
+
+- **replayable** — an attacker who captures the packet can send it again, and
+  the peer cannot tell
+- **no forward secrecy** — it is protected only by the peer's static key, so a
+  later key compromise exposes it
+
+Send only what is safe to repeat. A sensor reading is; "open the valve" is not.
+`SPEC.md` §4.4.1 states this normatively.
 
 ## Reliable delivery
 

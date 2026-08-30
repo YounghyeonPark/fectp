@@ -328,7 +328,7 @@ fn a_dial_can_carry_zero_rtt_data() {
     let mut pair = Pair::public_key();
     let b_addr = pair.b.local_addr().expect("addr");
     pair.a
-        .connect_with_zero_rtt(b_addr, pair.b_public.as_ref(), b"hello on arrival")
+        .connect_and_send(b_addr, pair.b_public.as_ref(), b"hello on arrival")
         .expect("connect");
 
     let deadline = Instant::now() + TIMEOUT;

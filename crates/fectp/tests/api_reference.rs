@@ -89,11 +89,10 @@ fn no_way_of_connecting_takes_a_timeout() {
 
     // All fail — nothing is listening — but the shape is what is being pinned.
     let _ = Connection::connect(addr, &key, &id);
-    let _ = Connection::connect_with_zero_rtt(addr, &key, &id, b"hello");
+    let _ = Connection::connect_and_send(addr, &key, &id, b"hello");
     let _ = Connection::connect_psk(addr, b"secret");
-    let _ = Connection::connect_psk_with_zero_rtt(addr, b"secret", b"hello");
+    let _ = Connection::connect_psk_and_send(addr, b"secret", b"hello");
     let _ = Connection::connect_plain(addr);
-    let _ = Connection::connect_plain_with_data(addr, b"hello");
 }
 
 /// API.md — "Asking": the payload limits, in the order the reference claims.

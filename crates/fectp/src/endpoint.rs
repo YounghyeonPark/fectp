@@ -307,14 +307,14 @@ impl Endpoint {
         addr: impl ToSocketAddrs,
         peer_public: Option<&PublicKey>,
     ) -> Result<PeerId> {
-        self.connect_with_zero_rtt(addr, peer_public, &[])
+        self.connect_and_send(addr, peer_public, &[])
     }
 
     /// [`connect`](Self::connect), carrying data in the opening frame.
     ///
     /// In the encrypted modes this is 0-RTT data, with the caveats that
     /// implies: encrypted, but replayable by anyone who captures the frame.
-    pub fn connect_with_zero_rtt(
+    pub fn connect_and_send(
         &mut self,
         addr: impl ToSocketAddrs,
         peer_public: Option<&PublicKey>,

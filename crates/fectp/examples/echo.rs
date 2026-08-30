@@ -37,7 +37,7 @@ fn main() -> fectp::Result<()> {
 
     // The 0-RTT payload rides along in the first handshake message, so it
     // reaches the server before the handshake has finished.
-    let (client, _) = Connection::connect_with_zero_rtt(
+    let client = Connection::connect_and_send(
         &addr,
         &server_public,
         &Identity::generate(),

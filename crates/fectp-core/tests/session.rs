@@ -76,9 +76,9 @@ fn connect(
 
 #[test]
 fn handshake_carries_zero_rtt_data() {
-    let (_client, _server, zero_rtt) = connect(server_caps(), server_caps(), b"GET /status");
+    let (_client, _server, zero_rtt) = connect(server_caps(), server_caps(), b"first reading: 23.5");
     assert_eq!(
-        zero_rtt, b"GET /status",
+        zero_rtt, b"first reading: 23.5",
         "IK must deliver application data in the very first message"
     );
 }

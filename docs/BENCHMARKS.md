@@ -86,10 +86,23 @@ what must happen *before the first byte can be sent* and this one counts
 through to the answer arriving. FECTP is 0 handshake round trips and 1 total;
 TCP + TLS is 2 and 3.
 
-**This table is the entire argument for FECTP.** At 150 ms of path latency the
-difference between FECTP and TCP + TLS on first contact is 300 ms. Every
-microsecond in sections 1, 2, 4 and 5 put together is a rounding error against
-that.
+**This is the argument for FECTP, and it has a condition on it.** At 150 ms of
+path latency the difference between FECTP and TCP + TLS on first contact is
+300 ms — but it is 300 ms *once per connection*, so what it is worth depends
+entirely on how many messages that connection then carries:
+
+| messages per connection | saved per message | against §2's protocol difference |
+|---|---|---|
+| 1 | 300 ms | decisive |
+| 100 | 3 ms | still decisive |
+| 10,000 | 30 µs | comparable |
+| 1,000,000 | 0.3 µs | irrelevant |
+
+So this table is decisive for short connections — a sensor that wakes, reports
+and sleeps; a peer reconnecting after a NAT mapping expired (§10) — and close to
+meaningless for a connection that stays open and streams. An earlier draft of
+this section said the table was the whole argument and left that condition out,
+which flattered the result on exactly the workload where it does not apply.
 
 FECTP reaches one round trip on *first* contact because the Noise `IK` pattern
 carries the initiator's payload in message 1. QUIC needs a prior session to

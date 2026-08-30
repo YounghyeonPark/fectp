@@ -554,6 +554,7 @@ These are unimplemented, not overlooked.
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
+| **Answering inside the handshake** | An `Endpoint` receives data sent with a handshake but always replies with an empty payload, so the responder's half of 0-RTT is unreachable through the public API. | The protocol supports it — `Responder::write_response` takes a payload — and `Connection` delivers it through `recv` (D27). Only the endpoint has no way to supply one. |
 | **Path MTU discovery** | Frame size is fixed at 1200 bytes or the peer's advertised limit. | Fine on a LAN; a real network path may be smaller. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
@@ -891,6 +892,49 @@ that exists "just in case" is how the inconsistency started.
 
 Two tests pin it: one connects to a silent port and requires the call to
 return, and one does the same for every mode whose argument was removed.
+
+## D27 — Data sent with the handshake is data, not a request
+
+**Problem**: two things, found by being asked what `zero_rtt` was by the person
+who commissioned the protocol.
+
+The first is naming. The constructors were `connect_with_zero_rtt` and friends,
+and the documentation described the payload as a "request" with `GET /status`
+for an example. That framed a **data transport** as an RPC. This protocol was
+built to move sensor readings and streams; a stream has no requests in it. The
+vocabulary came from TLS and HTTP and did not belong.
+
+The second is shape. Those constructors returned `(Connection, Vec<u8>)` — the
+connection and whatever the peer said back — so half the ways of connecting
+returned a tuple and half did not, and a caller had to learn that before using
+any of them.
+
+**Decision**: the payload is the first data, so it is named for that and it
+travels the way data travels.
+
+- `connect_and_send(addr, key, identity, first)`, `resume_and_send`,
+  `connect_psk_and_send`. The verb matches the rest of the API.
+- Every constructor returns `Result<Self>`. What the peer sends back goes into
+  the same queue `recv` reads from, because it *is* the peer's first message,
+  not a different kind of thing.
+- Plaintext loses its variant entirely. It is for loopback and trusted links,
+  where saving one round trip does not justify a way of connecting.
+
+Eight constructors become seven, all the same shape.
+
+**A thing worth recording**: the `Vec<u8>` that was removed was *always empty*.
+`Endpoint` answers every handshake with `&[]`, so nothing in this codebase
+could ever put anything there. It was API surface for a value no caller could
+receive. The protocol supports it — `Responder::write_response` takes a
+payload — so the gap is on the endpoint side and is now listed as one.
+
+**And a correction to the benchmark.** `BENCHMARKS.md` §3 said its round-trip
+table was "the entire argument for FECTP" without saying that the saving is
+*once per connection*. Spread over ten thousand messages it is 30 µs each,
+comparable to the protocol differences §2 measures; over a million it is
+nothing. The table is decisive for short connections — a sensor that wakes,
+reports and sleeps — and close to meaningless for one that stays open and
+streams. The condition is now stated, with the arithmetic.
 
 ## Not carried over
 

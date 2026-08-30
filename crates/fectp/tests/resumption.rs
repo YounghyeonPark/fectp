@@ -197,7 +197,7 @@ fn resumption_carries_zero_rtt_data() {
     let ticket = ticket_of(&conn);
     drop(conn);
 
-    let (mut resumed, _) = Connection::resume_with_zero_rtt(
+    let mut resumed = Connection::resume_and_send(
         addr,
         &ticket,
         &server_public,

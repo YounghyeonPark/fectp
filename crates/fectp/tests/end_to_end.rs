@@ -34,18 +34,18 @@ fn round_trip_over_udp() {
 #[test]
 fn zero_rtt_data_arrives_with_the_handshake() {
     let echo = Echo::start();
-    let (_client, _reply) = Connection::connect_with_zero_rtt(
+    let _client = Connection::connect_and_send(
         echo.addr(),
         &echo.public(),
         &Identity::generate(),
-        b"GET /status",
+        b"first reading: 23.5",
     )
     .expect("connect");
 
     let observed = echo.connections(1, TIMEOUT);
     assert_eq!(
         observed.zero_rtt,
-        vec![b"GET /status".to_vec()],
+        vec![b"first reading: 23.5".to_vec()],
         "IK delivers application data in the first message, before the \
          handshake completes"
     );
@@ -455,4 +455,41 @@ fn a_single_message_can_override_the_default_shape() {
         .send_typed(&text, fectp::PayloadType::Opaque)
         .expect("send_typed");
     assert_eq!(echo.messages(1, TIMEOUT), vec![text]);
+}
+
+#[test]
+fn data_sent_with_the_handshake_reaches_the_peer() {
+    let echo = Echo::collector();
+    let first = b"a sensor reading, sent with the handshake";
+
+    // One packet carries the handshake and the data, so the peer has it after
+    // a single flight rather than after a round trip and then a send.
+    let _conn = Connection::connect_and_send(
+        echo.addr(),
+        &echo.public(),
+        &Identity::generate(),
+        first,
+    )
+    .expect("connect_and_send");
+
+    let seen = echo.connections(1, TIMEOUT);
+    assert_eq!(seen.zero_rtt, vec![first.to_vec()]);
+}
+
+#[test]
+fn a_connection_that_sent_nothing_first_has_nothing_waiting() {
+    let echo = Echo::start();
+    let conn = client(&echo);
+    conn.set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("timeout");
+
+    // Nothing rode along with the handshake, so `recv` has nothing queued and
+    // waits on the socket like any other call.
+    //
+    // The opposite case — a peer that *does* answer in its handshake reply —
+    // has no test, because `Endpoint` cannot produce one: it always answers
+    // with an empty payload. The delivery path exists and is exercised by the
+    // queue it writes into; what is missing is a peer to exercise it against.
+    let mut buf = [0u8; 256];
+    assert!(conn.recv(&mut buf).is_err(), "nothing should be waiting");
 }

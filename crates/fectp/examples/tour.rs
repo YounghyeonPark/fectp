@@ -165,11 +165,11 @@ fn shortest_pair() -> fectp::Result<()> {
 /// USAGE.md — "Timeouts" and "Zero-RTT"
 fn timeouts_and_zero_rtt() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let (conn, _reply) = Connection::connect_with_zero_rtt(
+        let conn = Connection::connect_and_send(
             addr,
             &server_public,
             &Identity::generate(),
-            b"GET /status",
+            b"first reading: 23.5",
         )?;
         conn.set_read_timeout(Some(Duration::from_millis(300)))?;
 

@@ -329,7 +329,7 @@ impl Core {
         peer_public: &PublicKey,
         identity: &Identity,
     ) -> Result<Self> {
-        Self::connect_with_zero_rtt(addr, peer_public, identity, &[]).map(|(c, _)| c)
+        Self::connect_and_send(addr, peer_public, identity, &[])
     }
 
     /// Connects while carrying `zero_rtt` in the first handshake message.
@@ -340,18 +340,18 @@ impl Core {
     /// can replay it. Send only requests that are safe to repeat.
     ///
     /// Returns the connection and any payload the peer sent back.
-    pub fn connect_with_zero_rtt(
+    pub fn connect_and_send(
         addr: impl ToSocketAddrs,
         peer_public: &PublicKey,
         identity: &Identity,
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
+    ) -> Result<Self> {
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-        let (mut conn, reply) = Self::handshake(transport, peer_public, identity, zero_rtt)?;
+        let mut conn = Self::handshake(transport, peer_public, identity, zero_rtt)?;
         // The handshake's deadline is not the caller's; `recv` gets its own.
         conn.set_read_timeout(None)?;
-        Ok((conn, reply))
+        Ok(conn)
     }
 
     /// The ticket that lets the next connection skip most of the handshake.
@@ -397,7 +397,7 @@ impl Core {
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
     ) -> Result<Self> {
-        Self::resume_with_zero_rtt(addr, ticket, peer_public, &[]).map(|(c, _)| c)
+        Self::resume_and_send(addr, ticket, peer_public, &[])
     }
 
     /// [`resume`](Self::resume), carrying 0-RTT data in the first message.
@@ -405,12 +405,12 @@ impl Core {
     /// The same caveats apply as to 0-RTT on a full handshake: the data is
     /// encrypted, but replayable by anyone who captures the frame. Send only
     /// what is safe to repeat.
-    pub fn resume_with_zero_rtt(
+    pub fn resume_and_send(
         addr: impl ToSocketAddrs,
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
+    ) -> Result<Self> {
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
@@ -436,7 +436,8 @@ impl Core {
         let mut conn = Self::new(transport, Link::Encrypted(session));
         conn.set_read_timeout(None)?;
         conn.transport.set_read_timeout(None)?;
-        Ok((conn, reply))
+        conn.queue_first(reply);
+        Ok(conn)
     }
 
     /// Connects using a pre-shared secret instead of a public key.
@@ -458,15 +459,15 @@ impl Core {
         addr: impl ToSocketAddrs,
         secret: &[u8],
     ) -> Result<Self> {
-        Self::connect_psk_with_zero_rtt(addr, secret, &[]).map(|(c, _)| c)
+        Self::connect_psk_and_send(addr, secret, &[])
     }
 
     /// [`connect_psk`](Self::connect_psk), carrying 0-RTT data.
-    pub fn connect_psk_with_zero_rtt(
+    pub fn connect_psk_and_send(
         addr: impl ToSocketAddrs,
         secret: &[u8],
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
+    ) -> Result<Self> {
         // A pre-shared key and a resumption ticket drive the same handshake;
         // only the provenance of the key differs.
         let ticket = preshared_key(secret);
@@ -493,7 +494,8 @@ impl Core {
 
         let mut conn = Self::new(transport, Link::Encrypted(session));
         conn.transport.set_read_timeout(None)?;
-        Ok((conn, reply))
+        conn.queue_first(reply);
+        Ok(conn)
     }
 
     /// Connects without encryption.
@@ -510,15 +512,7 @@ impl Core {
     /// Nothing here is authenticated, so anyone on the path can read, forge,
     /// or alter every byte.
     pub fn connect_plain(addr: impl ToSocketAddrs) -> Result<Self> {
-        Self::connect_plain_with_data(addr, &[]).map(|(c, _)| c)
-    }
-
-    /// [`connect_plain`](Self::connect_plain), carrying data in the opening
-    /// frame.
-    pub fn connect_plain_with_data(
-        addr: impl ToSocketAddrs,
-        payload: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
+        let payload: &[u8] = &[];
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
@@ -540,7 +534,20 @@ impl Core {
 
         let mut conn = Self::new(transport, Link::Plain(session));
         conn.transport.set_read_timeout(None)?;
-        Ok((conn, reply))
+        conn.queue_first(reply);
+        Ok(conn)
+    }
+
+    /// Puts whatever the peer sent alongside its handshake reply where
+    /// `recv` will find it.
+    ///
+    /// It is the peer's first data, not a different kind of thing, so it
+    /// arrives the way every other message does rather than as an extra return
+    /// value the caller has to know about.
+    fn queue_first(&mut self, first: Vec<u8>) {
+        if !first.is_empty() {
+            self.inbox.push_back(first);
+        }
     }
 
     fn handshake(
@@ -548,7 +555,7 @@ impl Core {
         peer_public: &PublicKey,
         identity: &Identity,
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
+    ) -> Result<Self> {
         let size = transport.max_datagram_size();
         let mut tx = vec![0u8; size + Initiator::OVERHEAD];
         let mut rx = vec![0u8; size];
@@ -568,7 +575,9 @@ impl Core {
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
-        Ok((Self::new(transport, Link::Encrypted(session)), reply))
+        let mut conn = Self::new(transport, Link::Encrypted(session));
+        conn.queue_first(reply);
+        Ok(conn)
     }
 
     /// The peer's authenticated static public key.
@@ -804,14 +813,13 @@ impl Connection {
     ///
     /// That payload is encrypted but **replayable** and has no forward
     /// secrecy; see `SPEC.md` §4.4.1.
-    pub fn connect_with_zero_rtt(
+    pub fn connect_and_send(
         addr: impl ToSocketAddrs,
         peer_public: &PublicKey,
         identity: &Identity,
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) = Core::connect_with_zero_rtt(addr, peer_public, identity, zero_rtt)?;
-        Ok((Self::wrap(core)?, reply))
+    ) -> Result<Self> {
+        Self::wrap(Core::connect_and_send(addr, peer_public, identity, zero_rtt)?)
     }
 
     /// Redeems a resumption ticket, sparing three of the four key agreements.
@@ -824,15 +832,13 @@ impl Connection {
     }
 
     /// [`resume`](Self::resume), carrying a payload in the first message.
-    pub fn resume_with_zero_rtt(
+    pub fn resume_and_send(
         addr: impl ToSocketAddrs,
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) =
-            Core::resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt)?;
-        Ok((Self::wrap(core)?, reply))
+    ) -> Result<Self> {
+        Self::wrap(Core::resume_and_send(addr, ticket, peer_public, zero_rtt)?)
     }
 
     /// Connects in pre-shared-key mode.
@@ -845,13 +851,12 @@ impl Connection {
 
     /// [`connect_psk`](Self::connect_psk), carrying a payload in the first
     /// message.
-    pub fn connect_psk_with_zero_rtt(
+    pub fn connect_psk_and_send(
         addr: impl ToSocketAddrs,
         secret: &[u8],
         zero_rtt: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) = Core::connect_psk_with_zero_rtt(addr, secret, zero_rtt)?;
-        Ok((Self::wrap(core)?, reply))
+    ) -> Result<Self> {
+        Self::wrap(Core::connect_psk_and_send(addr, secret, zero_rtt)?)
     }
 
     /// Connects in plaintext mode. Nothing is encrypted or authenticated.
@@ -859,15 +864,6 @@ impl Connection {
         Self::wrap(Core::connect_plain(addr)?)
     }
 
-    /// [`connect_plain`](Self::connect_plain), carrying a payload in the first
-    /// message.
-    pub fn connect_plain_with_data(
-        addr: impl ToSocketAddrs,
-        data: &[u8],
-    ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) = Core::connect_plain_with_data(addr, data)?;
-        Ok((Self::wrap(core)?, reply))
-    }
 
     // ── asking about the connection ───────────────────────────────────────
 

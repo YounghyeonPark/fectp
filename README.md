@@ -25,7 +25,7 @@ send data encrypted, right now, and may be running on 32 KiB of RAM.**
 
 - Data travels in the **very first packet** — no waiting for a handshake.
 - The core is `no_std` and allocates nothing. Roughly **29 KiB** of code.
-- Delivery is per-message: fire-and-forget by default, guaranteed on request.
+- Delivery is per-message: fire-and-forget by default, guaranteed when you ask.
 - It knows what your data *is*, so it can compress it properly.
 
 ### Not what it is for
@@ -48,7 +48,7 @@ sequenceDiagram
     participant A as Your app
     participant B as Peer
     Note over A,B: once per session
-    A->>B: handshake + request
+    A->>B: handshake + first data
     B->>A: handshake + answer
     Note over A,B: every message after — no handshake
     A->>B: data
@@ -74,8 +74,8 @@ A session lasts until you drop it. The only thing that costs another handshake
 is losing the session — a restart, a reboot, a new peer — and
 [resumption](#session-resumption) cuts even that to a single X25519 operation.
 
-> 0-RTT data is encrypted but **replayable** by anyone who captures the packet.
-> Put idempotent requests there, or none.
+> Data sent with the handshake is encrypted but **replayable** by anyone who
+> captures the packet. Send only what is safe to repeat.
 
 ### Measured
 
@@ -88,7 +88,7 @@ Against raw UDP and TCP + TLS 1.3, on loopback:
 | TCP + TLS 1.3 | 64.4 µs | +104% |
 
 But the round-trip table above is what actually decides anything: at 150 ms of
-path latency, FECTP answers a first request 300 ms sooner than TCP + TLS, and
+path latency, FECTP gets a first answer 300 ms sooner than TCP + TLS, and
 every microsecond in this table put together is a rounding error beside that.
 
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
@@ -389,7 +389,7 @@ codecs, optional Zstandard compression.
 **Not built:** congestion control, ordered delivery, address migration, ticket
 expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
 
-187 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+189 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
 reliable delivery — plus the caller's buffers.
 
