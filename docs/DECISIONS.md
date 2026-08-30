@@ -549,12 +549,12 @@ These are unimplemented, not overlooked.
 
 | Gap | Consequence | Notes |
 |---|---|---|
-| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. It does pace `send_large` (D19), but as a fixed window, not a response to loss — measured at 1% loss, throughput falls by an order of magnitude and the window does not change. |
-| **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. |
+| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. Measured against a 1 Mbit/s link with an 8 KiB queue, 46% of datagrams offered are dropped by the full queue and then recovered by timer (BENCHMARKS.md §10). |
+| **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
 | **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
-| **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. |
+| **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
 | **Path MTU discovery** | Frame size is fixed at 1200 bytes or the peer's advertised limit. | Fine on a LAN; a real network path may be smaller. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
 | **Linked footprint figure** | Only a pre-link upper bound has been measured. | `fectp-core`'s own code is ~21 KiB for `thumbv7em-none-eabihf`; the crypto dependencies add roughly 95 KiB before dead-code elimination, dominated by `curve25519-dalek`. A real figure needs a firmware image linked with LTO and `--gc-sections`. |

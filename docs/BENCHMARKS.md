@@ -24,6 +24,11 @@ compression level moved from −4 to 1, §8 is why the send path stopped
 attempting compression on data that has already refused to compress, and §9 is
 where injecting packet loss found a bug that lost messages outright.
 
+It has also had to correct itself repeatedly, and those corrections are left in
+rather than tidied away: §2, §5, §9 and §10 each record a measurement that was
+wrong before it was right. A benchmark that only ever confirms what its author
+expected is not measuring anything.
+
 ---
 
 ## 1. Opening a connection
@@ -406,17 +411,92 @@ Removing it is the difference between the tables above and these:
 | 100 messages, 10% loss | 808 ms | **297 ms** |
 | 256 KiB fragmented, 1% loss | 419 ms | **62 ms** |
 
+## 10. Reordering, a bottleneck, and a rebinding NAT
+
+The parts of a real path that are not loss. Each is separated because a
+protocol can be right about one and wrong about another — and two of these
+three are known gaps rather than results.
+
+### Reordering costs nothing
+
+200 reliable 256-byte messages through a relay that holds some datagrams back.
+
+| | time | vs in order | arrived |
+|---|---|---|---|
+| none | 4.94 ms | — | all |
+| **every one by 2 ms (control)** | **106.20 ms** | 21.5x | all |
+| 1 in 10 by 2 ms | 106.85 ms | 21.6x | all |
+| **every one by 5 ms (control)** | **185.61 ms** | 37.6x | all |
+| 1 in 5 by 5 ms | 104.89 ms | 21.3x | all |
+
+**The controls are the measurement.** Delaying a datagram slows any protocol
+down, so a reordering run on its own says nothing. Each control applies the
+same delay to *every* datagram, which reorders nothing; the difference between
+a pair is what reordering itself costs.
+
+Both reordering rows sit at or below their control, so **reordering costs
+nothing measurable here** and the whole slowdown is latency. That is the design
+working as intended: delivery is unordered, so a frame is handed up on arrival
+rather than held for the one before it, and nothing is left to go wrong when
+they arrive in a different order. (The 5 ms pair is inverted — the reordered run
+came out faster than its control — which is the run-to-run spread, not a
+result.)
+
+### A bottleneck is where the missing congestion control shows
+
+A 256 KiB message through a rate-limited link with a finite queue.
+
+| bottleneck | time | queue overflow | goodput |
+|---|---|---|---|
+| 10 Mbit/s, 64 KiB queue | 307.24 ms | 2.5% (8/324) | 0.81 MiB/s |
+| 10 Mbit/s, 32 KiB queue | 227.84 ms | 2.5% (6/236) | 1.10 MiB/s |
+| 10 Mbit/s, 8 KiB queue | 279.13 ms | 10.2% (26/255) | 0.90 MiB/s |
+| 1 Mbit/s, 8 KiB queue | 2443.81 ms | 46.5% (218/469) | 0.10 MiB/s |
+
+There is no congestion control: the send window stays at 32 whatever the path
+is doing, so the sender keeps offering frames that a full queue then drops.
+**Those drops are the sender's own doing**, and each is paid for afterwards by a
+retransmission timer. At 1 Mbit/s nearly half of everything sent is discarded
+before it reaches the far side.
+
+A first draft of this section reasoned that a queue larger than one window —
+32 frames, about 38 KiB — could not be made to overflow. The 64 KiB row
+disproves it: retransmissions are offered *on top of* the window, so the burst
+is not bounded by it. The run-to-run spread on the middle two rows is wide;
+only the 1 Mbit/s row is far enough outside it to lean on.
+
+### A rebinding NAT ends the session
+
+| | after the rebind | expected |
+|---|---|---|
+| session survives a new source port | no | no |
+
+A session is keyed on the peer's address *and* its session identifier, so a
+peer that reappears on a new port is a stranger. This is a consequence of the
+keying choice rather than an oversight — keying on the pair is what stops one
+client's chosen identifier colliding with another's (D14) — but it does mean a
+NAT whose mapping expires ends the session, and the peers must handshake again.
+
+The relay here forwards from a second source port part-way through, which is
+what a NAT does when its mapping is re-created. The exchange before the rebind
+is the control: it must succeed, or the test proves nothing. An earlier version
+rebound after the third datagram, by which point the test had already finished —
+so it reported the session surviving something that never happened.
+
 ---
 
 ## What this measured, and what it did not
 
-Loopback removes the network. Loss is now injected (§9), but reordering,
-congestion, and NAT rebinding still are not. Nor is there any comparison
-against TCP under loss: dropping datagrams at a relay is fair to a datagram
-protocol and meaningless for a stream, where the same relay would corrupt the
-stream rather than exercise TCP's own recovery. Doing that fairly needs loss
-injected below the transport, which is not portable, so it has not been done —
-the §9 tables are FECTP against itself, not against an alternative.
+Loopback removes the network. Loss (§9), reordering, bottlenecks and rebinding
+(§10) are now injected; jitter, asymmetric paths, and multi-peer contention are
+not.
+
+**There is still no comparison against TCP under loss.** Dropping datagrams at a
+relay is fair to a datagram protocol and meaningless for a stream — the same
+relay corrupts a TCP connection rather than exercising its recovery. Doing it
+fairly needs loss injected below the transport, which is not portable, so §9 and
+§10 are FECTP measured against itself and against controls, never against an
+alternative. Read them as "what this costs", not as "what this beats".
 
 The TLS figures use rustls with a self-signed certificate and `TCP_NODELAY`. A
 production TLS deployment with session tickets and a warm connection pool would

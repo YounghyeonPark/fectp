@@ -19,7 +19,10 @@ use std::time::Duration;
 use datasets::Shape;
 use fectp::{Capabilities, Connection, Identity, PayloadType};
 use timing::{measure, measure_batched, throughput_mib};
-use transports::{FectpEcho, LossyRelay, TlsEcho, TlsSetup, UdpEcho};
+use transports::{
+    BottleneckRelay, FectpEcho, LossyRelay, RebindingRelay, ReorderingRelay, TlsEcho, TlsSetup,
+    UdpEcho,
+};
 
 const SECRET: &[u8] = b"benchmark-secret";
 const WARMUP: usize = 50;
@@ -44,6 +47,7 @@ fn main() {
     compression();
     compression_level();
     under_loss();
+    other_things_a_path_does();
 
     println!("\n{}", "=".repeat(72));
     println!("Absolute times are loopback figures; see the round-trip table for");
@@ -763,4 +767,173 @@ fn under_loss() {
     note("order of magnitude for 1% loss, which is the honest cost of recovering");
     note("by timer alone. Nothing here is a congestion response — the send window");
     note("is fixed at 32 whether the path is dropping everything or nothing.");
+}
+
+// ────────────────────────────── 9. reordering, bottlenecks, rebinding ─────
+
+/// The conditions loss alone does not cover.
+///
+/// A real path also delivers out of order, runs out of bandwidth, and moves the
+/// address a peer appears to come from. Each is separated here because a
+/// protocol can be right about one and wrong about another, and because two of
+/// the three are known gaps rather than results.
+fn other_things_a_path_does() {
+    heading(
+        "9. Reordering, a bottleneck, and a rebinding NAT",
+        "the parts of a real path that are not loss",
+    );
+
+    // ── reordering ───────────────────────────────────────────────────────
+    const MESSAGES: usize = 200;
+    let payload = datasets::incompressible(256);
+
+    let mut baseline = 0.0;
+    row_header(&["reordering", "200 reliable msgs", "vs in order", "arrived"]);
+    for (label, every, delay) in [
+        ("none", 0u64, Duration::ZERO),
+        ("every one by 2 ms (control)", 1, Duration::from_millis(2)),
+        ("1 in 10 by 2 ms", 10, Duration::from_millis(2)),
+        ("every one by 5 ms (control)", 1, Duration::from_millis(5)),
+        ("1 in 5 by 5 ms", 5, Duration::from_millis(5)),
+    ] {
+        let echo = FectpEcho::public_key();
+        let public = echo.public.expect("identity");
+        let relay = (every > 0).then(|| ReorderingRelay::spawn(echo.addr, every, delay));
+        let addr = relay.as_ref().map_or(echo.addr, |r| r.addr);
+
+        let mut conn =
+            Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("timeout");
+
+        let start = std::time::Instant::now();
+        for _ in 0..MESSAGES {
+            loop {
+                match conn.send_reliable(&payload) {
+                    Ok(_) => break,
+                    Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
+                }
+            }
+        }
+        let delivered = conn.flush(Duration::from_secs(30)).is_ok();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        if every == 0 {
+            baseline = elapsed;
+        }
+        row(&[
+            label,
+            &ms(elapsed),
+            &if every == 0 {
+                "—".to_string()
+            } else {
+                format!("{:.1}x", elapsed / baseline)
+            },
+            if delivered { "all" } else { "INCOMPLETE" },
+        ]);
+    }
+    note("Delaying a datagram slows any protocol down, so the reordering rows mean");
+    note("nothing without the control above each of them, which applies the same");
+    note("delay to every datagram and therefore reorders nothing. The difference");
+    note("between a pair is what reordering itself costs; the rest is latency.");
+    note("Delivery is unordered by design — a frame is delivered on arrival rather");
+    note("than held for the one before it — so that difference should be small.");
+    println!();
+
+    // ── a bottleneck ─────────────────────────────────────────────────────
+    row_header(&["bottleneck", "256 KiB", "queue overflow", "goodput"]);
+    for (label, bytes_per_sec, queue) in [
+        ("10 Mbit/s, 64 KiB queue", 1_250_000u64, 64 * 1024usize),
+        ("10 Mbit/s, 32 KiB queue", 1_250_000, 32 * 1024),
+        ("10 Mbit/s, 8 KiB queue", 1_250_000, 8 * 1024),
+        ("1 Mbit/s, 8 KiB queue", 125_000, 8 * 1024),
+    ] {
+        let echo = FectpEcho::public_key();
+        let public = echo.public.expect("identity");
+        let relay = BottleneckRelay::spawn(echo.addr, bytes_per_sec, queue);
+
+        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+            .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(60)))
+            .expect("timeout");
+
+        const SIZE: usize = 256 * 1024;
+        let payload = datasets::incompressible(SIZE);
+        let start = std::time::Instant::now();
+        let outcome = conn.send_large(&payload, Duration::from_secs(60));
+        let elapsed = start.elapsed();
+
+        let offered = relay.offered.load(std::sync::atomic::Ordering::Relaxed);
+        let dropped = relay.overflowed.load(std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
+        drop(relay);
+        drop(echo);
+
+        let share = if offered == 0 {
+            0.0
+        } else {
+            dropped as f64 * 100.0 / offered as f64
+        };
+        row(&[
+            label,
+            &match &outcome {
+                Ok(()) => ms(elapsed.as_secs_f64() * 1000.0),
+                Err(_) => "gave up".to_string(),
+            },
+            &format!("{share:.1}% ({dropped}/{offered})"),
+            &if outcome.is_ok() {
+                format!("{:.2} MiB/s", throughput_mib(SIZE, elapsed))
+            } else {
+                "—".to_string()
+            },
+        ]);
+    }
+    note("There is no congestion control: the window stays at 32 whatever the path");
+    note("is doing, so the sender keeps offering frames a full queue then drops. The");
+    note("overflow column counts drops the sender caused itself, each one paid for");
+    note("afterwards by a retransmission timer.");
+    note("A first draft of this note reasoned that a queue above one window — 32");
+    note("frames, about 38 KiB — could not be made to overflow. The 64 KiB row");
+    note("disproves it: retransmissions are offered on top of the window, so the");
+    note("burst is not bounded by it. Treat these as one host's figures; the run to");
+    note("run spread on the middle rows is wide.");
+    println!();
+
+    // ── a rebinding NAT ──────────────────────────────────────────────────
+    row_header(&["", "after the rebind", "expected"]);
+    let echo = FectpEcho::public_key();
+    let public = echo.public.expect("identity");
+    let relay = RebindingRelay::spawn(echo.addr, 2);
+
+    let mut conn =
+        Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+    conn.set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("timeout");
+    conn.send(b"before").expect("send");
+    let mut buf = [0u8; 256];
+    let before = conn.recv(&mut buf).is_ok();
+
+    conn.send(b"after the mapping moved").expect("send");
+    let after = conn.recv(&mut buf).is_ok();
+    drop(conn);
+    drop(relay);
+    drop(echo);
+
+    row(&[
+        "session survives a new source port",
+        if after { "yes" } else { "no" },
+        "no",
+    ]);
+    note(&format!(
+        "The exchange before the rebind {}, which is the control.",
+        if before { "worked" } else { "did NOT work" }
+    ));
+    note("A session is keyed on the peer's address and its session identifier, so a");
+    note("peer that reappears on a new port is a stranger. Keying on the pair is");
+    note("what stops one client's chosen identifier colliding with another's, so");
+    note("this is a consequence of that choice rather than an oversight — but it");
+    note("does mean a NAT rebinding ends the session.");
 }

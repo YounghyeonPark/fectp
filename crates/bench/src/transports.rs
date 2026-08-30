@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity};
 
@@ -425,4 +425,265 @@ fn drops(state: &mut u64, per_mille: u32) -> bool {
     *state ^= *state >> 7;
     *state ^= *state << 17;
     (*state >> 33) % 1000 < u64::from(per_mille)
+}
+
+// ──────────────────────────────────────────── other things a path does ────
+
+/// A relay that delivers datagrams out of order.
+///
+/// Holds every `every`-th datagram for `delay`, which is what a path with more
+/// than one route does. Loss and reordering look the same to a naive receiver,
+/// so this is worth separating: a protocol can be right about one and wrong
+/// about the other.
+///
+/// The delay is a *time*, not a count of datagrams that must arrive first. An
+/// earlier version released the held frame only when the next one turned up,
+/// which deadlocks whenever the held frame is the one the sender is waiting on
+/// — and then reports the retransmission timeout as the cost of reordering.
+///
+/// `every == 1` delays every datagram equally, which reorders nothing. That is
+/// the control the reordering runs need: delaying a datagram slows any protocol
+/// down, so the question is whether reordering costs more than the delay it
+/// comes with, and only a same-delay-no-reordering run can answer it.
+pub struct ReorderingRelay {
+    pub addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl ReorderingRelay {
+    pub fn spawn(server: SocketAddr, every: u64, delay: Duration) -> Self {
+        let (front, back, addr, stop, client) = relay_sockets(server);
+
+        let front_rx = front.try_clone().expect("clone");
+        let back_tx = back.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            let mut held: std::collections::VecDeque<(Vec<u8>, Instant)> =
+                std::collections::VecDeque::new();
+            while !flag.load(Ordering::Relaxed) {
+                // Checked on every pass, including the ones where the socket
+                // timed out, so a held frame is released whether or not the
+                // sender has anything else to say.
+                while let Some((frame, since)) = held.front() {
+                    if since.elapsed() < delay {
+                        break;
+                    }
+                    let _ = back_tx.send(frame);
+                    held.pop_front();
+                }
+
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                seen += 1;
+
+                if seen > 1 && seen % every == 0 {
+                    held.push_back((buf[..n].to_vec(), Instant::now()));
+                    continue;
+                }
+                let _ = back_tx.send(&buf[..n]);
+            }
+        });
+
+        spawn_return_path(back, front, client, flag_clone(&stop));
+        Self { addr, stop }
+    }
+}
+
+impl Drop for ReorderingRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A relay with a bandwidth limit and a finite queue.
+///
+/// This is the condition FECTP has no answer for: its send window is fixed, so
+/// it does not slow down when a path cannot keep up. Whatever will not fit in
+/// the queue is dropped, and the drops are the sender's own doing.
+pub struct BottleneckRelay {
+    pub addr: SocketAddr,
+    /// Datagrams dropped because the queue was full.
+    pub overflowed: Arc<AtomicU64>,
+    /// Datagrams that arrived at the bottleneck.
+    pub offered: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+}
+
+impl BottleneckRelay {
+    /// `bytes_per_sec` is the link rate; `queue_bytes` is what it can buffer.
+    pub fn spawn(server: SocketAddr, bytes_per_sec: u64, queue_bytes: usize) -> Self {
+        let (front, back, addr, stop, client) = relay_sockets(server);
+        let overflowed = Arc::new(AtomicU64::new(0));
+        let offered = Arc::new(AtomicU64::new(0));
+
+        let front_rx = front.try_clone().expect("clone");
+        let back_tx = back.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        let over = Arc::clone(&overflowed);
+        let off = Arc::clone(&offered);
+        thread::spawn(move || {
+            let mut buf = [0u8; 65535];
+            let mut queue: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+            let mut queued_bytes = 0usize;
+            let mut credit = 0f64;
+            let mut last = Instant::now();
+
+            while !flag.load(Ordering::Relaxed) {
+                // Refill the link's budget for however long has passed.
+                let now = Instant::now();
+                credit += now.duration_since(last).as_secs_f64() * bytes_per_sec as f64;
+                last = now;
+                credit = credit.min(bytes_per_sec as f64);
+
+                while let Some(frame) = queue.front() {
+                    if credit < frame.len() as f64 {
+                        break;
+                    }
+                    credit -= frame.len() as f64;
+                    queued_bytes -= frame.len();
+                    let _ = back_tx.send(frame);
+                    queue.pop_front();
+                }
+
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                off.fetch_add(1, Ordering::Relaxed);
+
+                if queued_bytes + n > queue_bytes {
+                    over.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                queued_bytes += n;
+                queue.push_back(buf[..n].to_vec());
+            }
+        });
+
+        spawn_return_path(back, front, client, flag_clone(&stop));
+        Self {
+            addr,
+            overflowed,
+            offered,
+            stop,
+        }
+    }
+}
+
+impl Drop for BottleneckRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Sockets, address and shared state common to every relay here.
+#[allow(clippy::type_complexity)]
+fn relay_sockets(
+    server: SocketAddr,
+) -> (
+    UdpSocket,
+    UdpSocket,
+    SocketAddr,
+    Arc<AtomicBool>,
+    Arc<std::sync::Mutex<Option<SocketAddr>>>,
+) {
+    let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
+    let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
+    back.connect(server).expect("connect back");
+    front
+        .set_read_timeout(Some(Duration::from_millis(2)))
+        .expect("timeout");
+    back.set_read_timeout(Some(Duration::from_millis(2)))
+        .expect("timeout");
+    let addr = front.local_addr().expect("addr");
+    (
+        front,
+        back,
+        addr,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(std::sync::Mutex::new(None)),
+    )
+}
+
+fn flag_clone(stop: &Arc<AtomicBool>) -> Arc<AtomicBool> {
+    Arc::clone(stop)
+}
+
+/// Forwards the server's replies back to whichever address the client used.
+fn spawn_return_path(
+    back: UdpSocket,
+    front: UdpSocket,
+    client: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    flag: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 65535];
+        while !flag.load(Ordering::Relaxed) {
+            let Ok(n) = back.recv(&mut buf) else {
+                continue;
+            };
+            let Some(dest) = *client.lock().expect("lock") else {
+                continue;
+            };
+            let _ = front.send_to(&buf[..n], dest);
+        }
+    });
+}
+
+/// A relay that changes the source address it forwards from, part-way through.
+///
+/// This is what a NAT does when its mapping expires and is re-created on a new
+/// port. A session keyed on the peer's address cannot follow it.
+pub struct RebindingRelay {
+    pub addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl RebindingRelay {
+    pub fn spawn(server: SocketAddr, rebind_after: u64) -> Self {
+        let (front, back, addr, stop, client) = relay_sockets(server);
+        let second = UdpSocket::bind("127.0.0.1:0").expect("bind second");
+        second.connect(server).expect("connect second");
+        second
+            .set_read_timeout(Some(Duration::from_millis(2)))
+            .expect("timeout");
+
+        let front_rx = front.try_clone().expect("clone");
+        let first_tx = back.try_clone().expect("clone");
+        let second_tx = second.try_clone().expect("clone");
+        let learn = Arc::clone(&client);
+        let flag = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut buf = [0u8; 65535];
+            let mut seen = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
+                    continue;
+                };
+                *learn.lock().expect("lock") = Some(from);
+                seen += 1;
+                let _ = if seen > rebind_after {
+                    second_tx.send(&buf[..n])
+                } else {
+                    first_tx.send(&buf[..n])
+                };
+            }
+        });
+
+        spawn_return_path(back, front.try_clone().expect("clone"), Arc::clone(&client), flag_clone(&stop));
+        spawn_return_path(second, front, client, flag_clone(&stop));
+        Self { addr, stop }
+    }
+}
+
+impl Drop for RebindingRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
