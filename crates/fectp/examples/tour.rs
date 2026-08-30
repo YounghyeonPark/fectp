@@ -246,7 +246,46 @@ fn large_messages() -> fectp::Result<()> {
             fectp::MAX_MESSAGE_LEN
         );
         Ok(())
-    })
+    })?;
+
+    large_from_an_endpoint()
+}
+
+/// USAGE.md — "Large messages", the endpoint half.
+fn large_from_an_endpoint() -> fectp::Result<()> {
+    let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate())?;
+    let addr = server.local_addr()?;
+    let server_public = *server.public_key().expect("public-key mode");
+
+    let recording = vec![0x7Eu8; 20_000];
+    let expected = recording.clone();
+
+    let worker = std::thread::spawn(move || -> fectp::Result<bool> {
+        loop {
+            match server.poll(Some(Duration::from_millis(50)))? {
+                Event::Connected { peer, .. } => {
+                    // Returns at once: an endpoint serving many peers cannot
+                    // wait on one of them.
+                    server.send_large(peer, &recording)?;
+                }
+                Event::Sent { delivered, .. } => return Ok(delivered),
+                _ => {}
+            }
+        }
+    });
+
+    let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+    conn.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut buf = vec![0u8; expected.len()];
+    let n = conn.recv(&mut buf)?;
+    assert_eq!(&buf[..n], &expected[..]);
+
+    let delivered = worker.join().expect("worker thread")?;
+    println!(
+        "large from endpoint: {n} bytes queued and fed out by poll, delivered {delivered} (queue limit {} per peer)",
+        fectp::MAX_QUEUED_LARGE
+    );
+    Ok(())
 }
 
 /// USAGE.md — "Typed payloads"

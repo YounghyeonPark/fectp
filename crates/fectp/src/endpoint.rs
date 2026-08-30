@@ -48,10 +48,11 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
+use fectp_core::fragment::{fragments_needed, Fragment, MAX_MESSAGE_LEN};
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
 use fectp_core::reliability::MessageId;
 use fectp_core::plain::{PlainInitiator, PlainResponder};
@@ -105,8 +106,44 @@ pub enum Event {
         /// The handle [`Endpoint::connect`] returned.
         peer: PeerId,
     },
+    /// A message queued with [`Endpoint::send_large`] finished.
+    ///
+    /// Arrives once every fragment has been acknowledged, or once one has been
+    /// abandoned — a fragmented message missing a piece is not partially
+    /// delivered, it is not delivered.
+    Sent {
+        /// Which peer it was going to.
+        peer: PeerId,
+        /// Whether the peer acknowledged all of it.
+        delivered: bool,
+    },
     /// Nothing arrived before the timeout elapsed.
     Idle,
+}
+
+/// Large messages a peer may have queued at once.
+///
+/// Each holds its payload until acknowledged, so this bounds what one peer can
+/// make the endpoint keep.
+pub const MAX_QUEUED_LARGE: usize = 4;
+
+/// A large message being fed out one fragment at a time.
+///
+/// [`Connection::send_large`](crate::Connection::send_large) can simply wait
+/// for the send window; an endpoint serving many peers cannot, so the message
+/// is kept here and drained as the window frees.
+struct LargeSend {
+    message: u32,
+    payload_type: PayloadType,
+    data: Vec<u8>,
+    per_fragment: usize,
+    count: u16,
+    /// Next fragment to hand to the window.
+    next: u16,
+    /// Fragments sent but not yet acknowledged.
+    outstanding: Vec<MessageId>,
+    /// Set when a fragment was given up on, which loses the whole message.
+    lost: bool,
 }
 
 /// How long to wait for a reply before resending the opening frame.
@@ -161,6 +198,11 @@ pub struct Endpoint {
     routes: HashMap<(SocketAddr, u32), PeerId>,
     /// Handshakes started here and still awaiting a reply.
     outbound: HashMap<PeerId, Outbound>,
+    /// Completions produced outside `poll`, delivered by the next one.
+    ///
+    /// Queued rather than returned so that a completion raised while queuing a
+    /// message, or two completing in the same pass, cannot be dropped.
+    events: VecDeque<Event>,
     next_id: u64,
 
     rx: Vec<u8>,
@@ -175,6 +217,8 @@ struct PeerEntry {
     addr: SocketAddr,
     session_id: u32,
     datagram_limit: usize,
+    /// Large messages waiting on the send window.
+    queue: VecDeque<LargeSend>,
 }
 
 impl Endpoint {
@@ -218,6 +262,7 @@ impl Endpoint {
             tickets: TicketStore::default(),
             peers: HashMap::new(),
             routes: HashMap::new(),
+            events: VecDeque::new(),
             outbound: HashMap::new(),
             next_id: 0,
             rx: vec![0u8; size],
@@ -386,6 +431,10 @@ impl Endpoint {
         loop {
             self.drive_retransmits()?;
             if let Some(event) = self.drive_handshakes()? {
+                return Ok(event);
+            }
+            self.drive_large_sends()?;
+            if let Some(event) = self.events.pop_front() {
                 return Ok(event);
             }
 
@@ -687,8 +736,161 @@ impl Endpoint {
                 addr,
                 session_id,
                 datagram_limit,
+                queue: VecDeque::new(),
             },
         );
+    }
+
+    /// Queues a message too large for one frame, without waiting for it.
+    ///
+    /// [`Connection::send_large`](crate::Connection::send_large) waits for the
+    /// peer to acknowledge every fragment. An endpoint cannot: it serves many
+    /// peers from one loop, and stalling on one of them would stop the rest.
+    /// So this queues the message and returns, and
+    /// [`poll`](Self::poll) feeds it out as the send window frees.
+    ///
+    /// Completion arrives as [`Event::Sent`], whose `delivered` says whether
+    /// the peer acknowledged all of it. Progress only happens inside `poll`,
+    /// so an endpoint that queues a message and never polls sends nothing.
+    ///
+    /// Fails with [`Error::WindowFull`](fectp_core::Error::WindowFull) once
+    /// [`MAX_QUEUED_LARGE`] messages are queued for this peer.
+    pub fn send_large(&mut self, peer: PeerId, data: &[u8]) -> Result<()> {
+        let payload_type = self
+            .peers
+            .get(&peer)
+            .map(|e| e.peer.default_payload_type)
+            .ok_or(Error::UnknownPeer)?;
+        self.send_large_typed(peer, data, payload_type)
+    }
+
+    /// [`send_large`](Self::send_large), declaring the payload's shape.
+    pub fn send_large_typed(
+        &mut self,
+        peer: PeerId,
+        data: &[u8],
+        payload_type: PayloadType,
+    ) -> Result<()> {
+        let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
+        if !entry.peer.session.peer_capabilities().supports_reliable() {
+            return Err(Error::ReliabilityUnsupported);
+        }
+        if entry.queue.len() >= MAX_QUEUED_LARGE {
+            return Err(Error::Protocol(fectp_core::Error::WindowFull));
+        }
+
+        let per_fragment = entry.peer.max_fragment_payload(entry.datagram_limit);
+        let count = fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
+            len: data.len(),
+            limit: MAX_MESSAGE_LEN,
+        })?;
+
+        let message = entry.peer.next_message;
+        entry.peer.next_message = entry.peer.next_message.wrapping_add(1);
+        entry.queue.push_back(LargeSend {
+            message,
+            payload_type,
+            data: data.to_vec(),
+            per_fragment,
+            count,
+            next: 0,
+            outstanding: Vec::new(),
+            lost: false,
+        });
+
+        // Start it now rather than waiting for the next poll, so a caller that
+        // queues and then blocks in poll does not pay a round trip for nothing.
+        // Anything that completes is queued, not returned: this is not `poll`.
+        self.drive_large_sends()
+    }
+
+    /// Feeds queued large messages into whatever send window is free.
+    ///
+    /// Completions go onto the event queue rather than being returned, so a
+    /// pass that finishes two messages reports both.
+    fn drive_large_sends(&mut self) -> Result<()> {
+        let now = self.now_ms();
+        let ids: Vec<PeerId> = self.peers.keys().copied().collect();
+
+        for id in ids {
+            let Some(entry) = self.peers.get_mut(&id) else {
+                continue;
+            };
+
+            // Drained whether or not anything is queued. Nothing else in the
+            // endpoint path reads this, so leaving it would grow without
+            // bound for any peer that loses messages.
+            let lost = core::mem::take(&mut entry.peer.abandoned);
+
+            let Some(job) = entry.queue.front_mut() else {
+                continue;
+            };
+
+            // Anything given up on takes the whole message with it: the
+            // receiver cannot use the fragments that did arrive.
+            if !lost.is_empty() {
+                if job.outstanding.iter().any(|f| lost.contains(f)) {
+                    job.lost = true;
+                }
+                job.outstanding.retain(|f| !lost.contains(f));
+            }
+
+            while job.next < job.count && !job.lost {
+                let start = job.next as usize * job.per_fragment;
+                let end = (start + job.per_fragment).min(job.data.len());
+
+                let message_id = match entry.peer.retransmit.register(now) {
+                    Ok(v) => v,
+                    // The window is full. Whatever frees it — an ack or a
+                    // retransmission giving up — brings us back here.
+                    Err(fectp_core::Error::WindowFull) => break,
+                    Err(e) => return Err(Error::Protocol(e)),
+                };
+
+                let fragment = Fragment {
+                    message: job.message,
+                    index: job.next,
+                    count: job.count,
+                };
+                let chunk = job.data[start..end].to_vec();
+                let n = entry.peer.seal(
+                    &chunk,
+                    job.payload_type,
+                    Some(message_id),
+                    Some(fragment),
+                    entry.datagram_limit,
+                    &mut self.tx,
+                )?;
+                self.socket.send_to(&self.tx[..n], entry.addr)?;
+                entry.peer.pending.push(Pending {
+                    id: message_id,
+                    payload_type: job.payload_type,
+                    data: chunk,
+                    fragment: Some(fragment),
+                });
+                job.outstanding.push(message_id);
+                job.next += 1;
+            }
+
+            // A fragment leaves `pending` when it is acknowledged; the
+            // abandoned ones were taken out above, so what is left here is
+            // still genuinely in flight.
+            let pending = &entry.peer.pending;
+            job.outstanding
+                .retain(|f| pending.iter().any(|p| p.id == *f));
+
+            let done = job.lost || (job.next == job.count && job.outstanding.is_empty());
+            if done {
+                let delivered = !job.lost;
+                entry.queue.pop_front();
+                self.events.push_back(Event::Sent {
+                    peer: id,
+                    delivered,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Resends unanswered opening frames, and abandons the hopeless ones.

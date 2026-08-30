@@ -223,7 +223,11 @@ pub(crate) struct Peer {
     /// Receiver side: identifiers already delivered.
     pub dedup: DedupWindow,
     /// Reliable messages abandoned after exhausting their retries.
-    pub abandoned: usize,
+    ///
+    /// Identifiers rather than a count, because a caller feeding a large
+    /// message out fragment by fragment has to know *which* piece was given up
+    /// to know that the message is beyond saving.
+    pub abandoned: Vec<MessageId>,
 
     /// Partly-arrived fragmented messages.
     pub reassembly: Reassembly,
@@ -260,7 +264,7 @@ impl Peer {
             retransmit: RetransmitQueue::new(),
             pending: Vec::new(),
             dedup: DedupWindow::new(),
-            abandoned: 0,
+            abandoned: Vec::new(),
             reassembly: Reassembly::new(),
             next_message: 0,
             primary: vec![0u8; buffer_hint],
@@ -549,7 +553,7 @@ impl Peer {
                 }
                 Due::GaveUp(id) => {
                     self.pending.retain(|p| p.id != id);
-                    self.abandoned += 1;
+                    self.abandoned.push(id);
                 }
             }
         }

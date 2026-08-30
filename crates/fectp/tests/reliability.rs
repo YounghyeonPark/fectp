@@ -247,3 +247,56 @@ fn a_round_trip_estimate_is_learned() {
     );
     assert_eq!(echo.messages(4, TIMEOUT).len(), 4);
 }
+
+#[test]
+fn a_fragmented_message_survives_a_dropped_fragment() {
+    let echo = server();
+    // Index 0 is the handshake, so 1..=4 are the four fragments below. Drop
+    // one from the middle: the retransmission has to arrive still carrying its
+    // fragment descriptor, or the receiver will take it for a whole message
+    // and the reassembly will never complete.
+    let relay = spawn_relay(echo.addr(), vec![3], vec![]);
+
+    let mut client =
+        Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
+
+    let payload: Vec<u8> = {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..client.max_fragment_payload() * 4)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+
+    client.send_large(&payload, FLUSH).expect("send_large");
+
+    let received = echo.messages(1, TIMEOUT);
+    assert_eq!(received.len(), 1, "delivered once, not once per fragment");
+    assert_eq!(received[0], payload, "and whole");
+}
+
+#[test]
+fn a_fragmented_message_whose_fragment_never_arrives_is_reported() {
+    let echo = server();
+    // Drop one fragment and every retransmission of it. MAX_RETRIES attempts
+    // then give up, so this fragment never lands.
+    let relay = spawn_relay(echo.addr(), (1..40).collect(), vec![]);
+
+    let mut client =
+        Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
+    let payload = vec![0xA5u8; client.max_fragment_payload() * 3];
+
+    // The caller has to be told. Silently returning success on a message the
+    // peer will never be able to assemble is the worst available outcome.
+    assert!(
+        matches!(
+            client.send_large(&payload, FLUSH),
+            Err(fectp::Error::Unacknowledged { .. })
+        ),
+        "a message that cannot be delivered must not report success"
+    );
+}

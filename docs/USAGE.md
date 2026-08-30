@@ -254,10 +254,32 @@ self-describing, which costs ratio — the compressor sees one fragment of
 context rather than the whole message. For data that compresses well, sending
 it pre-compressed by your own code will beat this.
 
-An `Endpoint` **receives** large messages normally, but has no `send_large`:
-that call waits for acknowledgements, and an event loop serving many peers
-cannot stall on one of them. Sending large messages from an endpoint needs an
-outbound queue that does not yet exist.
+### From an endpoint
+
+`Endpoint::send_large` cannot wait — an event loop serving many peers must not
+stall on one of them — so it **queues** the message and returns immediately.
+`poll` feeds it out as the send window frees:
+
+```rust
+server.send_large(peer, &recording)?;      // returns at once
+loop {
+    match server.poll(Some(Duration::from_millis(50)))? {
+        Event::Sent { peer, delivered } => {
+            println!("{peer:?}: {}", if delivered { "arrived" } else { "lost" });
+            break;
+        }
+        _ => {}
+    }
+}
+```
+
+`Event::Sent` reports the outcome. `delivered` is false if any fragment was
+abandoned after exhausting its retries — a fragmented message missing a piece
+is not partially delivered, it is not delivered.
+
+Progress happens only inside `poll`. An endpoint that queues a message and
+never polls sends nothing. The queue is bounded at `fectp::MAX_QUEUED_LARGE`
+messages per peer, since each holds its payload until acknowledged.
 
 ## Typed payloads
 

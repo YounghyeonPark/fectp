@@ -83,7 +83,7 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
-pub use endpoint::{Event, PeerId, Endpoint};
+pub use endpoint::{Endpoint, Event, PeerId, MAX_QUEUED_LARGE};
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES};
@@ -590,6 +590,16 @@ impl Connection {
         self.peer.max_payload(self.transport.max_datagram_size())
     }
 
+    /// Largest slice of a [`send_large`](Self::send_large) message that one
+    /// frame carries.
+    ///
+    /// A fragment gives up room to both the message identifier and the
+    /// fragment descriptor.
+    pub fn max_fragment_payload(&self) -> usize {
+        self.peer
+            .max_fragment_payload(self.transport.max_datagram_size())
+    }
+
     /// Largest uncompressed payload for a single
     /// [`send_reliable`](Self::send_reliable).
     ///
@@ -835,19 +845,19 @@ impl Connection {
     /// exhausting its retries.
     pub fn flush(&mut self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        self.peer.abandoned = 0;
+        self.peer.abandoned.clear();
 
         while self.peer.retransmit.in_flight() > 0 {
             if Instant::now() >= deadline {
                 return Err(Error::Unacknowledged {
-                    count: self.peer.retransmit.in_flight() + self.peer.abandoned,
+                    count: self.peer.retransmit.in_flight() + self.peer.abandoned.len(),
                 });
             }
             self.pump(Some(deadline), None)?;
         }
-        if self.peer.abandoned > 0 {
+        if !self.peer.abandoned.is_empty() {
             return Err(Error::Unacknowledged {
-                count: self.peer.abandoned,
+                count: self.peer.abandoned.len(),
             });
         }
         Ok(())

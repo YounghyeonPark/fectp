@@ -550,7 +550,6 @@ These are unimplemented, not overlooked.
 | Gap | Consequence | Notes |
 |---|---|---|
 | **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. It does pace `send_large` (D19), but as a fixed window, not a response to loss. |
-| **Sending large messages from an `Endpoint`** | Only `Connection` has `send_large`. | Receiving works on both. See D19. |
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. |
 | **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
@@ -647,10 +646,17 @@ honest limit of doing this without congestion control.
 which a receiver can act on without waiting for the rest, at the cost of the
 compressor seeing one fragment of context instead of the whole message.
 
-**Not done**: `Endpoint` receives fragmented messages but cannot send them.
-`send_large` waits for acknowledgements, and an event loop serving many peers
-must not stall on one of them; doing this properly needs a per-peer outbound
-queue drained by `poll`.
+**On an endpoint the waiting is not available.** `Connection::send_large` can
+block; an event loop serving many peers cannot, so `Endpoint::send_large`
+queues the message and `poll` feeds it out as the window frees. The outcome
+arrives as `Event::Sent { delivered }` rather than as a return value, and the
+queue is bounded per peer because each entry holds its payload until
+acknowledged.
+
+That difference is deliberate rather than an oversight of symmetry: the two
+types have different obligations. A `Connection` owes its caller one answer; an
+`Endpoint` owes every peer forward progress, and the fastest way to break that
+promise is to let one slow peer own the loop.
 
 ## Not carried over
 

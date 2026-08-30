@@ -304,6 +304,10 @@ acknowledgements — so this returns when the peer actually has the whole thing,
 not when the bytes left the kernel. The ceiling is 1 MiB, because a receiver
 commits memory on the strength of the sender's own fragment count.
 
+An `Endpoint` cannot wait, since it serves many peers from one loop. There
+`send_large` queues the message, `poll` feeds it out, and the outcome arrives
+as `Event::Sent { delivered }`.
+
 ## Reliability, per message
 
 ```rust
