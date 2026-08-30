@@ -1,205 +1,371 @@
 # FECTP
 
-Fast Encrypted Compressed Transport Protocol — an implementation.
+**An encrypted transport that gets your data moving with as little delay as
+possible — small enough for a microcontroller, identical code on a server.**
 
-Send bytes, get bytes. Encryption, framing, and the decision of whether
-compression is even worth attempting are handled underneath the API.
+You hand it bytes, the peer gets those bytes. Encryption, framing, and the
+decision of whether compressing is even worth the CPU all happen underneath.
+
+```rust
+conn.send(b"hello")?;
+let n = conn.recv(&mut buf)?;
+```
+
+---
+
+## What it is for
+
+Most encrypted transports make you choose. TLS over TCP is everywhere but costs
+two round trips before the first byte moves, and its stack is far too large for
+a microcontroller. Raw UDP is small and immediate but gives you nothing —
+no encryption, no framing, no way to know a message arrived.
+
+FECTP is for the middle: **an instrument, a sensor, or a service that needs to
+send data encrypted, right now, and may be running on 32 KiB of RAM.**
+
+- Data travels in the **very first packet** — no waiting for a handshake.
+- The core is `no_std` and allocates nothing. Roughly **29 KiB** of code.
+- Delivery is per-message: fire-and-forget by default, guaranteed on request.
+- It knows what your data *is*, so it can compress it properly.
+
+### Not what it is for
+
+Talking to a web browser, or anything that expects HTTP. This is a transport for
+software you control on both ends. It is also **not** a general P2P stack —
+there is no peer discovery and no NAT traversal, only the socket property those
+would build on.
+
+---
+
+## Why it's fast
+
+The usual cost of encryption is not the maths — encrypting a 1200-byte packet
+takes about a microsecond. The cost is the **round trips spent agreeing on keys
+before any real data may move**.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Your app
+    participant B as Peer
+    Note over A,B: FECTP — the request is inside the first packet
+    A->>B: handshake + "GET /status"
+    B->>A: handshake + the answer
+    Note over A,B: done in one round trip
+```
+
+| Before your first byte can be sent | Round trips |
+|---|---|
+| **FECTP**, first ever contact | **0** |
+| QUIC + TLS 1.3, first ever contact | 1 |
+| QUIC + TLS 1.3, reconnecting to a known peer | 0 |
+| TCP + TLS 1.3 | 2 |
+
+FECTP manages this on *first* contact because of one trade: the caller must
+already know the peer's public key. Nothing has to be negotiated, so the first
+packet can carry both the handshake and the payload. That key has to reach you
+some other way — the same bargain as an SSH host key.
+
+> 0-RTT data is encrypted but **replayable** by anyone who captures the packet.
+> Put idempotent requests there, or none.
+
+---
+
+## Where it sits
+
+Two crates. The lower one has no operating system in it at all, which is what
+lets the same protocol run on a microcontroller and a server.
+
+```mermaid
+flowchart TB
+    A["Your application<br/>send bytes · receive bytes"]
+    B["fectp — needs std<br/>Connection · Endpoint · codecs · Zstandard"]
+    C["fectp-core — no_std, no allocator, ~29 KiB<br/>Noise handshake · framing · replay window · reliability"]
+    D["Transport — a trait you implement<br/>UDP today; QUIC or a serial link just as well"]
+    A --> B --> C --> D
+```
+
+A constrained device uses `fectp-core` alone and supplies its own socket, clock
+and buffers. A server uses both crates. They speak the same protocol:
+
+```mermaid
+flowchart LR
+    subgraph big["Server or desktop"]
+        s1["fectp"] --> s2["fectp-core"]
+    end
+    subgraph small["Microcontroller · 32 KiB RAM"]
+        m["fectp-core"]
+    end
+    big <-->|"same wire format"| small
+```
+
+---
+
+## Getting started
+
+```toml
+[dependencies]
+fectp = { git = "https://github.com/younghyeonpark/fectp" }
+```
+
+The simplest pair — one peer listens, one dials:
 
 ```rust
 use std::time::Duration;
-use fectp::{Connection, Event, Identity, Endpoint};
+use fectp::{Connection, Endpoint, Event, Identity};
 
-// Endpoint
+// ── Listening side ────────────────────────────────────────────────
 let identity = Identity::generate();
-let server_public = *identity.public();
-let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;
+let public_key = *identity.public();          // give this to the other side
+let mut node = Endpoint::bind("0.0.0.0:4433", identity)?;
 
-// Client — the server's public key must already be known.
-let mut client = Connection::connect("server:4433", &server_public, &Identity::generate())?;
-client.send(b"hello")?;
+loop {
+    match node.poll(Some(Duration::from_millis(100)))? {
+        Event::Message { peer, data } => node.send(peer, &data)?,   // echo
+        _ => {}
+    }
+}
+
+// ── Dialling side ─────────────────────────────────────────────────
+let mut conn = Connection::connect("host:4433", &public_key, &Identity::generate())?;
+conn.send(b"hello")?;
+
+let mut buf = vec![0u8; 2048];
+let n = conn.recv(&mut buf)?;
 ```
 
-## What it is
+Full walkthrough, with every snippet compiled and run by
+[`examples/tour.rs`](crates/fectp/examples/tour.rs):
+**[docs/USAGE.md](docs/USAGE.md)**.
 
-- `Noise_IK_25519_ChaChaPoly_BLAKE2s` over UDP datagrams.
-- **0-RTT on first contact.** The IK pattern lets the initiator put real
-  application data in the very first message, because it already knows the
-  responder's static key. No prior session and no certificate authority are
-  needed. QUIC with TLS 1.3 cannot do this on a first connection.
-- **`no_std`, allocation-free core.** Builds for `thumbv7em-none-eabihf`.
-  The core owns no buffers; every operation writes into a caller-provided
-  slice.
-- **No coalescing on send.** `send` hands the datagram to the kernel and
-  returns. It does not wait for an acknowledgement and never batches payloads
-  the way a stream protocol would.
-- `#![forbid(unsafe_code)]`, and a fixed-size header with no variable-length
-  parsing before authentication.
+---
 
-## Three modes, one API
+## What happens to a message
 
-Not every deployment needs the same protection, and the friction is never the
-encryption — it is distributing keys. So the modes differ in what must be
-shared beforehand, not in how you use them:
+`send` is not a thin wrapper around `sendto`. Each payload takes this path, and
+every branch that costs anything is skipped when it would not pay:
+
+```mermaid
+flowchart LR
+    P["your bytes"] --> T{"shape<br/>declared?"}
+    T -->|yes| TR["transform<br/>split channels, delta"]
+    T -->|no| Z
+    TR --> Z{"compressing<br/>worth it?"}
+    Z -->|yes| ZS["Zstandard"]
+    Z -->|no| E
+    ZS --> E["encrypt + authenticate<br/>ChaCha20-Poly1305"]
+    E --> W["14-byte header<br/>+ frame"]
+    W --> S(["one UDP datagram"])
+```
+
+The "worth it?" test is real: a payload under 1 KiB, one that already looks
+compressed, or one the peer cannot decompress goes straight through. If
+compression runs and fails to shrink the payload, the original is sent. **A bad
+guess costs CPU, never bytes.**
+
+`send` returns as soon as the datagram reaches the kernel. It never waits for an
+acknowledgement and never batches payloads the way a stream protocol does.
+
+### On the wire
+
+```
+ byte  0        1          2 – 5              6 – 13          14 –
+     ┌─────────┬─────────┬──────────────┬──────────────────┬───────────┐
+     │ ver·type│  flags  │  session id  │ sequence number  │  payload  │
+     └─────────┴─────────┴──────────────┴──────────────────┴───────────┘
+     └──────────────── 14 bytes, always ─────────────────────┘
+```
+
+Fixed size, no length fields. Parsing a hostile packet involves no arithmetic
+before it is authenticated — deliberate, because a microcontroller has no ASLR,
+no NX bit and no MMU to contain a mistake there. The whole header is
+authenticated along with the payload, so changing any byte of it makes
+decryption fail.
+
+The core carries `#![forbid(unsafe_code)]`, so none of this parsing can reach
+for a raw pointer even by accident.
+
+Overhead is **30 bytes** per frame (14 header + 16 authentication tag), or 14 in
+plaintext mode, which has no tag because it has nothing to authenticate.
+
+---
+
+## Three security modes
+
+Not every deployment faces the same threat, and the friction is never the
+encryption — it is getting keys to where they need to be. So the modes differ in
+**what has to be shared beforehand**, not in how you use them.
+
+| Mode | You must share | Encrypted | Handshake cost | Suits |
+|---|---|---|---|---|
+| **Public key** | the peer's public key | yes | 4 × X25519 | the internet, several organisations |
+| **Pre-shared key** | one secret | yes | 1 × X25519 | a lab network, one closed system |
+| **Plaintext** | nothing | **no** | none | a cable you already trust, debugging |
 
 ```rust
-Connection::connect(addr, &server_public, &identity)?   // public key: 4 DH
-Connection::connect_psk(addr, b"shared-secret", t)?     // one secret:  1 DH
-Connection::connect_plain(addr, t)?                     // trusted link, no crypto
+Connection::connect(addr, &peer_public, &identity)?     // public key
+Connection::connect_psk(addr, b"shared-secret", t)?     // one secret
+Connection::connect_plain(addr, t)?                     // no crypto
 ```
 
-Everything after the constructor is identical. Modes never interoperate: their
-frame types are disjoint, so there is nothing on the wire to negotiate and
-nothing to downgrade.
+**Everything after the constructor is identical** — same `send`, same `recv`,
+same codecs, same reliability.
+
+If public-key mode feels heavy, the answer is usually a pre-shared key rather
+than turning encryption off: it removes key distribution entirely and keeps
+both encryption and forward secrecy.
+
+> **Modes never interoperate.** Their frame types do not overlap, so a peer in
+> one mode simply does not understand a peer in another. There is nothing on the
+> wire to negotiate, and therefore nothing to downgrade.
+
+---
 
 ## Peers, not clients and servers
 
-An `Endpoint` binds one socket and uses it both to accept connections and to
-start them. Whoever spoke first stops mattering once the handshake is done —
-the session is symmetric.
+"Initiator" and "responder" describe a *connection*, not a node. An `Endpoint`
+binds one socket and uses it **both** to accept connections and to start them;
+once the handshake finishes the session is symmetric and neither side is
+privileged.
+
+```mermaid
+flowchart LR
+    A(["Node A<br/>:4433"]) <-->|"A dialled B"| B(["Node B<br/>:4433"])
+    B <-->|"B dialled C"| C(["Node C<br/>:4433"])
+    A <-->|"A dialled C"| C
+```
 
 ```rust
 let mut node = Endpoint::bind_psk("0.0.0.0:4433", b"mesh-secret")?;
-let peer = node.connect("other-node:4433", None)?;   // same socket
+let peer = node.connect("other-node:4433", None)?;   // the same socket
 ```
 
-Sharing the socket is the precondition for NAT hole punching: a NAT maps a
-local port, so a node that dials from one port and listens on another cannot be
-reached on the mapping its own traffic created.
+Sharing the socket is not tidiness. A NAT maps a **local port**, so a node that
+dials out from one port and listens on another cannot be reached through the
+mapping its own traffic just created. One socket is the precondition for hole
+punching.
 
-## Serving many peers
+`connect` does not block: it sends the opening packet and returns a handle. The
+handshake completes during `poll`, as `Event::Connected { initiated: true }`, or
+gives up as `Event::ConnectFailed`.
 
-`Endpoint` owns the socket, routes each datagram by the header's session
-identifier, and reports what happened — one thread, no locks, no socket per
-peer. One server type handles one peer or a thousand:
+One `Endpoint` serves one peer or a thousand, on one thread, with no locks and
+no socket per peer. Try it:
+`cargo run -p fectp --example mesh --features compress`.
 
-```rust
-let mut server = Endpoint::bind("0.0.0.0:4433", Identity::generate())?;
-loop {
-    match server.poll(Some(Duration::from_millis(100)))? {
-        Event::Connected { peer, .. } => println!("{peer:?} arrived"),
-        Event::Message { peer, data } => server.send(peer, &data)?,
-        Event::Idle => {}
-    }
-}
-```
-
-Each peer gets its own reliability state, codec negotiation, and resumption
-ticket. Sessions are keyed on `(address, session_id)`, so two clients that pick
-the same identifier cannot collide.
-
-## Resumption
-
-A full handshake costs each peer four X25519 operations — on a microcontroller
-roughly a hundred millisecond, paid again after every reset. Resumption costs
-**one**:
-
-```rust
-let ticket = conn.resumption_ticket();      // persist *ticket.key(), 32 bytes
-// ... after a reset ...
-let conn = Connection::resume(addr, &ticket, &server_public, timeout)?;
-```
-
-Authentication comes from the ticket, which an earlier authenticated handshake
-established, so identities stay bound. Fresh ephemerals are still exchanged, so
-a resumed session keeps forward secrecy. Tickets are single use — each
-handshake issues the next one — which is what stops a captured resumption
-request being replayed.
+---
 
 ## Reliability, per message
 
 ```rust
 conn.send(b"telemetry")?;             // fire and forget
-conn.send_reliable(b"command")?;      // retransmitted until acknowledged
-conn.flush(Duration::from_secs(2))?;  // wait for outstanding acknowledgements
+conn.send_reliable(b"command")?;      // resent until acknowledged
+conn.flush(Duration::from_secs(2))?;  // wait for what is outstanding
 ```
 
-Reliable, but deliberately **not ordered**: a message that arrives is delivered
-at once rather than waiting for an earlier one, because holding it back is
-head-of-line blocking. Acknowledgements are selective, so one gap does not
-stall everything behind it, and a retransmission goes out under a fresh
-sequence number — the frame's nonce can never repeat — with a message
-identifier inside letting the receiver recognise the duplicate.
+Reliable but deliberately **not ordered**. A message that arrives is delivered
+at once rather than being held back for an earlier one — holding it back is
+head-of-line blocking, the exact cost this protocol exists to avoid. If you need
+order, put a sequence number in your own payload.
+
+Acknowledgements are selective, so one gap does not stall everything behind it.
+A retransmission goes out under a fresh sequence number, because that number is
+the encryption nonce and can never repeat; a message identifier inside the
+encrypted payload is what lets the receiver recognise the duplicate.
+
+---
 
 ## Typed payloads
 
-A generic compressor sees only bytes. Telling it the shape lets a transform run
-first:
+A general-purpose compressor sees only bytes. Tell it the shape and a transform
+can run first:
 
 ```rust
 conn.send_typed(&samples, PayloadType::I16 { channels: 4 })?;
 
-// Or, for a stream that is always the same shape:
+// Or, if the connection always carries the same shape:
 conn.set_default_payload_type(PayloadType::I16 { channels: 4 });
 conn.send(&samples)?;
 ```
 
-All codecs are lossless: a payload comes back byte for byte, and samples one
-least significant bit apart stay distinct. On a 4-channel block of slowly
-varying `i16`, Zstandard on the raw bytes saves nothing at all (interleaving
-hides the redundancy) while the typed path reaches **1.99x**. Transforms are pure integer code in the `no_std` core, so a peer with
-no room for a Zstandard decoder still gets that. A wrong declaration costs
-compression, never correctness, and a transform the peer cannot reverse is
-never used.
+On a 4-channel block of slowly varying `i16` — ordinary instrument data:
 
-Codecs are a registry, not a fixed set: adding support for a new data type
-means writing one transform and registering it, and negotiation, fallback,
-framing, and composition with Zstandard come for free. See
-[`docs/ADDING-A-CODEC.md`](docs/ADDING-A-CODEC.md).
-
-## Layout
-
-| Crate | |
+| | Bytes on the wire |
 |---|---|
-| `fectp-core` | `no_std` handshake, wire format, session, `Transport` trait |
-| `fectp` | `std` API: `Connection`, `Endpoint`, UDP backend, compression |
+| Zstandard on the raw bytes | 4096 — **no saving at all** |
+| Declared as `I16 { channels: 4 }` | 2055 — **2x** |
 
-The core is defined over a datagram `Transport` trait rather than over QUIC,
-because UDP is the only transport every target shares. QUIC fits behind the
-same trait on platforms that can afford it.
+Interleaving is why: consecutive bytes come from different channels, so a
+byte-oriented compressor finds nothing. Splitting by channel first exposes the
+redundancy that was there all along.
+
+Every codec is **lossless** — a payload comes back byte for byte, and samples
+one bit apart stay distinct. The transforms are plain integer code in the
+`no_std` core, so a peer with no room for a Zstandard decoder still gets that
+2x. Declaring the wrong shape costs compression, never correctness.
+
+Codecs are a registry, not a fixed set: supporting a new data type means writing
+one transform — see [docs/ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md).
+
+---
+
+## Session resumption
+
+A full handshake is four X25519 operations per side. On a microcontroller that
+is roughly a hundred milliseconds, paid again after **every reset**. Resumption
+costs one:
+
+```rust
+let key = *conn.resumption_ticket().expect("encrypted").key();   // 32 bytes
+save_to_flash(&key);
+
+// after a reset
+let conn = Connection::resume(addr, &Ticket::from_key(key), &peer_public, timeout)?;
+```
+
+Authentication comes from the ticket, which an earlier authenticated handshake
+established, so identities stay bound. Fresh ephemeral keys are still exchanged,
+so a resumed session keeps forward secrecy. Tickets are single use — each
+handshake issues the next — which is what stops a captured resumption request
+being replayed. Always keep the full-handshake path as a fallback.
+
+---
 
 ## Status
 
-Working: handshake, 0-RTT, authenticated framing, replay protection, reorder
-tolerance, capability negotiation, per-message reliable delivery, session
-resumption, multi-peer serving, outbound dialling on the same socket,
-three security modes, optional
-length-masking padding, typed payload codecs, optional Zstandard compression.
+**Working:** handshake, 0-RTT, authenticated framing, replay protection,
+reorder tolerance, capability negotiation, per-message reliable delivery,
+session resumption, many peers on one socket, outbound dialling on that same
+socket, three security modes, optional length-masking padding, typed payload
+codecs, optional Zstandard compression.
 
-Not yet built: congestion control, ordering, address migration, ticket
-expiry, a QUIC backend, bit-packed deltas.
+**Not built:** congestion control, ordered delivery, address migration, ticket
+expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
 
-## Documentation
+141 tests pass; the crate builds for `thumbv7em-none-eabihf`.
 
-| | |
-|---|---|
-| [`docs/USAGE.md`](docs/USAGE.md) | How to use it. Every snippet is compiled by `examples/tour.rs`. |
-| [`docs/SPEC.md`](docs/SPEC.md) | Normative wire specification. Everything an independent implementation needs. |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Why the protocol is shaped this way, and where it departs from the original design note. |
-| [`docs/ADDING-A-CODEC.md`](docs/ADDING-A-CODEC.md) | How to support a new data type. |
+---
 
-## Interoperating
+## Verification
 
-FECTP is an open format, not just this implementation. The handshake is
-standard Noise — `Noise_IK_25519_ChaChaPoly_BLAKE2s` for the full handshake and
-`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` for resumption, for which libraries
-exist in C, Go, Python, Java, and JavaScript — so a new implementation writes only
-the framing: three fixed-size binary layouts and the transforms, all specified
-in [`docs/SPEC.md`](docs/SPEC.md). Every normative constant in that document is
-pinned by `crates/fectp-core/tests/spec_conformance.rs`, so the specification
-cannot drift away from the code.
+The handshake is validated against [`snow`](https://docs.rs/snow), an
+independent Noise implementation, **in both roles** — see
+[`tests/interop.rs`](crates/fectp-core/tests/interop.rs). Any divergence in the
+key schedule, transcript hash, HMAC or HKDF would make the other side's
+decryption fail, so a passing run exercises the entire handshake.
 
-See [`docs/DECISIONS.md`](docs/DECISIONS.md) for where this deviates from
-`project_description.md` and why — including the BLAKE2b→BLAKE2s change, why
-compression had to become negotiable, and why the padding is off by default.
+[docs/SPEC.md](docs/SPEC.md) is a normative wire specification. Every constant
+in it is pinned by
+[`tests/spec_conformance.rs`](crates/fectp-core/tests/spec_conformance.rs), so
+the specification cannot quietly drift away from the code.
 
-## Examples
+An independent implementation needs an off-the-shelf Noise library — the two
+patterns used, `Noise_IK_25519_ChaChaPoly_BLAKE2s` and
+`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`, exist for C, Go, Python, Java and
+JavaScript — plus the framing: three fixed-size binary layouts and the
+transforms.
 
-```bash
-cargo run -p fectp --example tour          --features compress   # every documented snippet
-cargo run -p fectp --example echo          --features compress   # one client, round-trip timings
-cargo run -p fectp --example multi_client  --features compress   # six clients on one socket
-cargo run -p fectp --example mesh          --features compress   # three peers, all dialling each other
-```
+---
 
 ## Building
 
@@ -207,26 +373,36 @@ cargo run -p fectp --example mesh          --features compress   # three peers, 
 cargo test --workspace --features fectp/compress
 ```
 
-Compression needs a C toolchain for `zstd` and is therefore opt-in:
+Zstandard needs a C toolchain, so it is opt-in. Without it everything still
+works; payloads simply go uncompressed, and the built-in integer transforms
+still apply.
 
 ```bash
-cargo build -p fectp --features compress
+cargo build -p fectp-core --target thumbv7em-none-eabihf --release   # embedded check
 ```
 
-Embedded target check:
+### Examples
 
 ```bash
-cargo build -p fectp-core --target thumbv7em-none-eabihf --release
+cargo run -p fectp --example tour          --features compress   # every documented snippet
+cargo run -p fectp --example echo          --features compress   # one peer, round-trip timings
+cargo run -p fectp --example multi_client  --features compress   # six clients, one socket
+cargo run -p fectp --example mesh          --features compress   # three peers, all dialling
 ```
 
-## Verification
+---
 
-The Noise implementation is validated against [`snow`](https://docs.rs/snow),
-an independent implementation, in both roles — see
-`crates/fectp-core/tests/interop.rs`. Any divergence in the key schedule,
-transcript hash, HMAC, or HKDF would make the peer's decryption fail, so a
-passing run exercises the whole handshake.
+## Documentation
+
+| | |
+|---|---|
+| [USAGE.md](docs/USAGE.md) | How to use it. Every snippet is compiled by `examples/tour.rs`. |
+| [SPEC.md](docs/SPEC.md) | Normative wire format — everything an independent implementation needs. |
+| [DECISIONS.md](docs/DECISIONS.md) | Why the protocol is shaped this way, and where it departs from the original design note. |
+| [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data type. |
+
+---
 
 ## Licence
 
-BSD 3-Clause.
+BSD 3-Clause. See [LICENSE](LICENSE).
