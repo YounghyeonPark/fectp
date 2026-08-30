@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fectp-core", "crates/fectp"]
+members = ["crates/fectp-core", "crates/fectp", "crates/bench"]
 
 [workspace.package]
 version = "0.1.0"

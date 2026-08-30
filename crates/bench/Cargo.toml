@@ -1,0 +1,19 @@
+[package]
+name = "fectp-bench"
+description = "Measured comparison of FECTP against other transports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fectp = { path = "../fectp", features = ["compress"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+zstd = "0.13"
+flate2 = "1"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"

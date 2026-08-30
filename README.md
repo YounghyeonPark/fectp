@@ -77,6 +77,25 @@ is losing the session — a restart, a reboot, a new peer — and
 > 0-RTT data is encrypted but **replayable** by anyone who captures the packet.
 > Put idempotent requests there, or none.
 
+### Measured
+
+Against raw UDP and TCP + TLS 1.3, on loopback:
+
+| | median | vs raw UDP |
+|---|---|---|
+| raw UDP, no encryption | 26.2 µs | — |
+| **FECTP, encrypted** | **30.7 µs** | **+17%** |
+| TCP + TLS 1.3 | 59.0 µs | +125% |
+
+But the round-trip table above is what actually decides anything: at 150 ms of
+path latency, FECTP answers a first request 300 ms sooner than TCP + TLS, and
+every microsecond in this table put together is a rounding error beside that.
+
+[**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
+per-message overhead, compression against gzip and Zstandard, and an honest
+account of the encryption trade-offs and of a defect the benchmark found in the
+default compression level.
+
 ---
 
 ## Where it sits
@@ -411,6 +430,7 @@ cargo run -p fectp --example mesh          --features compress   # three peers, 
 | [SPEC.md](docs/SPEC.md) | Normative wire format — everything an independent implementation needs. |
 | [DECISIONS.md](docs/DECISIONS.md) | Why the protocol is shaped this way, and where it departs from the original design note. |
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data type. |
+| [BENCHMARKS.md](docs/BENCHMARKS.md) | Measured against UDP, TLS, gzip and Zstandard — including where it loses. |
 
 ---
 
