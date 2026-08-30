@@ -862,6 +862,36 @@ payload there is only one call that accepts it.
 The queue that feeds fragments out moved from `Endpoint` into `Peer`, so both
 types share it rather than growing two of them.
 
+## D26 — Every way of connecting has the same timeout
+
+**Problem**: writing the API reference made the constructors' shape visible.
+Nine of them, and the timeout argument applied unevenly: `connect` took none
+while `connect_with_timeout` sat beside it, and `connect_psk`, `connect_plain`
+and `resume` all required one.
+
+Looking for the reason turned up something worse than untidiness. `connect` did
+not have a *default* timeout — it had **none**, and `connect_with_timeout`
+existed as the way around that. Measured against a bound port that accepted
+datagrams and answered nothing, `Connection::connect` blocked for ever.
+
+That is not a hang anyone would notice in testing, because a responder that
+cannot authenticate a frame **drops it silently**: there is no reply and no
+error, so a handshake aimed at an unreachable peer or the wrong static key has
+nothing at all to wait for.
+
+**Decision**: `HANDSHAKE_TIMEOUT` applies to every constructor, and none of them
+takes a timeout argument. `connect_with_timeout` is gone. Nine constructors
+become eight, all the same shape: four modes, each with a variant that carries
+0-RTT data.
+
+Five seconds is generous for a satellite path and short enough that an
+unreachable peer is reported rather than waited on. It is fixed rather than
+configurable, because nothing so far needs a different value and a parameter
+that exists "just in case" is how the inconsistency started.
+
+Two tests pin it: one connects to a silent port and requires the call to
+return, and one does the same for every mode whose argument was removed.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

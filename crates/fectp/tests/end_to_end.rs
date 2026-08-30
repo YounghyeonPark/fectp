@@ -70,12 +70,7 @@ fn connecting_to_the_wrong_key_fails() {
 
     // The server cannot authenticate the frame, so it drops it and says
     // nothing. The client must time out rather than wait forever.
-    let result = Connection::connect_with_timeout(
-        echo.addr(),
-        &wrong_public,
-        &Identity::generate(),
-        Duration::from_millis(500),
-    );
+    let result = Connection::connect(echo.addr(), &wrong_public, &Identity::generate());
     assert!(
         result.is_err(),
         "a handshake aimed at the wrong static key must not succeed"

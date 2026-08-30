@@ -86,6 +86,23 @@ pub use pipeline::MAX_TICKETS;
 pub use endpoint::{Endpoint, Event, PeerId};
 pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
+/// How long a handshake waits for the peer's reply before giving up.
+///
+/// Applies to every way of opening a connection, which is why none of them
+/// takes a timeout argument.
+///
+/// Something like this is not optional. A responder that cannot authenticate a
+/// frame simply drops it — there is no reply and no error to observe — so a
+/// handshake aimed at an unreachable peer, or at the wrong static key, has
+/// nothing to wait for and would wait for ever. `connect` did exactly that
+/// until it was measured; `connect_with_timeout` existed beside it as the way
+/// around it, which is how the argument came to be on some constructors and
+/// not others.
+///
+/// Five seconds is generous enough for a satellite path and short enough that
+/// an unreachable peer is reported rather than waited on.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{
     INITIAL_CWND, MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES, MIN_CWND,
@@ -329,8 +346,12 @@ impl Core {
         identity: &Identity,
         zero_rtt: &[u8],
     ) -> Result<(Self, Vec<u8>)> {
-        let transport = UdpTransport::connect(resolve(addr)?)?;
-        Self::handshake(transport, peer_public, identity, zero_rtt)
+        let mut transport = UdpTransport::connect(resolve(addr)?)?;
+        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        let (mut conn, reply) = Self::handshake(transport, peer_public, identity, zero_rtt)?;
+        // The handshake's deadline is not the caller's; `recv` gets its own.
+        conn.set_read_timeout(None)?;
+        Ok((conn, reply))
     }
 
     /// The ticket that lets the next connection skip most of the handshake.
@@ -375,9 +396,8 @@ impl Core {
         addr: impl ToSocketAddrs,
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
-        timeout: Duration,
     ) -> Result<Self> {
-        Self::resume_with_zero_rtt(addr, ticket, peer_public, &[], timeout).map(|(c, _)| c)
+        Self::resume_with_zero_rtt(addr, ticket, peer_public, &[]).map(|(c, _)| c)
     }
 
     /// [`resume`](Self::resume), carrying 0-RTT data in the first message.
@@ -390,10 +410,9 @@ impl Core {
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
         zero_rtt: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
-        transport.set_read_timeout(Some(timeout))?;
+        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
         let mut tx = vec![0u8; size + ResumeInitiator::OVERHEAD];
@@ -438,9 +457,8 @@ impl Core {
     pub fn connect_psk(
         addr: impl ToSocketAddrs,
         secret: &[u8],
-        timeout: Duration,
     ) -> Result<Self> {
-        Self::connect_psk_with_zero_rtt(addr, secret, &[], timeout).map(|(c, _)| c)
+        Self::connect_psk_with_zero_rtt(addr, secret, &[]).map(|(c, _)| c)
     }
 
     /// [`connect_psk`](Self::connect_psk), carrying 0-RTT data.
@@ -448,13 +466,12 @@ impl Core {
         addr: impl ToSocketAddrs,
         secret: &[u8],
         zero_rtt: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
         // A pre-shared key and a resumption ticket drive the same handshake;
         // only the provenance of the key differs.
         let ticket = preshared_key(secret);
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
-        transport.set_read_timeout(Some(timeout))?;
+        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
         let mut tx = vec![0u8; size + ResumeInitiator::OVERHEAD];
@@ -492,8 +509,8 @@ impl Core {
     ///
     /// Nothing here is authenticated, so anyone on the path can read, forge,
     /// or alter every byte.
-    pub fn connect_plain(addr: impl ToSocketAddrs, timeout: Duration) -> Result<Self> {
-        Self::connect_plain_with_data(addr, &[], timeout).map(|(c, _)| c)
+    pub fn connect_plain(addr: impl ToSocketAddrs) -> Result<Self> {
+        Self::connect_plain_with_data(addr, &[]).map(|(c, _)| c)
     }
 
     /// [`connect_plain`](Self::connect_plain), carrying data in the opening
@@ -501,10 +518,9 @@ impl Core {
     pub fn connect_plain_with_data(
         addr: impl ToSocketAddrs,
         payload: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
         let mut transport = UdpTransport::connect(resolve(addr)?)?;
-        transport.set_read_timeout(Some(timeout))?;
+        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
         let mut tx = vec![0u8; size + PlainInitiator::OVERHEAD];
@@ -525,24 +541,6 @@ impl Core {
         let mut conn = Self::new(transport, Link::Plain(session));
         conn.transport.set_read_timeout(None)?;
         Ok((conn, reply))
-    }
-
-    /// Connects, giving up if the peer does not answer within `timeout`.
-    ///
-    /// Without a timeout a handshake aimed at an unreachable peer, or at the
-    /// wrong static key, waits forever: the responder simply drops a frame it
-    /// cannot authenticate, so there is no reply and no error to observe.
-    pub fn connect_with_timeout(
-        addr: impl ToSocketAddrs,
-        peer_public: &PublicKey,
-        identity: &Identity,
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        let mut transport = UdpTransport::connect(resolve(addr)?)?;
-        transport.set_read_timeout(Some(timeout))?;
-        let (mut conn, _) = Self::handshake(transport, peer_public, identity, &[])?;
-        conn.set_read_timeout(None)?;
-        Ok(conn)
     }
 
     fn handshake(
@@ -816,29 +814,13 @@ impl Connection {
         Ok((Self::wrap(core)?, reply))
     }
 
-    /// [`connect`](Self::connect) with an explicit handshake timeout.
-    pub fn connect_with_timeout(
-        addr: impl ToSocketAddrs,
-        peer_public: &PublicKey,
-        identity: &Identity,
-        timeout: Duration,
-    ) -> Result<Self> {
-        Self::wrap(Core::connect_with_timeout(
-            addr,
-            peer_public,
-            identity,
-            timeout,
-        )?)
-    }
-
     /// Redeems a resumption ticket, sparing three of the four key agreements.
     pub fn resume(
         addr: impl ToSocketAddrs,
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
-        timeout: Duration,
     ) -> Result<Self> {
-        Self::wrap(Core::resume(addr, ticket, peer_public, timeout)?)
+        Self::wrap(Core::resume(addr, ticket, peer_public)?)
     }
 
     /// [`resume`](Self::resume), carrying a payload in the first message.
@@ -847,10 +829,9 @@ impl Connection {
         ticket: &ResumptionTicket,
         peer_public: &PublicKey,
         zero_rtt: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
         let (core, reply) =
-            Core::resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt, timeout)?;
+            Core::resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt)?;
         Ok((Self::wrap(core)?, reply))
     }
 
@@ -858,9 +839,8 @@ impl Connection {
     pub fn connect_psk(
         addr: impl ToSocketAddrs,
         secret: &[u8],
-        timeout: Duration,
     ) -> Result<Self> {
-        Self::wrap(Core::connect_psk(addr, secret, timeout)?)
+        Self::wrap(Core::connect_psk(addr, secret)?)
     }
 
     /// [`connect_psk`](Self::connect_psk), carrying a payload in the first
@@ -869,15 +849,14 @@ impl Connection {
         addr: impl ToSocketAddrs,
         secret: &[u8],
         zero_rtt: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) = Core::connect_psk_with_zero_rtt(addr, secret, zero_rtt, timeout)?;
+        let (core, reply) = Core::connect_psk_with_zero_rtt(addr, secret, zero_rtt)?;
         Ok((Self::wrap(core)?, reply))
     }
 
     /// Connects in plaintext mode. Nothing is encrypted or authenticated.
-    pub fn connect_plain(addr: impl ToSocketAddrs, timeout: Duration) -> Result<Self> {
-        Self::wrap(Core::connect_plain(addr, timeout)?)
+    pub fn connect_plain(addr: impl ToSocketAddrs) -> Result<Self> {
+        Self::wrap(Core::connect_plain(addr)?)
     }
 
     /// [`connect_plain`](Self::connect_plain), carrying a payload in the first
@@ -885,9 +864,8 @@ impl Connection {
     pub fn connect_plain_with_data(
         addr: impl ToSocketAddrs,
         data: &[u8],
-        timeout: Duration,
     ) -> Result<(Self, Vec<u8>)> {
-        let (core, reply) = Core::connect_plain_with_data(addr, data, timeout)?;
+        let (core, reply) = Core::connect_plain_with_data(addr, data)?;
         Ok((Self::wrap(core)?, reply))
     }
 

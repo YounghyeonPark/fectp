@@ -74,7 +74,7 @@ fn connection_setup() {
         let ticket = conn.resumption_ticket().expect("encrypted");
         drop(conn);
         let start = std::time::Instant::now();
-        let _ = Connection::resume(pk.addr, &ticket, &pk_public, Duration::from_secs(2))
+        let _ = Connection::resume(pk.addr, &ticket, &pk_public)
             .expect("resume");
         start.elapsed()
     });
@@ -82,13 +82,13 @@ fn connection_setup() {
 
     let psk = FectpEcho::psk(SECRET);
     let psk_stats = measure(10, 100, || {
-        Connection::connect_psk(psk.addr, SECRET, Duration::from_secs(2)).expect("connect");
+        Connection::connect_psk(psk.addr, SECRET).expect("connect");
     });
     drop(psk);
 
     let plain = FectpEcho::plain();
     let plain_stats = measure(10, 100, || {
-        Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
+        Connection::connect_plain(plain.addr).expect("connect");
     });
     drop(plain);
 
@@ -168,7 +168,7 @@ fn round_trip_latency() {
     drop(pk);
 
     let plain = FectpEcho::plain();
-    let mut pconn = Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
+    let mut pconn = Connection::connect_plain(plain.addr).expect("connect");
     pconn.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
     let fectp_plain = measure(WARMUP, SAMPLES, || {
         transports::fectp_round_trip(&mut pconn, &payload, &mut buf);
@@ -335,7 +335,7 @@ fn crypto_cost() {
     drop(sink);
 
     let plain = FectpEcho::plain_drain();
-    let pconn = Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
+    let pconn = Connection::connect_plain(plain.addr).expect("connect");
     let plain_send = measure_batched(WARMUP, 40, 500, || {
         pconn.send(&payload).expect("send");
     });

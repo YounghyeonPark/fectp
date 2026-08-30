@@ -13,7 +13,6 @@ use common::Echo;
 use fectp::{Connection, Identity, Ticket};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const RESUME_TIMEOUT: Duration = Duration::from_millis(700);
 
 
 
@@ -44,7 +43,7 @@ fn a_resumed_session_carries_data() {
     drop(first);
 
     let mut resumed =
-        Connection::resume(addr, &ticket, &server_public, RESUME_TIMEOUT).expect("resume");
+        Connection::resume(addr, &ticket, &server_public).expect("resume");
     assert_eq!(exchange(&mut resumed, b"over a resumption"), b"over a resumption");
 
 }
@@ -79,7 +78,7 @@ fn identity_survives_resumption() {
     drop(first);
 
     let mut resumed =
-        Connection::resume(addr, &ticket, &server_public, RESUME_TIMEOUT).expect("resume");
+        Connection::resume(addr, &ticket, &server_public).expect("resume");
     exchange(&mut resumed, b"two");
     assert_eq!(
         resumed.peer_public_key().expect("connected"),
@@ -107,12 +106,12 @@ fn a_ticket_is_single_use() {
     drop(first);
 
     let mut resumed =
-        Connection::resume(addr, &ticket, &server_public, RESUME_TIMEOUT).expect("first resume");
+        Connection::resume(addr, &ticket, &server_public).expect("first resume");
     exchange(&mut resumed, b"two");
     drop(resumed);
 
     assert!(
-        Connection::resume(addr, &ticket, &server_public, RESUME_TIMEOUT).is_err(),
+        Connection::resume(addr, &ticket, &server_public).is_err(),
         "redeeming a ticket twice must fail, or a captured resumption request \
          could be replayed"
     );
@@ -130,7 +129,7 @@ fn resumption_issues_a_fresh_ticket_each_time() {
     drop(conn);
 
     let mut conn =
-        Connection::resume(addr, &first_ticket, &server_public, RESUME_TIMEOUT).expect("resume");
+        Connection::resume(addr, &first_ticket, &server_public).expect("resume");
     exchange(&mut conn, b"two");
     let second_ticket = ticket_of(&conn);
     assert_ne!(
@@ -142,7 +141,7 @@ fn resumption_issues_a_fresh_ticket_each_time() {
 
     // And the new one works, so the chain can continue indefinitely.
     let mut conn =
-        Connection::resume(addr, &second_ticket, &server_public, RESUME_TIMEOUT).expect("resume again");
+        Connection::resume(addr, &second_ticket, &server_public).expect("resume again");
     assert_eq!(exchange(&mut conn, b"three"), b"three");
 
 }
@@ -154,7 +153,7 @@ fn an_unknown_ticket_is_refused() {
 
     // A ticket this server has never issued.
     let bogus = Ticket::from_key([0x77; 32]);
-    let result = Connection::resume(addr, &bogus, &server_public, RESUME_TIMEOUT);
+    let result = Connection::resume(addr, &bogus, &server_public);
     assert!(
         result.is_err(),
         "a server that does not hold the ticket cannot answer, so the client \
@@ -178,7 +177,7 @@ fn a_restarted_server_forces_a_full_handshake() {
     let (fresh_addr, new_public) = (fresh.addr(), fresh.public());
 
     assert!(
-        Connection::resume(fresh_addr, &ticket, &new_public, RESUME_TIMEOUT).is_err(),
+        Connection::resume(fresh_addr, &ticket, &new_public).is_err(),
         "tickets do not survive the peer forgetting them"
     );
 
@@ -203,7 +202,6 @@ fn resumption_carries_zero_rtt_data() {
         &ticket,
         &server_public,
         b"resumed 0-RTT",
-        RESUME_TIMEOUT,
     )
     .expect("resume");
     exchange(&mut resumed, b"and then some");
@@ -230,7 +228,7 @@ fn a_ticket_survives_a_round_trip_through_storage() {
 
     let restored = Ticket::from_key(stored);
     let mut resumed =
-        Connection::resume(addr, &restored, &server_public, RESUME_TIMEOUT).expect("resume");
+        Connection::resume(addr, &restored, &server_public).expect("resume");
     assert_eq!(exchange(&mut resumed, b"after reset"), b"after reset");
 
 }

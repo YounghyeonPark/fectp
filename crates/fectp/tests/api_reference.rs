@@ -22,6 +22,11 @@ fn the_documented_constants_are_the_real_ones() {
     assert_eq!(fectp::MAX_FRAGMENTS, 4096, "API.md says 4096");
     assert_eq!(fectp::MAX_QUEUED, 4, "API.md says 4 per peer");
     assert_eq!(fectp::CODEC_OVERHEAD, 4, "API.md says 4 bytes");
+    assert_eq!(
+        fectp::HANDSHAKE_TIMEOUT,
+        Duration::from_secs(5),
+        "API.md says 5 s"
+    );
 }
 
 /// API.md — "Sending": two kinds, each with a `_typed` twin, any size.
@@ -68,6 +73,27 @@ fn every_send_has_the_shape_the_reference_claims() {
         Err(fectp::Error::PayloadTooLarge { .. }) => {}
         other => panic!("expected PayloadTooLarge, got {other:?}"),
     }
+}
+
+/// API.md — "Opening one": four modes, none taking a timeout.
+#[test]
+fn no_way_of_connecting_takes_a_timeout() {
+    use std::net::UdpSocket;
+
+    // Every constructor is called here with the argument list the reference
+    // prints. A timeout creeping back onto one of them stops compiling.
+    let silent = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let addr = silent.local_addr().expect("addr");
+    let key = *Identity::generate().public();
+    let id = Identity::generate();
+
+    // All fail — nothing is listening — but the shape is what is being pinned.
+    let _ = Connection::connect(addr, &key, &id);
+    let _ = Connection::connect_with_zero_rtt(addr, &key, &id, b"hello");
+    let _ = Connection::connect_psk(addr, b"secret");
+    let _ = Connection::connect_psk_with_zero_rtt(addr, b"secret", b"hello");
+    let _ = Connection::connect_plain(addr);
+    let _ = Connection::connect_plain_with_data(addr, b"hello");
 }
 
 /// API.md — "Asking": the payload limits, in the order the reference claims.

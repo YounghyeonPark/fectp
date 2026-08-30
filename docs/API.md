@@ -16,17 +16,19 @@ Two types do the work:
 
 ### Opening one
 
+Four modes, each with a variant that carries a payload in the first packet.
+None takes a timeout: they all use `HANDSHAKE_TIMEOUT`.
+
 | | |
 |---|---|
 | `connect(addr, peer_public, identity)` | Public-key mode. You must already know the peer's key. |
-| `connect_with_timeout(addr, peer_public, identity, timeout)` | The same, with the handshake timeout you choose. |
-| `connect_with_zero_rtt(addr, peer_public, identity, zero_rtt)` | Carries a payload in the first packet; returns the reply too. |
-| `resume(addr, ticket, peer_public, timeout)` | Redeems a ticket, sparing three of the four key agreements. |
-| `resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt, timeout)` | The same, carrying a payload. |
-| `connect_psk(addr, secret, timeout)` | Pre-shared-key mode. No public keys involved. |
-| `connect_psk_with_zero_rtt(addr, secret, zero_rtt, timeout)` | The same, carrying a payload. |
-| `connect_plain(addr, timeout)` | **No encryption.** Loopback and trusted links only. |
-| `connect_plain_with_data(addr, data, timeout)` | The same, carrying a payload. |
+| `connect_with_zero_rtt(addr, peer_public, identity, zero_rtt)` | The same, carrying a payload; returns the reply too. |
+| `resume(addr, ticket, peer_public)` | Redeems a ticket, sparing three of the four key agreements. |
+| `resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt)` | The same, carrying a payload. |
+| `connect_psk(addr, secret)` | Pre-shared-key mode. No public keys involved. |
+| `connect_psk_with_zero_rtt(addr, secret, zero_rtt)` | The same, carrying a payload. |
+| `connect_plain(addr)` | **No encryption.** Loopback and trusted links only. |
+| `connect_plain_with_data(addr, data)` | The same, carrying a payload. |
 
 > 0-RTT data is encrypted but **replayable** and has no forward secrecy. Put
 > idempotent requests there, or nothing. See `SPEC.md` §4.4.1.
@@ -191,18 +193,13 @@ there is nothing here to block on. Progress happens inside `poll`.
 | `MAX_FRAGMENTS` | 4096 | Pieces one message may be cut into. |
 | `MAX_QUEUED` | 4 | Split messages queued per peer. |
 | `CODEC_OVERHEAD` | 4 | Bytes a coded payload adds. |
+| `HANDSHAKE_TIMEOUT` | 5 s | How long any way of connecting waits for a reply. |
 
 ---
 
 ## Where this list is untidy
 
-Recorded rather than smoothed over, because both are visible above.
-
-**Nine constructors, inconsistently shaped.** They are the cross product of four
-modes and two 0-RTT variants, and the timeout argument is not applied evenly:
-`connect` takes none and `connect_with_timeout` exists beside it, while
-`connect_psk` and `connect_plain` require one. There is no reason for that
-difference other than the order the modes were added.
+Recorded rather than smoothed over, because it is visible above.
 
 **`_typed` doubles every send.** Two kinds of send become four on each type,
 eight across both, and the twin differs by one argument. Rust has no default

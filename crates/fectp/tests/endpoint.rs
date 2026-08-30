@@ -222,13 +222,8 @@ fn a_peer_can_resume_against_the_server() {
         ticket_tx.send(key).expect("ticket");
 
         go_rx.recv().expect("go");
-        let resumed = Connection::resume(
-            addr,
-            &Ticket::from_key(key),
-            &public,
-            Duration::from_millis(700),
-        )
-        .expect("resume");
+        let resumed = Connection::resume(addr, &Ticket::from_key(key), &public)
+            .expect("resume");
         resumed.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         resumed.send(b"second").expect("send");
         let n = resumed.recv(&mut buf).expect("echo");

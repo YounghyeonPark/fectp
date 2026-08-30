@@ -109,11 +109,10 @@ where
 fn modes() -> fectp::Result<()> {
     use fectp::Endpoint;
     const SECRET: &[u8] = b"lab-instrument-7";
-    let timeout = Duration::from_millis(600);
 
     // Pre-shared key: encrypted, but nothing to distribute except the secret.
     let psk = with_server_mode(Endpoint::bind_psk("127.0.0.1:0", SECRET)?, |addr, _| {
-        let conn = Connection::connect_psk(addr, SECRET, timeout)?;
+        let conn = Connection::connect_psk(addr, SECRET)?;
         assert!(conn.is_encrypted());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.send(b"psk")?;
@@ -125,7 +124,7 @@ fn modes() -> fectp::Result<()> {
 
     // Plaintext: framing and codecs, no crypto.
     let plain = with_server_mode(Endpoint::bind_plain("127.0.0.1:0")?, |addr, _| {
-        let conn = Connection::connect_plain(addr, timeout)?;
+        let conn = Connection::connect_plain(addr)?;
         assert!(!conn.is_encrypted());
         assert!(conn.resumption_ticket().is_none());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -138,7 +137,7 @@ fn modes() -> fectp::Result<()> {
 
     // Modes do not interoperate: nothing to negotiate, nothing to downgrade.
     let refused = with_server_mode(Endpoint::bind_psk("127.0.0.1:0", SECRET)?, |addr, _| {
-        Ok(Connection::connect_plain(addr, timeout).is_err())
+        Ok(Connection::connect_plain(addr).is_err())
     })?;
     assert!(refused, "a plaintext client must not reach an encrypted server");
 
@@ -190,12 +189,10 @@ fn timeouts_and_zero_rtt() -> fectp::Result<()> {
     // hang forever.
     with_server(|addr, _real| {
         let wrong = *Identity::generate().public();
-        let outcome = Connection::connect_with_timeout(
-            addr,
-            &wrong,
-            &Identity::generate(),
-            Duration::from_millis(300),
-        );
+        // No timeout to pass: every way of opening a connection uses
+        // `HANDSHAKE_TIMEOUT`, so an unreachable peer is reported rather than
+        // waited on for ever.
+        let outcome = Connection::connect(addr, &wrong, &Identity::generate());
         assert!(outcome.is_err(), "the wrong key must not connect");
         println!("timeouts: connecting with the wrong key fails instead of hanging");
         Ok(())
@@ -374,12 +371,7 @@ fn resumption() -> fectp::Result<()> {
         // Always keep the full-handshake fallback: a restarted or forgetful
         // server cannot answer a resumption.
         let ticket = Ticket::from_key(key);
-        let conn = match Connection::resume(
-            addr,
-            &ticket,
-            &server_public,
-            Duration::from_millis(700),
-        ) {
+        let conn = match Connection::resume(addr, &ticket, &server_public) {
             Ok(conn) => {
                 println!("resumption: resumed with one Diffie-Hellman instead of four");
                 conn

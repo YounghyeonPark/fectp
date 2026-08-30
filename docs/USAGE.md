@@ -116,6 +116,16 @@ let n = conn.recv(&mut buf)?;
 
 ## Timeouts
 
+Opening a connection needs none of your attention: every way of doing it gives
+up after `fectp::HANDSHAKE_TIMEOUT` (5 seconds). That is not a convenience —
+a responder that cannot authenticate a frame drops it silently, so a handshake
+aimed at an unreachable peer or the wrong key has nothing to wait for and would
+otherwise wait for ever.
+
+`set_read_timeout` is a separate thing: it bounds `recv` on an established
+connection, and defaults to blocking.
+
+
 `recv` blocks forever unless a timeout is set. Set one:
 
 ```rust
