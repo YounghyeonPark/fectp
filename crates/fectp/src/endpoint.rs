@@ -507,6 +507,10 @@ impl Endpoint {
                     data: staging,
                 }))
             }
+            Ingested::Message(data) => Ok(Some(Event::Message {
+                peer: peer_id,
+                data,
+            })),
         }
     }
 
@@ -757,7 +761,7 @@ impl Endpoint {
         let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
         let addr = entry.addr;
         let limit = entry.datagram_limit;
-        let n = entry.peer.seal(data, payload_type, None, limit, &mut self.tx)?;
+        let n = entry.peer.seal(data, payload_type, None, None, limit, &mut self.tx)?;
         self.socket.send_to(&self.tx[..n], addr)?;
         Ok(())
     }
@@ -804,12 +808,13 @@ impl Endpoint {
         let id = entry.peer.retransmit.register(now)?;
         let n = entry
             .peer
-            .seal(data, payload_type, Some(id), limit, &mut self.tx)?;
+            .seal(data, payload_type, Some(id), None, limit, &mut self.tx)?;
         self.socket.send_to(&self.tx[..n], addr)?;
         entry.peer.pending.push(Pending {
             id,
             payload_type,
             data: data.to_vec(),
+            fragment: None,
         });
         Ok(id)
     }

@@ -31,7 +31,8 @@
 //! between them without changing a line.
 
 use crate::error::{Error, Result};
-use crate::frame::{FrameType, Header, FLAG_RELIABLE, HEADER_LEN};
+use crate::fragment::{Fragment, FRAGMENT_LEN};
+use crate::frame::{FrameType, Header, FLAG_FRAGMENT, FLAG_RELIABLE, HEADER_LEN};
 use crate::keys::PublicKey;
 use crate::reliability::{Ack, MessageId, ACK_BLOCK_LEN, MESSAGE_ID_LEN};
 use crate::session::{Capabilities, Opened, ReplayWindow, CAPS_LEN};
@@ -89,7 +90,7 @@ impl PlainSession {
 
     /// Writes `payload` as a plaintext data frame.
     pub fn seal(&mut self, payload: &[u8], flags: u8, out: &mut [u8]) -> Result<usize> {
-        self.seal_frame(FrameType::PlainData, payload, None, flags, out)
+        self.seal_frame(FrameType::PlainData, payload, None, None, flags, out)
     }
 
     /// Writes `payload` as a plaintext data frame carrying `message_id`.
@@ -100,14 +101,33 @@ impl PlainSession {
         flags: u8,
         out: &mut [u8],
     ) -> Result<usize> {
-        self.seal_frame(FrameType::PlainData, payload, Some(message_id), flags, out)
+        self.seal_frame(FrameType::PlainData, payload, Some(message_id), None, flags, out)
+    }
+
+    /// Writes one fragment of a larger message.
+    pub fn seal_fragment(
+        &mut self,
+        payload: &[u8],
+        message_id: MessageId,
+        fragment: Fragment,
+        flags: u8,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.seal_frame(
+            FrameType::PlainData,
+            payload,
+            Some(message_id),
+            Some(fragment),
+            flags,
+            out,
+        )
     }
 
     /// Writes an acknowledgement frame.
     pub fn seal_ack(&mut self, ack: &Ack, out: &mut [u8]) -> Result<usize> {
         let mut block = [0u8; ACK_BLOCK_LEN];
         ack.encode(&mut block)?;
-        self.seal_frame(FrameType::PlainAck, &block, None, 0, out)
+        self.seal_frame(FrameType::PlainAck, &block, None, None, 0, out)
     }
 
     fn seal_frame(
@@ -115,6 +135,7 @@ impl PlainSession {
         frame_type: FrameType,
         payload: &[u8],
         message_id: Option<MessageId>,
+        fragment: Option<Fragment>,
         flags: u8,
         out: &mut [u8],
     ) -> Result<usize> {
@@ -125,8 +146,15 @@ impl PlainSession {
         } else {
             0
         };
+        let fragment_len = if fragment.is_some() {
+            flags |= FLAG_FRAGMENT;
+            FRAGMENT_LEN
+        } else {
+            0
+        };
         let total = HEADER_LEN
             .checked_add(id_len)
+            .and_then(|n| n.checked_add(fragment_len))
             .and_then(|n| n.checked_add(payload.len()))
             .ok_or(Error::PayloadTooLarge)?;
         if out.len() < total {
@@ -142,6 +170,10 @@ impl PlainSession {
         if let Some(id) = message_id {
             out[at..at + MESSAGE_ID_LEN].copy_from_slice(&id.to_le_bytes());
             at += MESSAGE_ID_LEN;
+        }
+        if let Some(fragment) = fragment {
+            fragment.encode(&mut out[at..])?;
+            at += FRAGMENT_LEN;
         }
         out[at..total].copy_from_slice(payload);
 
@@ -188,6 +220,16 @@ impl PlainSession {
             (None, 0, body)
         };
 
+        let (fragment, at, len) = if header.flags & FLAG_FRAGMENT != 0 {
+            if len < FRAGMENT_LEN {
+                return Err(Error::BadHeader);
+            }
+            let parsed = Fragment::decode(&frame[HEADER_LEN + at..])?;
+            (Some(parsed), at + FRAGMENT_LEN, len - FRAGMENT_LEN)
+        } else {
+            (None, at, len)
+        };
+
         if at > 0 {
             frame.copy_within(HEADER_LEN + at..HEADER_LEN + at + len, HEADER_LEN);
         }
@@ -197,6 +239,7 @@ impl PlainSession {
             header,
             len,
             message_id,
+            fragment,
         })
     }
 }

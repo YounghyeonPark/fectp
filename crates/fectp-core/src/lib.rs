@@ -19,6 +19,7 @@
 
 pub mod codec;
 pub mod error;
+pub mod fragment;
 pub mod frame;
 pub mod keys;
 pub mod noise;

@@ -549,7 +549,8 @@ These are unimplemented, not overlooked.
 
 | Gap | Consequence | Notes |
 |---|---|---|
-| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. |
+| **Congestion control** | A sender may saturate a path. | The in-flight bound (D12) caps memory, not send rate. It does pace `send_large` (D19), but as a fixed window, not a response to loss. |
+| **Sending large messages from an `Endpoint`** | Only `Connection` has `send_large`. | Receiving works on both. See D19. |
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. |
 | **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
@@ -612,6 +613,44 @@ Retrying periodically rather than giving up matters for the same reason the
 codec registry exists: what a connection carries can change. A channel of
 opaque bytes that starts carrying text should start compressing again, and 32
 sends bounds how long it takes to notice.
+
+## D19 — Messages larger than a frame are cut at the protocol layer
+
+**Problem**: a payload above `max_payload` could not be sent at all. That is a
+hard ceiling of about 1170 bytes on a general-purpose transport, and it has
+nothing to do with the protocol's purpose — it is the path MTU showing through.
+
+The reason FECTP never emits an oversized datagram is sound: IP fragments it,
+and an IP-fragmented datagram is lost entire if any one of its pieces goes
+missing, so the loss probability multiplies by the number of pieces.
+
+**Decision**: cut the message at the protocol layer instead, where each piece
+is a frame in its own right. A fragment descriptor — logical message, index,
+count — rides inside the encrypted plaintext, gated by `FLAG_FRAGMENT`, so an
+unfragmented message pays nothing for the feature.
+
+Three consequences worth stating rather than discovering:
+
+**Fragments are always reliable.** A message missing one fragment is entirely
+undeliverable, so fragments that could vanish without recovery would make the
+whole thing pointless. This is the first place the coding layer depends on the
+reliability layer.
+
+**The in-flight bound doubles as the send window.** `send_large` waits when 32
+fragments are outstanding rather than queueing the lot. That is what keeps a
+burst from outrunning the receiver's socket buffer — a 6 MB message emitted at
+line rate would overflow a default 64 KB buffer many times over and lose most
+of itself. It also caps throughput at one window per round trip, which is the
+honest limit of doing this without congestion control.
+
+**Coding is per fragment, not per message.** Each frame stays self-describing,
+which a receiver can act on without waiting for the rest, at the cost of the
+compressor seeing one fragment of context instead of the whole message.
+
+**Not done**: `Endpoint` receives fragmented messages but cannot send them.
+`send_large` waits for acknowledgements, and an event loop serving many peers
+must not stall on one of them; doing this properly needs a per-peer outbound
+queue drained by `poll`.
 
 ## Not carried over
 

@@ -10,6 +10,7 @@
 //! built.
 
 use fectp_core::plain::{PlainSession, ANONYMOUS, PLAIN_DATA_OVERHEAD};
+use fectp_core::fragment::Fragment;
 use fectp_core::reliability::{Ack, MessageId};
 use fectp_core::session::{Capabilities, Opened, ResumptionTicket, DATA_OVERHEAD};
 use fectp_core::{PublicKey, Result, Session};
@@ -113,6 +114,20 @@ impl Link {
         match self {
             Link::Encrypted(s) => s.seal_reliable(payload, message_id, flags, out),
             Link::Plain(s) => s.seal_reliable(payload, message_id, flags, out),
+        }
+    }
+
+    pub fn seal_fragment(
+        &mut self,
+        payload: &[u8],
+        message_id: MessageId,
+        fragment: Fragment,
+        flags: u8,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        match self {
+            Link::Encrypted(s) => s.seal_fragment(payload, message_id, fragment, flags, out),
+            Link::Plain(s) => s.seal_fragment(payload, message_id, fragment, flags, out),
         }
     }
 

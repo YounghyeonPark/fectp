@@ -286,6 +286,24 @@ no socket per peer. Try it:
 
 ---
 
+## Messages larger than a frame
+
+`send` refuses a payload above about 1170 bytes, because a datagram past the
+path MTU is cut up by IP — and an IP-fragmented datagram is lost entire if any
+one piece goes missing.
+
+`send_large` cuts the message at the protocol layer instead, where a lost piece
+is retransmitted on its own:
+
+```rust
+conn.send_large(&recording, Duration::from_secs(10))?;
+```
+
+It arrives as one message. Every fragment is reliable, and the send waits for
+acknowledgements — so this returns when the peer actually has the whole thing,
+not when the bytes left the kernel. The ceiling is 1 MiB, because a receiver
+commits memory on the strength of the sender's own fragment count.
+
 ## Reliability, per message
 
 ```rust

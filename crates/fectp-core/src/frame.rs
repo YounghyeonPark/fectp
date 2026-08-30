@@ -46,8 +46,11 @@ pub const FLAG_RELIABLE: u8 = 0b0000_0010;
 /// Frame flag: the plaintext is length-prefixed and padded to a block boundary.
 pub const FLAG_PADDED: u8 = 0b0000_0100;
 
+/// Frame flag: the plaintext carries a fragment descriptor before its payload.
+pub const FLAG_FRAGMENT: u8 = 0b0000_1000;
+
 /// Flag bits that are defined; any other bit set is a malformed frame.
-const KNOWN_FLAGS: u8 = FLAG_COMPRESSED | FLAG_RELIABLE | FLAG_PADDED;
+const KNOWN_FLAGS: u8 = FLAG_COMPRESSED | FLAG_RELIABLE | FLAG_PADDED | FLAG_FRAGMENT;
 
 /// What a frame carries.
 ///

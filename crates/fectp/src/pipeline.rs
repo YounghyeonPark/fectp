@@ -6,9 +6,10 @@
 //! apart.
 
 use fectp_core::codec::{CodecHeader, CODEC_HEADER_LEN};
+use fectp_core::fragment::{Fragment, FRAGMENT_LEN, MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 use fectp_core::frame::{FrameType, FLAG_COMPRESSED, HEADER_LEN};
 use fectp_core::reliability::{
-    Ack, DedupWindow, Due, MessageId, RetransmitQueue, MAX_IN_FLIGHT,
+    Ack, DedupWindow, Due, MessageId, RetransmitQueue, MAX_IN_FLIGHT, MESSAGE_ID_LEN,
 };
 use fectp_core::session::{Opened, ResumptionTicket, TICKET_ID_LEN};
 use fectp_core::PublicKey;
@@ -22,6 +23,174 @@ pub(crate) struct Pending {
     pub id: MessageId,
     pub payload_type: PayloadType,
     pub data: Vec<u8>,
+    /// Present when this is one piece of a larger message.
+    ///
+    /// A retransmission re-seals from scratch, so without this a resent
+    /// fragment would go out looking like a whole message and be delivered as
+    /// one.
+    pub fragment: Option<Fragment>,
+}
+
+/// Messages a receiver will reassemble at once.
+///
+/// Each one holds up to [`MAX_MESSAGE_LEN`] of half-finished work, so the two
+/// bounds multiply: this is the memory a peer can make a receiver hold.
+pub const MAX_REASSEMBLIES: usize = 4;
+
+/// One message being put back together.
+///
+/// Every fragment but the last is the same length (SPEC §5.6), so the body can
+/// be one buffer indexed by fragment number and only the tail needs its own.
+/// That keeps reassembly to a single allocation per message rather than one
+/// per fragment.
+struct Partial {
+    message: u32,
+    count: u16,
+    /// Length of a non-final fragment, learned from the first one that is not
+    /// the tail. A message of one fragment never learns it and never needs to.
+    stride: Option<usize>,
+    /// Fragments `0..count-1`, each at `index * stride`.
+    body: Vec<u8>,
+    /// The final fragment, whose length is whatever is left over.
+    tail: Vec<u8>,
+    have: Vec<bool>,
+    received: u16,
+}
+
+impl Partial {
+    fn new(message: u32, count: u16) -> Self {
+        Self {
+            message,
+            count,
+            stride: None,
+            body: Vec::new(),
+            tail: Vec::new(),
+            have: vec![false; count as usize],
+            received: 0,
+        }
+    }
+
+    /// Bytes currently held, for the memory bound.
+    fn held(&self) -> usize {
+        self.body.len() + self.tail.len()
+    }
+
+    /// Records one fragment, returning the whole message once it is complete.
+    fn insert(&mut self, fragment: Fragment, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        let index = fragment.index as usize;
+        if self.have[index] {
+            // A retransmission the dedup window let through, or a duplicate
+            // path. Either way the bytes are already here.
+            return Ok(None);
+        }
+
+        if fragment.is_last() {
+            self.tail = data.to_vec();
+        } else {
+            let stride = *self.stride.get_or_insert(data.len());
+            if data.len() != stride {
+                // SPEC §5.6 requires equal-length fragments before the last.
+                // Without that a fragment's offset cannot be derived from its
+                // index, so this is unplaceable rather than merely odd.
+                return Err(Error::Protocol(fectp_core::Error::BadHeader));
+            }
+            let end = stride
+                .checked_mul(self.count as usize - 1)
+                .ok_or(Error::Protocol(fectp_core::Error::PayloadTooLarge))?;
+            if end > MAX_MESSAGE_LEN {
+                return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
+            }
+            if self.body.len() < end {
+                self.body.resize(end, 0);
+            }
+            self.body[index * stride..(index + 1) * stride].copy_from_slice(data);
+        }
+
+        self.have[index] = true;
+        self.received += 1;
+        if self.received != self.count {
+            return Ok(None);
+        }
+
+        let mut whole = core::mem::take(&mut self.body);
+        whole.extend_from_slice(&self.tail);
+        Ok(Some(whole))
+    }
+}
+
+/// Partial messages, bounded in both count and bytes.
+///
+/// A peer that starts many messages and finishes none would otherwise pin
+/// memory indefinitely. Both limits are enforced here rather than trusted from
+/// the descriptor, which is a peer's claim about what it intends to send.
+pub(crate) struct Reassembly {
+    partials: Vec<Partial>,
+}
+
+impl Reassembly {
+    pub fn new() -> Self {
+        Self {
+            partials: Vec::new(),
+        }
+    }
+
+    /// Folds one fragment in, returning the message once every piece has come.
+    pub fn accept(&mut self, fragment: Fragment, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        if fragment.count > MAX_FRAGMENTS {
+            return Err(Error::Protocol(fectp_core::Error::BadHeader));
+        }
+
+        let slot = self
+            .partials
+            .iter()
+            .position(|p| p.message == fragment.message);
+
+        let slot = match slot {
+            Some(slot) => {
+                if self.partials[slot].count != fragment.count {
+                    // The same message cannot have been cut two ways. One of
+                    // the two is wrong and there is no way to tell which, so
+                    // neither is trusted.
+                    self.partials.remove(slot);
+                    return Err(Error::Protocol(fectp_core::Error::BadHeader));
+                }
+                slot
+            }
+            None => {
+                if self.partials.len() >= MAX_REASSEMBLIES {
+                    // Drop the oldest rather than refuse the newest: a stalled
+                    // message should not block every later one.
+                    self.partials.remove(0);
+                }
+                self.partials
+                    .push(Partial::new(fragment.message, fragment.count));
+                self.partials.len() - 1
+            }
+        };
+
+        match self.partials[slot].insert(fragment, data) {
+            Ok(Some(whole)) => {
+                self.partials.remove(slot);
+                Ok(Some(whole))
+            }
+            Ok(None) => {
+                if self.partials[slot].held() > MAX_MESSAGE_LEN {
+                    self.partials.remove(slot);
+                    return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                self.partials.remove(slot);
+                Err(e)
+            }
+        }
+    }
+
+    /// Messages currently half-assembled.
+    pub fn in_progress(&self) -> usize {
+        self.partials.len()
+    }
 }
 
 /// What an inbound frame turned out to be.
@@ -35,6 +204,12 @@ pub(crate) enum Ingested {
         /// Whether a codec header precedes it.
         compressed: bool,
     },
+    /// A fragmented message, complete and already decoded.
+    ///
+    /// Fragments are coded individually, so this has been through the codec
+    /// already and does not live in the frame buffer — it was assembled from
+    /// several.
+    Message(Vec<u8>),
 }
 
 /// One peer's protocol state, independent of how bytes reach it.
@@ -49,6 +224,11 @@ pub(crate) struct Peer {
     pub dedup: DedupWindow,
     /// Reliable messages abandoned after exhausting their retries.
     pub abandoned: usize,
+
+    /// Partly-arrived fragmented messages.
+    pub reassembly: Reassembly,
+    /// Identifier for the next fragmented message this side sends.
+    pub next_message: u32,
 
     /// Coding scratch space, grown on demand.
     pub primary: Vec<u8>,
@@ -81,6 +261,8 @@ impl Peer {
             pending: Vec::new(),
             dedup: DedupWindow::new(),
             abandoned: 0,
+            reassembly: Reassembly::new(),
+            next_message: 0,
             primary: vec![0u8; buffer_hint],
             secondary: vec![0u8; buffer_hint],
             coding_misses: 0,
@@ -129,6 +311,29 @@ impl Peer {
             .min(datagram_limit.saturating_sub(self.session.data_overhead()))
     }
 
+    /// Largest payload that fits once the optional plaintext parts are paid
+    /// for.
+    ///
+    /// `max_payload` counts neither the message identifier nor the fragment
+    /// descriptor, because an unreliable whole message carries neither. Every
+    /// other combination has less room, and the difference has to come off
+    /// here rather than surface later as a buffer that would not fit.
+    pub fn payload_room(&self, datagram_limit: usize, reliable: bool, fragmented: bool) -> usize {
+        let mut room = self.max_payload(datagram_limit);
+        if reliable {
+            room = room.saturating_sub(MESSAGE_ID_LEN);
+        }
+        if fragmented {
+            room = room.saturating_sub(FRAGMENT_LEN);
+        }
+        room
+    }
+
+    /// Largest slice of a fragmented message that fits in one frame.
+    pub fn max_fragment_payload(&self, datagram_limit: usize) -> usize {
+        self.payload_room(datagram_limit, true, true)
+    }
+
     /// Codes if it pays, then seals into `tx`, returning the frame length.
     ///
     /// The size limit applies to what actually goes on the wire, so a payload
@@ -138,10 +343,12 @@ impl Peer {
         data: &[u8],
         payload_type: PayloadType,
         message_id: Option<MessageId>,
+        fragment: Option<Fragment>,
         datagram_limit: usize,
         tx: &mut [u8],
     ) -> Result<usize> {
-        let limit = self.max_payload(datagram_limit);
+        let limit =
+            self.payload_room(datagram_limit, message_id.is_some(), fragment.is_some());
         let peer_caps = self.session.peer_capabilities();
 
         let mut primary = core::mem::take(&mut self.primary);
@@ -184,14 +391,23 @@ impl Peer {
                     .map_err(Error::Protocol)
                     .and_then(|()| {
                         secondary[CODEC_HEADER_LEN..total].copy_from_slice(&primary[..len]);
-                        match message_id {
-                            Some(id) => self.session.seal_reliable(
+                        match (message_id, fragment) {
+                            (Some(id), Some(f)) => self.session.seal_fragment(
+                                &secondary[..total],
+                                id,
+                                f,
+                                FLAG_COMPRESSED,
+                                tx,
+                            ),
+                            (Some(id), None) => self.session.seal_reliable(
                                 &secondary[..total],
                                 id,
                                 FLAG_COMPRESSED,
                                 tx,
                             ),
-                            None => self.session.seal(&secondary[..total], FLAG_COMPRESSED, tx),
+                            (None, _) => {
+                                self.session.seal(&secondary[..total], FLAG_COMPRESSED, tx)
+                            }
                         }
                         .map_err(Error::Protocol)
                     })
@@ -200,9 +416,10 @@ impl Peer {
                 len: data.len(),
                 limit,
             }),
-            _ => match message_id {
-                Some(id) => self.session.seal_reliable(data, id, 0, tx),
-                None => self.session.seal(data, 0, tx),
+            _ => match (message_id, fragment) {
+                (Some(id), Some(f)) => self.session.seal_fragment(data, id, f, 0, tx),
+                (Some(id), None) => self.session.seal_reliable(data, id, 0, tx),
+                (None, _) => self.session.seal(data, 0, tx),
             }
             .map_err(Error::Protocol),
         };
@@ -259,9 +476,32 @@ impl Peer {
             }
         }
 
+        let compressed = opened.header.is_compressed();
+
+        // A fragment is only part of a message, so it cannot be handed up as
+        // one. Coding is per-fragment, so it is undone here before the pieces
+        // are joined.
+        if let Some(fragment) = opened.fragment {
+            let body = &frame[HEADER_LEN..HEADER_LEN + opened.len];
+            let mut piece = vec![0u8; decoded_capacity(body, compressed)];
+            let mut scratch = core::mem::take(&mut self.secondary);
+            let written = deliver(body, compressed, &mut scratch, &mut piece);
+            self.secondary = scratch;
+            piece.truncate(written?);
+
+            return match self.reassembly.accept(fragment, &piece) {
+                Ok(Some(whole)) => Ok(Ingested::Message(whole)),
+                Ok(None) => Ok(Ingested::Nothing),
+                // A descriptor that cannot be reconciled with what has already
+                // arrived. The partial is dropped; treating it as a connection
+                // error would let one bad frame end a session.
+                Err(_) => Ok(Ingested::Nothing),
+            };
+        }
+
         Ok(Ingested::Data {
             len: opened.len,
-            compressed: opened.header.is_compressed(),
+            compressed,
         })
     }
 
@@ -301,7 +541,9 @@ impl Peer {
                     // how the peer recognises the duplicate.
                     let data = core::mem::take(&mut self.pending[index].data);
                     let payload_type = self.pending[index].payload_type;
-                    let sealed = self.seal(&data, payload_type, Some(id), datagram_limit, tx);
+                    let fragment = self.pending[index].fragment;
+                    let sealed =
+                        self.seal(&data, payload_type, Some(id), fragment, datagram_limit, tx);
                     self.pending[index].data = data;
                     send(&tx[..sealed?])?;
                 }

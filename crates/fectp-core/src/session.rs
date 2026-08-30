@@ -3,8 +3,9 @@
 use rand_core::{CryptoRng, RngCore};
 
 use crate::error::{Error, Result};
-use crate::frame::{FrameType, Header, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN};
+use crate::frame::{FrameType, Header, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN};
 use crate::keys::{Keypair, PublicKey};
+use crate::fragment::{Fragment, FRAGMENT_LEN};
 use crate::reliability::{Ack, MessageId, ACK_BLOCK_LEN, MESSAGE_ID_LEN};
 use crate::noise::{
     hash, CipherState, HandshakeState, ResumeHandshake, MSG1_OVERHEAD, MSG1_PAYLOAD_OFFSET,
@@ -212,6 +213,8 @@ pub struct Opened {
     pub len: usize,
     /// The reliable message identifier, when the frame carried one.
     pub message_id: Option<MessageId>,
+    /// Where this frame sits in a larger message, when it is a fragment.
+    pub fragment: Option<Fragment>,
 }
 
 /// An established FECTP session.
@@ -323,7 +326,7 @@ impl Session {
     /// The whole header is the AEAD's associated data, so a modified header
     /// fails authentication rather than being silently accepted.
     pub fn seal(&mut self, payload: &[u8], flags: u8, out: &mut [u8]) -> Result<usize> {
-        self.seal_frame(FrameType::Data, payload, None, flags, out)
+        self.seal_frame(FrameType::Data, payload, None, None, flags, out)
     }
 
     /// Encrypts `payload` as a reliable data frame carrying `message_id`.
@@ -339,7 +342,30 @@ impl Session {
         flags: u8,
         out: &mut [u8],
     ) -> Result<usize> {
-        self.seal_frame(FrameType::Data, payload, Some(message_id), flags, out)
+        self.seal_frame(FrameType::Data, payload, Some(message_id), None, flags, out)
+    }
+
+    /// Encrypts one fragment of a larger message.
+    ///
+    /// Every fragment is a reliable message in its own right, so a lost piece
+    /// is retransmitted alone rather than costing the whole message. The
+    /// descriptor says which larger message it belongs to and where.
+    pub fn seal_fragment(
+        &mut self,
+        payload: &[u8],
+        message_id: MessageId,
+        fragment: Fragment,
+        flags: u8,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.seal_frame(
+            FrameType::Data,
+            payload,
+            Some(message_id),
+            Some(fragment),
+            flags,
+            out,
+        )
     }
 
     /// Encrypts an acknowledgement frame.
@@ -350,20 +376,21 @@ impl Session {
     pub fn seal_ack(&mut self, ack: &Ack, out: &mut [u8]) -> Result<usize> {
         let mut block = [0u8; ACK_BLOCK_LEN];
         ack.encode(&mut block)?;
-        self.seal_frame(FrameType::Ack, &block, None, 0, out)
+        self.seal_frame(FrameType::Ack, &block, None, None, 0, out)
     }
 
     /// Builds any outgoing frame.
     ///
-    /// The plaintext is assembled as `[pad_len]? [message_id]? payload
-    /// [zeros]?`, each part present only when its header flag is set. Padding
-    /// is outermost because it hides the total length, so its length field
-    /// covers the message identifier too.
+    /// The plaintext is assembled as `[pad_len]? [message_id]? [fragment]?
+    /// payload [zeros]?`, each part present only when its header flag is set.
+    /// Padding is outermost because it hides the total length, so its length
+    /// field covers everything inside it.
     fn seal_frame(
         &mut self,
         frame_type: FrameType,
         payload: &[u8],
         message_id: Option<MessageId>,
+        fragment: Option<Fragment>,
         flags: u8,
         out: &mut [u8],
     ) -> Result<usize> {
@@ -378,8 +405,15 @@ impl Session {
         } else {
             0
         };
+        let fragment_len = if fragment.is_some() {
+            flags |= FLAG_FRAGMENT;
+            FRAGMENT_LEN
+        } else {
+            0
+        };
         let inner_len = id_len
-            .checked_add(payload.len())
+            .checked_add(fragment_len)
+            .and_then(|n| n.checked_add(payload.len()))
             .ok_or(Error::PayloadTooLarge)?;
 
         // With padding on, the plaintext is rounded up to a block boundary so
@@ -418,6 +452,10 @@ impl Session {
         if let Some(id) = message_id {
             body[at..at + MESSAGE_ID_LEN].copy_from_slice(&id.to_le_bytes());
             at += MESSAGE_ID_LEN;
+        }
+        if let Some(fragment) = fragment {
+            fragment.encode(&mut body[at..])?;
+            at += FRAGMENT_LEN;
         }
         body[at..at + payload.len()].copy_from_slice(payload);
         body[at + payload.len()..plaintext_len].fill(0);
@@ -485,6 +523,18 @@ impl Session {
             None
         };
 
+        let fragment = if header.flags & FLAG_FRAGMENT != 0 {
+            if len < FRAGMENT_LEN {
+                return Err(Error::BadHeader);
+            }
+            let parsed = Fragment::decode(&body[at..at + FRAGMENT_LEN])?;
+            at += FRAGMENT_LEN;
+            len -= FRAGMENT_LEN;
+            Some(parsed)
+        } else {
+            None
+        };
+
         if at > 0 {
             body.copy_within(at..at + len, 0);
         }
@@ -494,6 +544,7 @@ impl Session {
             header,
             len,
             message_id,
+            fragment,
         })
     }
 

@@ -199,7 +199,7 @@ value.
 | 2 | `HandshakeResponse` — Noise message 2 |
 | 3 | `Data` — post-handshake application data |
 | 4 | `Close` — orderly shutdown |
-| 5 | `Ack` — acknowledges received reliable messages (§5.6) |
+| 5 | `Ack` — acknowledges received reliable messages (§5.7) |
 | 6 | `ResumeInit` — resumption message 1 (§4.7) |
 | 7 | `ResumeResponse` — resumption message 2 (§4.8) |
 | 10 | `PlainInit` — plaintext session opening (§1.2) |
@@ -216,7 +216,8 @@ All other values are reserved. A receiver MUST reject them.
 | 0x01 | `COMPRESSED` | The plaintext begins with a codec header (§6). |
 | 0x02 | `RELIABLE` | The plaintext carries a message identifier (§5.4). |
 | 0x04 | `PADDED` | The plaintext is length-prefixed and padded (§5.3). |
-| 0x08–0x80 | — | Reserved. |
+| 0x08 | `FRAGMENT` | The plaintext carries a fragment descriptor (§5.5). |
+| 0x10–0x80 | — | Reserved. |
 
 A receiver MUST reject a frame with any reserved flag bit set. Flags describe
 what the sender already did to this frame, so a receiver that ignored an
@@ -583,6 +584,7 @@ The decrypted plaintext of a `Data`, `Close`, or `Ack` frame is:
 ```
 [ pad_len : u16 ]?          present when PADDED
 [ message_id : u32 ]?       present when RELIABLE
+[ fragment : 8 bytes ]?     present when FRAGMENT
 [ codec_header : 4 bytes ]? present when COMPRESSED
 body
 [ zero padding ]?           present when PADDED
@@ -592,8 +594,8 @@ Every part is present only when its header flag is set, and they appear in
 exactly this order. A receiver MUST peel them in the same order.
 
 `pad_len` counts the bytes between itself and the padding — the message
-identifier and codec header included, since padding is outermost and hides the
-total.
+identifier, fragment descriptor and codec header included, since padding is
+outermost and hides the total.
 
 An implementation that sets no flags therefore transmits the application
 payload with no per-frame overhead beyond the header and tag.
@@ -638,7 +640,56 @@ A sender SHOULD:
 Points 4 to 6 are sender-side quality of implementation: they are not
 observable by a conforming receiver.
 
-### 5.6 Acknowledgements
+### 5.6 Fragmented messages
+
+A message larger than the frame limit MAY be split across several frames. The
+descriptor present when `FRAGMENT` is set is:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | `message`, u32 |
+| 4 | 2 | `index`, u16 |
+| 6 | 2 | `count`, u16 |
+
+All fields are little-endian. `message` identifies the logical message; it is
+unrelated to `message_id`, which identifies this individual frame to the
+reliability layer. `index` is the fragment's position, counting from zero, and
+`count` is how many fragments the message was cut into.
+
+A sender:
+
+1. MUST set `RELIABLE` on every fragment. A message missing one fragment is
+   entirely undeliverable, so fragments that could be lost without recovery
+   would make fragmentation useless.
+2. MUST use the same `message` and `count` on every fragment of one message,
+   and MUST NOT reuse a `message` value while any fragment of the previous
+   message bearing it may still be in flight.
+3. MUST make every fragment except the last the same length, so that a receiver
+   can place a fragment from its index alone.
+4. MUST NOT emit a `count` of zero, or greater than 4096.
+
+A receiver:
+
+1. MUST reject a descriptor whose `count` is zero, whose `count` exceeds 4096,
+   or whose `index` is not less than `count`.
+2. MUST bound both the number of messages it is reassembling at once and the
+   total bytes it holds for them, and MUST NOT let a peer's `count` decide an
+   allocation without applying that bound. A conforming implementation refuses
+   to reassemble a message above an implementation-defined ceiling; this
+   specification requires the ceiling to exist, not its value.
+3. MUST discard a fragment whose `count` disagrees with one already recorded
+   for that `message`.
+4. MUST deliver the reassembled message only once every fragment has arrived,
+   and MUST deliver it as a single message.
+5. MAY discard a partial reassembly at any time — for instance on a timeout or
+   under memory pressure. Doing so loses the message, which the reliability
+   layer will not repair, since each fragment was acknowledged on arrival.
+
+Point 5 is the cost of this design and is stated rather than hidden: fragments
+are acknowledged individually, so a sender learns that every piece arrived, not
+that the receiver still holds them all.
+
+### 5.7 Acknowledgements
 
 An `Ack` frame's body is a 12-byte block:
 

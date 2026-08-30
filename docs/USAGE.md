@@ -158,6 +158,15 @@ A larger payload is refused with `Error::PayloadTooLarge` — *unless* it
 compresses under the limit, in which case it goes through. What has to fit is
 the frame on the wire.
 
+A reliable send carries a message identifier as well, so its ceiling is a few
+bytes lower:
+
+```rust
+let limit = conn.max_reliable_payload();   // typically 1166 bytes
+```
+
+For anything above either limit, see [Large messages](#large-messages).
+
 ## Zero-RTT
 
 The first handshake message can already carry data, so a request reaches the
@@ -204,6 +213,51 @@ println!("retransmit timeout now {} ms", conn.rto_ms());
 
 `flush` fails with `Error::Unacknowledged { count }` if messages were abandoned
 after exhausting their retries, or if the timeout expires first.
+
+## Large messages
+
+`send` and `send_reliable` both refuse a payload larger than one frame. A
+datagram above the path MTU is cut up by IP, and an IP-fragmented datagram is
+lost entire if any piece of it goes missing — so FECTP never emits one.
+
+`send_large` splits the message at the protocol layer instead, where a lost
+piece is retransmitted on its own:
+
+```rust
+conn.send_large(&recording, Duration::from_secs(10))?;
+```
+
+It arrives as **one** message, not as pieces:
+
+```rust
+let n = conn.recv(&mut buf)?;    // the whole thing, reassembled
+```
+
+Four things to know:
+
+**It waits.** Unlike the other send methods, this returns only once the peer
+has acknowledged every fragment, which is why it takes a timeout. There is no
+useful sense in which a large message has been sent while most of it is still
+queued behind a send window.
+
+**Every fragment is reliable**, so the peer must support the reliability layer.
+Without that, one lost fragment would lose the whole message with no way to
+repair it.
+
+**There is a ceiling.** `fectp::MAX_MESSAGE_LEN` (1 MiB) and
+`fectp::MAX_FRAGMENTS` (4096) bound what a receiver will reassemble, because a
+receiver commits memory on the strength of the sender's own fragment count.
+Above that, `send_large` fails with `Error::PayloadTooLarge`.
+
+**Compression is per fragment.** Each frame is coded on its own so that it is
+self-describing, which costs ratio — the compressor sees one fragment of
+context rather than the whole message. For data that compresses well, sending
+it pre-compressed by your own code will beat this.
+
+An `Endpoint` **receives** large messages normally, but has no `send_large`:
+that call waits for acknowledgements, and an event loop serving many peers
+cannot stall on one of them. Sending large messages from an endpoint needs an
+outbound queue that does not yet exist.
 
 ## Typed payloads
 

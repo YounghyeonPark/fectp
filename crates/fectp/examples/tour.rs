@@ -17,6 +17,7 @@ fn main() -> fectp::Result<()> {
     shortest_pair()?;
     timeouts_and_zero_rtt()?;
     reliable_delivery()?;
+    large_messages()?;
     typed_payloads()?;
     resumption()?;
     many_peers()?;
@@ -215,6 +216,34 @@ fn reliable_delivery() -> fectp::Result<()> {
             "reliable: acknowledged, retransmit timeout now {} ms (window {})",
             conn.rto_ms(),
             fectp::MAX_UNACKED
+        );
+        Ok(())
+    })
+}
+
+/// USAGE.md — "Large messages"
+fn large_messages() -> fectp::Result<()> {
+    with_server(|addr, server_public| {
+        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        conn.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+        // Comfortably past what one frame carries, so the outbound trip
+        // genuinely fragments. The filler is repetitive on purpose: the echo
+        // server is an `Endpoint`, which has no `send_large`, so the reply only
+        // gets back because it codes down into a single frame.
+        let recording = vec![0x5Au8; conn.max_payload() * 5];
+        conn.send_large(&recording, Duration::from_secs(10))?;
+
+        let mut buf = vec![0u8; recording.len()];
+        let n = conn.recv(&mut buf)?;
+        assert_eq!(&buf[..n], &recording[..], "reassembled, and in one piece");
+
+        println!(
+            "large: {} bytes arrived as one message (frame limit {}, reliable {}, ceiling {})",
+            n,
+            conn.max_payload(),
+            conn.max_reliable_payload(),
+            fectp::MAX_MESSAGE_LEN
         );
         Ok(())
     })

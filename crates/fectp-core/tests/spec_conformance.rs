@@ -12,7 +12,7 @@ use fectp_core::codec::{
     CODEC_TRANSPOSE, CODEC_ZSTD, MAX_ORIGINAL_LEN,
 };
 use fectp_core::frame::{
-    FrameType, Header, FLAG_COMPRESSED, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN, VERSION,
+    FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN, VERSION,
 };
 use fectp_core::keys::DHLEN;
 use fectp_core::plain::{
@@ -124,8 +124,9 @@ fn flag_bits() {
     assert_eq!(FLAG_COMPRESSED, 0x01);
     assert_eq!(FLAG_RELIABLE, 0x02);
     assert_eq!(FLAG_PADDED, 0x04);
+    assert_eq!(FLAG_FRAGMENT, 0x08);
 
-    for reserved in [0x08u8, 0x10, 0x20, 0x40, 0x80] {
+    for reserved in [0x10u8, 0x20, 0x40, 0x80] {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(FrameType::Data, 0).encode(&mut buf).expect("encode");
         buf[1] = reserved;
@@ -176,7 +177,30 @@ fn replay_and_padding_constants() {
     assert_eq!(PAD_BLOCK, 64);
 }
 
-/// SPEC §5.5, §5.6 — reliability constants and the acknowledgement block.
+/// SPEC §5.6 — the fragment descriptor.
+#[test]
+fn fragment_descriptor_layout() {
+    use fectp_core::fragment::{Fragment, FRAGMENT_LEN, MAX_FRAGMENTS};
+
+    assert_eq!(FRAGMENT_LEN, 8);
+    assert_eq!(MAX_FRAGMENTS, 4096);
+
+    let fragment = Fragment {
+        message: 0x0403_0201,
+        index: 0x0605,
+        count: 0x0807,
+    };
+    let mut buf = [0u8; FRAGMENT_LEN];
+    fragment.encode(&mut buf).expect("encode");
+    assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8], "little-endian, in field order");
+
+    // A receiver sizes a buffer from `count`, so both bounds are normative.
+    let mut absurd = [0u8; FRAGMENT_LEN];
+    absurd[6..8].copy_from_slice(&(MAX_FRAGMENTS + 1).to_le_bytes());
+    assert!(Fragment::decode(&absurd).is_err());
+}
+
+/// SPEC §5.5, §5.7 — reliability constants and the acknowledgement block.
 #[test]
 fn reliability_constants() {
     assert_eq!(ACK_BLOCK_LEN, 12);

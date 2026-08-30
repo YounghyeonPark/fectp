@@ -71,6 +71,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
+use fectp_core::fragment::{fragments_needed, Fragment};
 use fectp_core::frame::HEADER_LEN;
 use fectp_core::reliability::MessageId;
 use fectp_core::plain::PlainInitiator;
@@ -84,6 +85,7 @@ pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
 pub use endpoint::{Event, PeerId, Endpoint};
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
+pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES};
 pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_RELIABLE, CAP_ZSTD};
 pub use fectp_core::{Capabilities, PublicKey as PeerKey};
@@ -580,8 +582,23 @@ impl Connection {
     ///
     /// A larger payload can still succeed if it compresses below this limit,
     /// since what has to fit is the frame that goes on the wire.
+    ///
+    /// This is the limit for an *unreliable* send. A reliable one also carries
+    /// a message identifier, so its limit is
+    /// [`max_reliable_payload`](Self::max_reliable_payload), which is smaller.
     pub fn max_payload(&self) -> usize {
         self.peer.max_payload(self.transport.max_datagram_size())
+    }
+
+    /// Largest uncompressed payload for a single
+    /// [`send_reliable`](Self::send_reliable).
+    ///
+    /// Smaller than [`max_payload`](Self::max_payload) by the message
+    /// identifier a reliable frame carries. Anything above this needs
+    /// [`send_large`](Self::send_large), which splits it across frames.
+    pub fn max_reliable_payload(&self) -> usize {
+        self.peer
+            .payload_room(self.transport.max_datagram_size(), true, false)
     }
 
     /// Pads outgoing frames to a 64-byte boundary to mask payload lengths.
@@ -687,8 +704,115 @@ impl Connection {
             id,
             payload_type,
             data: data.to_vec(),
+            fragment: None,
         });
         Ok(id)
+    }
+
+    /// Sends a message too large for one frame, and waits for all of it.
+    ///
+    /// [`send`](Self::send) and [`send_reliable`](Self::send_reliable) refuse a
+    /// payload above [`max_payload`](Self::max_payload), because a datagram
+    /// larger than the path MTU is cut up by IP, and an IP-fragmented datagram
+    /// is lost entire if any piece of it is. This cuts the message at the
+    /// protocol layer instead, where a lost piece is retransmitted on its own.
+    ///
+    /// Every fragment is a reliable message, so this needs a peer that
+    /// acknowledges. It returns once the peer has acknowledged all of them,
+    /// which is why it takes a timeout rather than returning immediately: there
+    /// is no useful sense in which a large message has been "sent" while most
+    /// of it is still queued behind a send window.
+    ///
+    /// Fragments are coded individually rather than the message being coded
+    /// whole, so each frame is self-describing. That costs compression ratio —
+    /// a compressor sees one fragment of context, not the message — and buys a
+    /// receiver that can decode any frame without waiting for the rest.
+    ///
+    /// Messages above [`MAX_MESSAGE_LEN`] are refused rather than fragmented.
+    pub fn send_large(&mut self, data: &[u8], timeout: Duration) -> Result<()> {
+        self.send_large_typed(data, self.peer.default_payload_type, timeout)
+    }
+
+    /// [`send_large`](Self::send_large), declaring the payload's shape.
+    pub fn send_large_typed(
+        &mut self,
+        data: &[u8],
+        payload_type: PayloadType,
+        timeout: Duration,
+    ) -> Result<()> {
+        if !self.peer.session.peer_capabilities().supports_reliable() {
+            return Err(Error::ReliabilityUnsupported);
+        }
+        let deadline = Instant::now() + timeout;
+        let limit = self.transport.max_datagram_size();
+        let per_fragment = self.peer.max_fragment_payload(limit);
+
+        let count = fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
+            len: data.len(),
+            limit: MAX_MESSAGE_LEN,
+        })?;
+
+        let message = self.peer.next_message;
+        self.peer.next_message = self.peer.next_message.wrapping_add(1);
+
+        for index in 0..count {
+            let start = index as usize * per_fragment;
+            let end = (start + per_fragment).min(data.len());
+            let chunk = &data[start..end];
+
+            // The in-flight bound doubles as the send window. Waiting here
+            // rather than failing is what makes this usable for a message of
+            // many more fragments than the window holds — and it is also the
+            // only thing pacing the send, so a burst cannot outrun the
+            // receiver's socket buffer.
+            let id = loop {
+                let now = self.now_ms();
+                match self.peer.retransmit.register(now) {
+                    Ok(id) => break id,
+                    Err(fectp_core::Error::WindowFull) => {
+                        if Instant::now() >= deadline {
+                            return Err(Error::Unacknowledged {
+                                count: self.peer.retransmit.in_flight(),
+                            });
+                        }
+                        self.pump(Some(deadline), None)?;
+                    }
+                    Err(e) => return Err(Error::Protocol(e)),
+                }
+            };
+
+            let fragment = Fragment {
+                message,
+                index,
+                count,
+            };
+            let n = self.peer.seal(
+                chunk,
+                payload_type,
+                Some(id),
+                Some(fragment),
+                limit,
+                &mut self.tx,
+            )?;
+            self.transport.send(&self.tx[..n])?;
+            self.peer.pending.push(Pending {
+                id,
+                payload_type,
+                data: chunk.to_vec(),
+                fragment: Some(fragment),
+            });
+        }
+
+        let left = deadline.saturating_duration_since(Instant::now());
+        self.flush(left)
+    }
+
+    /// Fragmented messages this side has begun receiving but not completed.
+    ///
+    /// Non-zero means fragments have arrived for a message whose remaining
+    /// pieces have not. It is bounded, so a peer cannot grow it without limit.
+    pub fn reassembling(&self) -> usize {
+        self.peer.reassembly.in_progress()
     }
 
     /// Reliable messages still awaiting acknowledgement.
@@ -738,7 +862,7 @@ impl Connection {
     ) -> Result<usize> {
         let limit = self.transport.max_datagram_size();
         self.peer
-            .seal(data, payload_type, message_id, limit, &mut self.tx)
+            .seal(data, payload_type, message_id, None, limit, &mut self.tx)
     }
 
     /// Receives the next authentic datagram, writing its payload to `out`.
@@ -823,6 +947,23 @@ impl Connection {
         let (len, compressed) = match ingested {
             Ingested::Nothing => return Ok(None),
             Ingested::Data { len, compressed } => (len, compressed),
+            // Already whole and already decoded; it never lived in `rx`.
+            Ingested::Message(data) => match out {
+                Some(out) => {
+                    if out.len() < data.len() {
+                        return Err(Error::PayloadTooLarge {
+                            len: data.len(),
+                            limit: out.len(),
+                        });
+                    }
+                    out[..data.len()].copy_from_slice(&data);
+                    return Ok(Some(data.len()));
+                }
+                None => {
+                    self.inbox.push_back(data);
+                    return Ok(None);
+                }
+            },
         };
 
         let body = HEADER_LEN..HEADER_LEN + len;
