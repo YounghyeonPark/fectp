@@ -709,36 +709,46 @@ The conservatism this removes is real but misplaced. Guarding against spurious
 retransmission is what the round-trip estimate is *for*; refusing to use it
 below 200 ms discards the measurement rather than acting on it.
 
-## D22 — Full duplex is a thread, not a split
+## D22 — Both directions on one shared reference
 
-**Problem**: `Connection::send` and `recv` both take `&mut self`, so a program
-cannot have one thread reading while another writes. That is an API limit, not
-a protocol one: after the Noise split the two directions have separate cipher
-states, and one UDP socket may be sent on and received on at once.
+**Problem**: `Connection::send` and `recv` both took `&mut self`, so a program
+could not have one thread reading while another wrote. That was an API limit
+rather than a protocol one: after the Noise split the two directions hold
+separate cipher states, and one UDP socket may be sent on and received on at
+once.
 
-The obvious fix is `split()` into a sending half and a receiving half. It does
-not work, and the reason is worth recording because the flaw is not visible in
-the signature.
+Three shapes were tried before the right one, and the two that were discarded
+are worth recording because each looked reasonable.
 
-**An acknowledgement is an encrypted frame in the send direction**, so the
-receiving half has to send — and a retransmission has to happen whether or not
-the application is asking for anything. Today both live inside `recv` and
-`flush`. Split the connection and they stay on the receiving half, which means
-the two halves are not peers: **the sender's reliability silently depends on
-someone draining the receiver.** A caller who only sends gets no
-retransmissions at all, and nothing in the types says so.
+**`split()` into two halves** fails on acknowledgements. An acknowledgement is
+an encrypted frame in the send direction, so the receiving half has to send;
+and retransmission has to happen whether or not the application is asking for
+anything. Split the connection and both stay on the receiving half, so the
+halves are not peers — the sender's reliability silently depends on someone
+draining the receiver, and nothing in the types says so.
 
-**Decision**: `into_duplex` puts the protocol on its own thread and returns two
-handles with no contract between them. The thread owns the receive path, the
-acknowledgements and the retransmit timer, so those happen because it is
-running. `DuplexSender::send` takes `&self` and seals on the calling thread
-under a lock the protocol thread also takes for acknowledgements — measured
-idle, that lock is inside the noise of a send (BENCHMARKS.md §5).
+**`into_duplex()` onto a background thread** removes that contract but adds a
+concept. The caller has to know the conversion exists, decide when to use it,
+and learn two more types; and every connection that wants both directions pays
+a thread and an allocation per received message. It was built, measured, and
+removed.
 
-What this costs is one thread per connection and a `Vec` per received message,
-which is why it is a separate constructor rather than the default. A program
-that does not need both directions at once should keep using `Connection`, and
-one serving many peers should use `Endpoint`, which is already an event loop.
+**Decision**: the methods take `&self`. A shared `&Connection` is then all
+either thread needs — scoped threads work directly, and an `Arc` is available
+to anyone who wants `'static` ones without the API insisting on it. There is no
+second type, no conversion, and nothing to remember.
+
+Internally the receive path holds its own lock — a second handle on the same
+socket, plus its buffers — so a blocking read never holds the lock a send
+takes. The shared state is the reliability layer, held for microseconds.
+Measured idle, the lock costs less than the send-path benchmark can resolve.
+
+What this does **not** change is where retransmission is driven: still inside
+`recv`, `flush` and the send calls, as before. A program that sends reliably
+and then calls none of them will not retransmit. That is the same contract
+`Connection` has always had, and `flush` is the answer to it — but it is the
+one thing the discarded thread-based version did better, and the trade was
+made deliberately for an API with fewer parts.
 
 ## Not carried over
 

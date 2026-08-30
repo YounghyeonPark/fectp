@@ -335,7 +335,7 @@ fn crypto_cost() {
     drop(sink);
 
     let plain = FectpEcho::plain_drain();
-    let mut pconn = Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
+    let pconn = Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
     let plain_send = measure_batched(WARMUP, 40, 500, || {
         pconn.send(&payload).expect("send");
     });
@@ -343,7 +343,7 @@ fn crypto_cost() {
     drop(plain);
 
     let pk = FectpEcho::public_key_drain();
-    let mut conn =
+    let conn =
         Connection::connect(pk.addr, &pk.public.expect("identity"), &Identity::generate())
             .expect("connect");
     let sealed = measure_batched(WARMUP, 40, 500, || {
@@ -351,24 +351,6 @@ fn crypto_cost() {
     });
     drop(conn);
     drop(pk);
-
-    // The duplex sender seals under a lock, because the protocol thread also
-    // seals to acknowledge. That lock is the whole cost of being able to send
-    // and receive at once, so it is worth knowing.
-    let duplex_echo = FectpEcho::public_key_drain();
-    let duplex_conn = Connection::connect(
-        duplex_echo.addr,
-        &duplex_echo.public.expect("identity"),
-        &Identity::generate(),
-    )
-    .expect("connect");
-    let (duplex_tx, duplex_rx) = duplex_conn.into_duplex();
-    let duplex = measure_batched(WARMUP, 40, 500, || {
-        duplex_tx.send(&payload).expect("send");
-    });
-    drop(duplex_tx);
-    drop(duplex_rx);
-    drop(duplex_echo);
 
     let base = raw.median_us();
     row_header(&["", "per send", "over raw sendto", "throughput"]);
@@ -390,21 +372,6 @@ fn crypto_cost() {
         &us(sealed.median_us() - base),
         &format!("{:.0} MiB/s", throughput_mib(1024, sealed.median)),
     ]);
-    row(&[
-        "FECTP encrypted, duplex sender",
-        &us(duplex.median_us()),
-        &us(duplex.median_us() - base),
-        &format!("{:.0} MiB/s", throughput_mib(1024, duplex.median)),
-    ]);
-    println!();
-    note(&format!(
-        "The duplex sender differs from the plain one by {}, which is inside the",
-        us((duplex.median_us() - sealed.median_us()).abs())
-    ));
-    note("noise: an uncontended lock costs nanoseconds. It seals under one because");
-    note("the protocol thread seals acknowledgements on the same session, so this");
-    note("says the lock is free when idle — not that it is free under load, which");
-    note("this arrangement does not measure.");
     println!();
     note(&format!(
         "Encrypting costs {} on top of framing. The throughput column is",
@@ -690,7 +657,7 @@ fn under_loss() {
         let relay = LossyRelay::spawn(echo.addr, rate, 0x1234_5678 + u64::from(rate));
         let public = echo.public.expect("identity");
 
-        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
             .expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(30)))
             .expect("timeout");
@@ -755,7 +722,7 @@ fn under_loss() {
         let relay = LossyRelay::spawn(echo.addr, rate, 0xABCD_EF01 + u64::from(rate));
         let public = echo.public.expect("identity");
 
-        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
             .expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
@@ -835,7 +802,7 @@ fn other_things_a_path_does() {
         let relay = (every > 0).then(|| ReorderingRelay::spawn(echo.addr, every, delay));
         let addr = relay.as_ref().map_or(echo.addr, |r| r.addr);
 
-        let mut conn =
+        let conn =
             Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(30)))
             .expect("timeout");
@@ -889,7 +856,7 @@ fn other_things_a_path_does() {
         let public = echo.public.expect("identity");
         let relay = BottleneckRelay::spawn(echo.addr, bytes_per_sec, queue);
 
-        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
             .expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
@@ -942,7 +909,7 @@ fn other_things_a_path_does() {
     let public = echo.public.expect("identity");
     let relay = RebindingRelay::spawn(echo.addr, 2);
 
-    let mut conn =
+    let conn =
         Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
     conn.set_read_timeout(Some(Duration::from_millis(500)))
         .expect("timeout");
@@ -1002,7 +969,7 @@ fn jitter_asymmetry_and_crowding() {
         let public = echo.public.expect("identity");
         let relay = JitterRelay::spawn(echo.addr, spread, 0x5EED_1234);
 
-        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
             .expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
@@ -1054,7 +1021,7 @@ fn jitter_asymmetry_and_crowding() {
         let public = echo.public.expect("identity");
         let relay = AsymmetricRelay::spawn(echo.addr, fwd, back, 0xC0FF_EE01);
 
-        let mut conn = Connection::connect(relay.addr, &public, &Identity::generate())
+        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
             .expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
@@ -1115,7 +1082,7 @@ fn jitter_asymmetry_and_crowding() {
                 let addr = echo.addr;
                 let flag = std::sync::Arc::clone(&stop);
                 std::thread::spawn(move || {
-                    let Ok(mut conn) =
+                    let Ok(conn) =
                         Connection::connect(addr, &public, &Identity::generate())
                     else {
                         return;

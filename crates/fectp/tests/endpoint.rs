@@ -57,7 +57,7 @@ fn concurrent_peers_do_not_steal_each_others_traffic() {
     // interleaves on the one socket.
     let mut clients: Vec<Connection> = (0..PEERS)
         .map(|_| {
-            let mut c = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+            let c = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
             c.set_read_timeout(Some(TIMEOUT)).expect("timeout");
             c
         })
@@ -133,7 +133,7 @@ fn the_server_tracks_each_peer_separately() {
 fn a_disconnected_peer_stops_resolving() {
     let (mut server, addr, public) = server();
     let handle = thread::spawn(move || {
-        let mut client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         client.send(b"hello").expect("send");
         thread::sleep(Duration::from_millis(300));
@@ -162,9 +162,9 @@ fn the_server_delivers_reliably_to_a_chosen_peer() {
 
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let mut clients: Vec<Connection> = (0..PEERS)
+        let clients: Vec<Connection> = (0..PEERS)
             .map(|_| {
-                let mut c =
+                let c =
                     Connection::connect(addr, &public, &Identity::generate()).expect("connect");
                 c.set_read_timeout(Some(TIMEOUT)).expect("timeout");
                 c
@@ -212,7 +212,7 @@ fn a_peer_can_resume_against_the_server() {
     let (ticket_tx, ticket_rx) = mpsc::channel();
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let handle = thread::spawn(move || {
-        let mut client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         client.send(b"first").expect("send");
         let mut buf = vec![0u8; 4096];
@@ -222,7 +222,7 @@ fn a_peer_can_resume_against_the_server() {
         ticket_tx.send(key).expect("ticket");
 
         go_rx.recv().expect("go");
-        let mut resumed = Connection::resume(
+        let resumed = Connection::resume(
             addr,
             &Ticket::from_key(key),
             &public,
@@ -266,7 +266,7 @@ fn typed_payloads_work_per_peer() {
     let (mut server, addr, public) = server();
 
     let handle = thread::spawn(move || {
-        let mut client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         client.send(b"ping").expect("send");
         let mut buf = vec![0u8; 64 * 1024];
@@ -304,7 +304,7 @@ fn garbage_and_stray_datagrams_are_ignored() {
         stray.send_to(&[0xFF; 64], addr).expect("noise");
         stray.send_to(b"not a frame", addr).expect("noise");
 
-        let mut client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         stray.send_to(&[0x11; 200], addr).expect("noise");
         client.send(b"real message").expect("send");

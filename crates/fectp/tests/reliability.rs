@@ -79,7 +79,7 @@ fn a_dropped_message_is_retransmitted() {
     // Index 1 is the first data frame; the handshake is index 0.
     let relay = spawn_relay(echo.addr(), vec![1], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     client.send_reliable(b"survives a drop").expect("send");
     assert_eq!(client.unacknowledged(), 1);
@@ -96,7 +96,7 @@ fn several_drops_in_a_row_are_survived() {
     // Drop the first transmission and the first two retransmissions.
     let relay = spawn_relay(echo.addr(), vec![1, 2, 3], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     client.send_reliable(b"third time lucky").expect("send");
     client.flush(FLUSH).expect("flush");
@@ -115,7 +115,7 @@ fn a_lost_acknowledgement_does_not_duplicate_the_message() {
     // nothing extra.
     let relay = spawn_relay(echo.addr(), vec![], vec![1]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     client.send_reliable(b"exactly once").expect("send");
     client.flush(FLUSH).expect("flush");
@@ -135,7 +135,7 @@ fn only_the_lost_message_is_resent() {
     // Of three data frames, lose the middle one.
     let relay = spawn_relay(echo.addr(), vec![2], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..3u8 {
         client.send_reliable(&[i; 8]).expect("send");
@@ -156,7 +156,7 @@ fn reliable_and_unreliable_messages_share_a_session() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), vec![], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     client.send_reliable(b"guaranteed").expect("send reliable");
     client.send(b"best effort").expect("send unreliable");
@@ -175,7 +175,7 @@ fn typed_payloads_can_be_sent_reliably() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), vec![1], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     let samples: Vec<u8> = (0..256i16).flat_map(|i| (i * 3).to_le_bytes()).collect();
     client
@@ -197,7 +197,7 @@ fn the_in_flight_window_is_bounded() {
     // fills up.
     let relay = spawn_relay(echo.addr(), (1..500).collect(), vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     for _ in 0..fectp::MAX_UNACKED {
         client.send_reliable(b"never arrives").expect("send");
@@ -214,7 +214,7 @@ fn flush_reports_messages_that_were_never_delivered() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), (1..500).collect(), vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     client.send_reliable(b"into the void").expect("send");
 
@@ -231,7 +231,7 @@ fn a_round_trip_estimate_is_learned() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), vec![], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..4u8 {
         client.send_reliable(&[i; 4]).expect("send");
@@ -257,7 +257,7 @@ fn a_fragmented_message_survives_a_dropped_fragment() {
     // and the reassembly will never complete.
     let relay = spawn_relay(echo.addr(), vec![3], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
 
     let payload: Vec<u8> = {
@@ -286,7 +286,7 @@ fn a_fragmented_message_whose_fragment_never_arrives_is_reported() {
     // then give up, so this fragment never lands.
     let relay = spawn_relay(echo.addr(), (1..40).collect(), vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     let payload = vec![0xA5u8; client.max_fragment_payload() * 3];
 
@@ -308,7 +308,7 @@ fn an_early_loss_is_recovered_in_a_stream_far_longer_than_the_ack_window() {
     // is not the drop but how far the stream runs on afterwards.
     let relay = spawn_relay(echo.addr(), vec![1], vec![]);
 
-    let mut client =
+    let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
 
     // A receiver reports what it has seen as a highest identifier plus a bitmap

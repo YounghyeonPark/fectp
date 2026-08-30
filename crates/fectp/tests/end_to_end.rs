@@ -11,7 +11,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connects a client to `echo`, with a read timeout already set.
 fn client(echo: &Echo) -> Connection {
-    let mut conn =
+    let conn =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
     conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
     conn
@@ -20,10 +20,10 @@ fn client(echo: &Echo) -> Connection {
 #[test]
 fn round_trip_over_udp() {
     let echo = Echo::start();
-    let mut client = client(&echo);
+    let client = client(&echo);
 
     // The client authenticated the server by its static key.
-    assert_eq!(client.peer_public_key(), &echo.public());
+    assert_eq!(client.peer_public_key().expect("connected"), echo.public());
 
     client.send(b"hello over the wire").expect("client send");
     let mut buf = [0u8; 2048];
@@ -85,7 +85,7 @@ fn connecting_to_the_wrong_key_fails() {
 #[test]
 fn many_messages_in_sequence() {
     let echo = Echo::collector();
-    let mut client =
+    let client =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..64u32 {
         client.send(&i.to_le_bytes()).expect("send");
@@ -101,7 +101,7 @@ fn many_messages_in_sequence() {
 #[test]
 fn oversized_payload_is_refused() {
     let echo = Echo::start();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let limit = client.max_payload();
 
     // High-entropy bytes, so compression cannot slip this under the limit.
@@ -148,7 +148,7 @@ mod coding_is_skipped_when_it_stops_paying {
     #[test]
     fn an_incompressible_stream_arrives_intact() {
         let echo = Echo::collector();
-        let mut client =
+        let client =
             Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
                 .expect("connect");
 
@@ -166,7 +166,7 @@ mod coding_is_skipped_when_it_stops_paying {
     #[test]
     fn a_payload_that_only_fits_when_coded_is_still_coded() {
         let echo = Echo::collector();
-        let mut client =
+        let client =
             Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
                 .expect("connect");
         let limit = client.max_payload();
@@ -195,7 +195,7 @@ mod coding_is_skipped_when_it_stops_paying {
     #[test]
     fn compression_resumes_when_the_data_becomes_compressible_again() {
         let echo = Echo::collector();
-        let mut client =
+        let client =
             Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
                 .expect("connect");
         let limit = client.max_payload();
@@ -270,7 +270,7 @@ mod compression {
     #[test]
     fn compressible_payload_round_trips() {
         let echo = Echo::collector();
-        let mut client = client(&echo);
+        let client = client(&echo);
 
         // Far larger than one frame, but highly compressible, so it fits.
         let payload: Vec<u8> = b"{\"sensor\":\"temp\",\"value\":21.5}\n"
@@ -404,7 +404,7 @@ mod typed {
                 PayloadType::Elements { size: 4 },
             ),
         ] {
-            let mut client = client(&echo);
+            let client = client(&echo);
             let before = echo.observed().messages.len();
             client.send_typed(&payload, ty).expect("send_typed");
             let received = echo.messages(before + 1, TIMEOUT);
@@ -416,7 +416,7 @@ mod typed {
     fn a_wrongly_declared_type_still_round_trips() {
         // Declaring the wrong shape must cost compression, never correctness.
         let echo = Echo::collector();
-        let mut client = client(&echo);
+        let client = client(&echo);
         let text = b"this is plain text, not interleaved samples at all!!".repeat(8);
         client
             .send_typed(&text, PayloadType::I16 { channels: 4 })
@@ -429,7 +429,7 @@ mod typed {
 #[test]
 fn a_connection_can_default_to_one_payload_shape() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     assert_eq!(client.default_payload_type(), fectp::PayloadType::Opaque);
 
     // A sensor stream stays a sensor stream: say so once, then the rest of the
@@ -452,7 +452,7 @@ fn a_connection_can_default_to_one_payload_shape() {
 #[test]
 fn a_single_message_can_override_the_default_shape() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     client.set_default_payload_type(fectp::PayloadType::I16 { channels: 4 });
 
     let text = b"a status line, not samples".to_vec();

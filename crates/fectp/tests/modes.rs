@@ -213,7 +213,7 @@ fn the_upper_layers_behave_identically_in_every_mode() {
             Box::new(|echo: &Echo| Connection::connect_plain(echo.addr, CONNECT_TIMEOUT)),
         ),
     ] {
-        let mut conn = connect(&echo).unwrap_or_else(|e| panic!("{label}: connect failed: {e}"));
+        let conn = connect(&echo).unwrap_or_else(|e| panic!("{label}: connect failed: {e}"));
         conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 
         // Typed payloads, well over one frame, so coding has to work.

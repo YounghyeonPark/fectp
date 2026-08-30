@@ -23,7 +23,7 @@ fn main() -> fectp::Result<()> {
         // Connect everyone first so their traffic genuinely interleaves.
         let mut conns: Vec<Connection> = (0..CLIENTS)
             .map(|_| {
-                let mut c = Connection::connect(addr, &server_public, &Identity::generate())?;
+                let c = Connection::connect(addr, &server_public, &Identity::generate())?;
                 c.set_read_timeout(Some(Duration::from_secs(5)))?;
                 Ok(c)
             })

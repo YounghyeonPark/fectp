@@ -283,36 +283,33 @@ messages per peer, since each holds its payload until acknowledged.
 
 ## Sending and receiving at once
 
-`send` and `recv` both take `&mut self`, so one cannot run while the other is
-blocked. `into_duplex` hands back two handles that can:
+Every `Connection` method takes `&self`, so one thread can send while another
+is blocked receiving. There is nothing to wrap, convert, or clone:
 
 ```rust
-let (tx, rx) = conn.into_duplex();
-
-std::thread::spawn(move || {
-    while let Ok(message) = rx.recv() {
-        println!("{} bytes", message.len());
-    }
-});
-
-tx.send(b"sent while the other thread is blocked reading")?;
+std::thread::scope(|s| {
+    s.spawn(|| loop {
+        let mut buf = [0u8; 2048];
+        if let Ok(n) = conn.recv(&mut buf) {
+            handle(&buf[..n]);
+        }
+    });
+    conn.send(b"sent while the other thread is blocked reading")
+})?;
 ```
 
-**The two halves owe each other nothing.** Acknowledgements go out and lost
-messages are retransmitted whether or not anything is calling `rx.recv()`,
-because the protocol runs on a thread of its own rather than inside the calls.
-That is the difference from a plain two-halves split, where the receiving half
-has to keep being polled or the *sending* half quietly stops retransmitting.
+A shared `&Connection` is all either thread needs. Wrap it in an `Arc` if you
+want `'static` threads instead of scoped ones — that is your choice, not
+something the API asks for.
 
-`tx.send` takes `&self` and seals on the calling thread, so it is as short a
-path as a plain `Connection::send` — measured, the difference is inside the
-noise. `rx.recv` blocks; `recv_timeout` and `try_recv` are there too.
+The blocking read holds only the receive side, so a send never waits behind it.
+The two directions have separate cipher states once the handshake splits, and
+the state they do share — the reliability layer — sits behind a lock held for
+microseconds. Measured, it costs less than this benchmark can resolve.
 
-The thread stops when either half is dropped, and the other then reports
-`Error::Closed`.
-
-An `Endpoint` needs none of this: it is already an event loop, and one thread
-can send and receive on it for any number of peers.
+**Retransmission is still driven by calls**, as it always has been: `recv`,
+`flush` and the send methods each advance it. A program that sends reliably and
+then calls none of them will not retransmit — which is what `flush` is for.
 
 ## Typed payloads
 

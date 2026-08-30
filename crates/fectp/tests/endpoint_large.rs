@@ -48,7 +48,7 @@ fn an_endpoint_sends_a_message_larger_than_a_frame() {
         }
     });
 
-    let mut client =
+    let client =
         Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 
@@ -99,7 +99,7 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
     let _first = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     started.recv_timeout(TIMEOUT).expect("large send started");
 
-    let mut second =
+    let second =
         Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     second.set_read_timeout(Some(TIMEOUT)).expect("timeout");
     second.send(b"are you still there").expect("send");
@@ -169,7 +169,7 @@ fn two_queued_messages_both_arrive_in_order() {
         }
     });
 
-    let mut client =
+    let client =
         Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 

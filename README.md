@@ -311,14 +311,15 @@ as `Event::Sent { delivered }`.
 ## Sending and receiving at once
 
 ```rust
-let (tx, rx) = conn.into_duplex();
-std::thread::spawn(move || while let Ok(msg) = rx.recv() { handle(msg) });
-tx.send(b"sent while the other thread is blocked reading")?;
+std::thread::scope(|s| {
+    s.spawn(|| loop { conn.recv(&mut buf) });
+    conn.send(b"sent while the other thread is blocked reading")
+})?;
 ```
 
-The halves owe each other nothing: acknowledgements and retransmissions happen
-because the protocol runs on its own thread, not because you remembered to call
-something. An `Endpoint` needs none of this — it is already an event loop.
+Every method takes `&self`, so a shared reference is all either thread needs —
+no wrapper, no conversion, no clone. The blocking read holds only the receive
+side, so a send never waits behind it.
 
 ## Reliability, per message
 

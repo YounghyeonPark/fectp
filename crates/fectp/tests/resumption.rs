@@ -75,15 +75,15 @@ fn identity_survives_resumption() {
     let mut first = Connection::connect(addr, &server_public, &client_identity).expect("connect");
     exchange(&mut first, b"one");
     let ticket = first.resumption_ticket().expect("encrypted session");
-    assert_eq!(first.peer_public_key(), &server_public);
+    assert_eq!(first.peer_public_key().expect("connected"), server_public);
     drop(first);
 
     let mut resumed =
         Connection::resume(addr, &ticket, &server_public, RESUME_TIMEOUT).expect("resume");
     exchange(&mut resumed, b"two");
     assert_eq!(
-        resumed.peer_public_key(),
-        &server_public,
+        resumed.peer_public_key().expect("connected"),
+        server_public,
         "the resumed session must still report who it is talking to"
     );
 

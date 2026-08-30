@@ -62,10 +62,10 @@ mod link;
 mod pipeline;
 use link::Link;
 use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
-pub mod duplex;
 mod endpoint;
 pub mod udp;
 
+use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -84,7 +84,6 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
-pub use duplex::{DuplexReceiver, DuplexSender};
 pub use endpoint::{Endpoint, Event, PeerId, MAX_QUEUED_LARGE};
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
@@ -263,15 +262,12 @@ pub(crate) fn local_capabilities() -> Capabilities {
 }
 
 /// An established connection to one peer.
-pub struct Connection {
+struct Core {
     transport: UdpTransport,
     /// Session, coding, and reliability state. Shared with the multi-client
     /// [`Endpoint`] so the two cannot drift apart.
     peer: Peer,
     tx: Vec<u8>,
-    rx: Vec<u8>,
-    /// Decoding scratch space, grown on demand.
-    scratch: Vec<u8>,
     /// Data frames read while waiting for acknowledgements, held so that
     /// `flush` never has to discard one.
     inbox: VecDeque<Vec<u8>>,
@@ -282,15 +278,13 @@ pub struct Connection {
     read_timeout: Option<Duration>,
 }
 
-impl Connection {
+impl Core {
     fn new(transport: UdpTransport, link: Link) -> Self {
         let size = transport.max_datagram_size();
         Self {
             transport,
             peer: Peer::new(link, size),
             tx: vec![0u8; size],
-            rx: vec![0u8; size],
-            scratch: vec![0u8; size],
             inbox: VecDeque::new(),
             epoch: Instant::now(),
             read_timeout: None,
@@ -639,13 +633,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Encrypts and sends `data` as one datagram.
-    ///
-    /// Returns once the bytes are handed to the kernel. There is no
-    /// acknowledgement and no retransmission: a lost datagram is lost.
-    pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.send_typed(data, self.peer.default_payload_type)
-    }
 
     /// Sets the payload shape [`send`](Self::send) assumes.
     ///
@@ -692,18 +679,6 @@ impl Connection {
     /// sequence its own payloads.
     ///
     /// Returns as soon as the first transmission is handed to the kernel.
-    /// Retransmission is driven by [`recv`](Self::recv) and
-    /// [`flush`](Self::flush), so one of those must be called for delivery to
-    /// make progress.
-    ///
-    /// Fails with [`Error::WindowFull`](fectp_core::Error::WindowFull) once
-    /// [`MAX_UNACKED`] messages are outstanding, and with
-    /// [`Error::ReliabilityUnsupported`] if the peer never advertised the
-    /// capability.
-    pub fn send_reliable(&mut self, data: &[u8]) -> Result<MessageId> {
-        self.send_reliable_typed(data, self.peer.default_payload_type)
-    }
-
     /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
     pub fn send_reliable_typed(
         &mut self,
@@ -728,150 +703,6 @@ impl Connection {
         Ok(id)
     }
 
-    /// Sends a message too large for one frame, and waits for all of it.
-    ///
-    /// [`send`](Self::send) and [`send_reliable`](Self::send_reliable) refuse a
-    /// payload above [`max_payload`](Self::max_payload), because a datagram
-    /// larger than the path MTU is cut up by IP, and an IP-fragmented datagram
-    /// is lost entire if any piece of it is. This cuts the message at the
-    /// protocol layer instead, where a lost piece is retransmitted on its own.
-    ///
-    /// Every fragment is a reliable message, so this needs a peer that
-    /// acknowledges. It returns once the peer has acknowledged all of them,
-    /// which is why it takes a timeout rather than returning immediately: there
-    /// is no useful sense in which a large message has been "sent" while most
-    /// of it is still queued behind a send window.
-    ///
-    /// Fragments are coded individually rather than the message being coded
-    /// whole, so each frame is self-describing. That costs compression ratio —
-    /// a compressor sees one fragment of context, not the message — and buys a
-    /// receiver that can decode any frame without waiting for the rest.
-    ///
-    /// Messages above [`MAX_MESSAGE_LEN`] are refused rather than fragmented.
-    pub fn send_large(&mut self, data: &[u8], timeout: Duration) -> Result<()> {
-        self.send_large_typed(data, self.peer.default_payload_type, timeout)
-    }
-
-    /// [`send_large`](Self::send_large), declaring the payload's shape.
-    pub fn send_large_typed(
-        &mut self,
-        data: &[u8],
-        payload_type: PayloadType,
-        timeout: Duration,
-    ) -> Result<()> {
-        if !self.peer.session.peer_capabilities().supports_reliable() {
-            return Err(Error::ReliabilityUnsupported);
-        }
-        let deadline = Instant::now() + timeout;
-        let limit = self.transport.max_datagram_size();
-        let per_fragment = self.peer.max_fragment_payload(limit);
-
-        let count = fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
-            len: data.len(),
-            limit: MAX_MESSAGE_LEN,
-        })?;
-
-        let message = self.peer.next_message;
-        self.peer.next_message = self.peer.next_message.wrapping_add(1);
-
-        for index in 0..count {
-            let start = index as usize * per_fragment;
-            let end = (start + per_fragment).min(data.len());
-            let chunk = &data[start..end];
-
-            // The in-flight bound doubles as the send window. Waiting here
-            // rather than failing is what makes this usable for a message of
-            // many more fragments than the window holds — and it is also the
-            // only thing pacing the send, so a burst cannot outrun the
-            // receiver's socket buffer.
-            let id = loop {
-                let now = self.now_ms();
-                match self.peer.retransmit.register(now) {
-                    Ok(id) => break id,
-                    Err(fectp_core::Error::WindowFull) => {
-                        if Instant::now() >= deadline {
-                            return Err(Error::Unacknowledged {
-                                count: self.peer.retransmit.in_flight(),
-                            });
-                        }
-                        self.pump(Some(deadline), None)?;
-                    }
-                    Err(e) => return Err(Error::Protocol(e)),
-                }
-            };
-
-            let fragment = Fragment {
-                message,
-                index,
-                count,
-            };
-            let n = self.peer.seal(
-                chunk,
-                payload_type,
-                Some(id),
-                Some(fragment),
-                limit,
-                &mut self.tx,
-            )?;
-            self.transport.send(&self.tx[..n])?;
-            self.peer.pending.push(Pending {
-                id,
-                payload_type,
-                data: chunk.to_vec(),
-                fragment: Some(fragment),
-            });
-        }
-
-        let left = deadline.saturating_duration_since(Instant::now());
-        self.flush(left)
-    }
-
-    /// Fragmented messages this side has begun receiving but not completed.
-    ///
-    /// Non-zero means fragments have arrived for a message whose remaining
-    /// pieces have not. It is bounded, so a peer cannot grow it without limit.
-    pub fn reassembling(&self) -> usize {
-        self.peer.reassembly.in_progress()
-    }
-
-    /// Reliable messages still awaiting acknowledgement.
-    pub fn unacknowledged(&self) -> usize {
-        self.peer.retransmit.in_flight()
-    }
-
-    /// The current retransmission timeout estimate, in milliseconds.
-    pub fn rto_ms(&self) -> u32 {
-        self.peer.retransmit.rto_ms()
-    }
-
-    /// Blocks until every reliable message is acknowledged, or `timeout` runs
-    /// out.
-    ///
-    /// Data frames that arrive meanwhile are queued, not discarded, and are
-    /// returned by later calls to [`recv`](Self::recv).
-    ///
-    /// Fails with [`Error::Unacknowledged`] if any message was abandoned after
-    /// exhausting its retries.
-    pub fn flush(&mut self, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        self.peer.abandoned.clear();
-
-        while self.peer.retransmit.in_flight() > 0 {
-            if Instant::now() >= deadline {
-                return Err(Error::Unacknowledged {
-                    count: self.peer.retransmit.in_flight() + self.peer.abandoned.len(),
-                });
-            }
-            self.pump(Some(deadline), None)?;
-        }
-        if !self.peer.abandoned.is_empty() {
-            return Err(Error::Unacknowledged {
-                count: self.peer.abandoned.len(),
-            });
-        }
-        Ok(())
-    }
-
     /// Codes if it pays, then seals into `self.tx`.
     fn seal(
         &mut self,
@@ -884,24 +715,353 @@ impl Connection {
             .seal(data, payload_type, message_id, None, limit, &mut self.tx)
     }
 
+    /// Seals one fragment of a larger message and sends it.
+    fn seal_fragment(
+        &mut self,
+        data: &[u8],
+        payload_type: PayloadType,
+        message_id: MessageId,
+        fragment: Fragment,
+    ) -> Result<()> {
+        let limit = self.transport.max_datagram_size();
+        let n = self.peer.seal(
+            data,
+            payload_type,
+            Some(message_id),
+            Some(fragment),
+            limit,
+            &mut self.tx,
+        )?;
+        self.transport.send(&self.tx[..n])?;
+        self.peer.pending.push(Pending {
+            id: message_id,
+            payload_type,
+            data: data.to_vec(),
+            fragment: Some(fragment),
+        });
+        Ok(())
+    }
+
+    /// Resends whatever has timed out, and drops whatever has run out of
+    /// retries.
+    fn drive_retransmits(&mut self) -> Result<()> {
+        let now = self.now_ms();
+        let limit = self.transport.max_datagram_size();
+        let transport = &mut self.transport;
+        self.peer
+            .drive_retransmits(now, limit, &mut self.tx, |frame| {
+                transport.send(frame).map_err(Error::Io)
+            })
+    }
+}
+
+/// The receive path's own resources.
+///
+/// Separate from [`Core`] so that a blocking read holds only this lock, and a
+/// send on another thread is not waiting behind it.
+struct Reader {
+    /// A second handle on the same socket. One kernel socket may be sent on
+    /// and received on at once; that property is the operating system's, and
+    /// it is what lets the two directions run at the same time.
+    transport: UdpTransport,
+    rx: Vec<u8>,
+    /// Decoding scratch space, grown on demand.
+    scratch: Vec<u8>,
+}
+
+/// An established session with one peer.
+///
+/// Every method takes `&self`, so one thread may send while another is blocked
+/// receiving. Nothing has to be wrapped or converted first:
+///
+/// ```no_run
+/// # fn main() -> fectp::Result<()> {
+/// # let conn: fectp::Connection = unimplemented!();
+/// std::thread::scope(|s| {
+///     s.spawn(|| loop {
+///         let _ = conn.recv(&mut [0u8; 2048]);
+///     });
+///     conn.send(b"sent while the other thread is blocked reading")
+/// })?;
+/// # Ok(()) }
+/// ```
+///
+/// The two directions hold separate cipher states once the handshake splits,
+/// and the state they do share — the reliability layer — sits behind a lock
+/// held for microseconds, never across a blocking read.
+///
+/// Retransmission happens inside `recv`, [`flush`](Self::flush) and the send
+/// calls, as it always has: a program that sends reliably and then calls none
+/// of them will not retransmit.
+pub struct Connection {
+    core: Mutex<Core>,
+    reader: Mutex<Reader>,
+}
+
+impl Connection {
+    fn wrap(core: Core) -> Result<Self> {
+        let size = core.transport.max_datagram_size();
+        let reader = Reader {
+            transport: core.transport.try_clone()?,
+            rx: vec![0u8; size],
+            scratch: vec![0u8; size],
+        };
+        Ok(Self {
+            core: Mutex::new(core),
+            reader: Mutex::new(reader),
+        })
+    }
+
+    fn core(&self) -> Result<std::sync::MutexGuard<'_, Core>> {
+        self.core.lock().map_err(|_| Error::Closed)
+    }
+
+    // ── opening a connection ──────────────────────────────────────────────
+
+    /// Connects to a peer whose public key is already known.
+    pub fn connect(
+        addr: impl ToSocketAddrs,
+        peer_public: &PublicKey,
+        identity: &Identity,
+    ) -> Result<Self> {
+        Self::wrap(Core::connect(addr, peer_public, identity)?)
+    }
+
+    /// [`connect`](Self::connect), carrying a payload in the first message.
+    ///
+    /// That payload is encrypted but **replayable** and has no forward
+    /// secrecy; see `SPEC.md` §4.4.1.
+    pub fn connect_with_zero_rtt(
+        addr: impl ToSocketAddrs,
+        peer_public: &PublicKey,
+        identity: &Identity,
+        zero_rtt: &[u8],
+    ) -> Result<(Self, Vec<u8>)> {
+        let (core, reply) = Core::connect_with_zero_rtt(addr, peer_public, identity, zero_rtt)?;
+        Ok((Self::wrap(core)?, reply))
+    }
+
+    /// [`connect`](Self::connect) with an explicit handshake timeout.
+    pub fn connect_with_timeout(
+        addr: impl ToSocketAddrs,
+        peer_public: &PublicKey,
+        identity: &Identity,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::wrap(Core::connect_with_timeout(
+            addr,
+            peer_public,
+            identity,
+            timeout,
+        )?)
+    }
+
+    /// Redeems a resumption ticket, sparing three of the four key agreements.
+    pub fn resume(
+        addr: impl ToSocketAddrs,
+        ticket: &ResumptionTicket,
+        peer_public: &PublicKey,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::wrap(Core::resume(addr, ticket, peer_public, timeout)?)
+    }
+
+    /// [`resume`](Self::resume), carrying a payload in the first message.
+    pub fn resume_with_zero_rtt(
+        addr: impl ToSocketAddrs,
+        ticket: &ResumptionTicket,
+        peer_public: &PublicKey,
+        zero_rtt: &[u8],
+        timeout: Duration,
+    ) -> Result<(Self, Vec<u8>)> {
+        let (core, reply) =
+            Core::resume_with_zero_rtt(addr, ticket, peer_public, zero_rtt, timeout)?;
+        Ok((Self::wrap(core)?, reply))
+    }
+
+    /// Connects in pre-shared-key mode.
+    pub fn connect_psk(
+        addr: impl ToSocketAddrs,
+        secret: &[u8],
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::wrap(Core::connect_psk(addr, secret, timeout)?)
+    }
+
+    /// [`connect_psk`](Self::connect_psk), carrying a payload in the first
+    /// message.
+    pub fn connect_psk_with_zero_rtt(
+        addr: impl ToSocketAddrs,
+        secret: &[u8],
+        zero_rtt: &[u8],
+        timeout: Duration,
+    ) -> Result<(Self, Vec<u8>)> {
+        let (core, reply) = Core::connect_psk_with_zero_rtt(addr, secret, zero_rtt, timeout)?;
+        Ok((Self::wrap(core)?, reply))
+    }
+
+    /// Connects in plaintext mode. Nothing is encrypted or authenticated.
+    pub fn connect_plain(addr: impl ToSocketAddrs, timeout: Duration) -> Result<Self> {
+        Self::wrap(Core::connect_plain(addr, timeout)?)
+    }
+
+    /// [`connect_plain`](Self::connect_plain), carrying a payload in the first
+    /// message.
+    pub fn connect_plain_with_data(
+        addr: impl ToSocketAddrs,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<(Self, Vec<u8>)> {
+        let (core, reply) = Core::connect_plain_with_data(addr, data, timeout)?;
+        Ok((Self::wrap(core)?, reply))
+    }
+
+    // ── asking about the connection ───────────────────────────────────────
+
+    /// A single-use ticket for resuming this session later, if it is encrypted.
+    pub fn resumption_ticket(&self) -> Option<ResumptionTicket> {
+        self.core().ok()?.resumption_ticket()
+    }
+
+    /// Whether this session encrypts.
+    pub fn is_encrypted(&self) -> bool {
+        self.core().map(|c| c.is_encrypted()).unwrap_or(false)
+    }
+
+    /// The peer's authenticated static public key.
+    pub fn peer_public_key(&self) -> Result<PublicKey> {
+        Ok(*self.core()?.peer_public_key())
+    }
+
+    /// The peer's socket address.
+    pub fn peer_addr(&self) -> Result<SocketAddr> {
+        self.core()?.peer_addr()
+    }
+
+    /// Largest uncompressed payload that fits in a single [`send`](Self::send).
+    ///
+    /// A larger payload can still succeed if it compresses below this limit,
+    /// since what has to fit is the frame that goes on the wire.
+    ///
+    /// This is the limit for an *unreliable* send. A reliable one also carries
+    /// a message identifier, so its limit is
+    /// [`max_reliable_payload`](Self::max_reliable_payload), which is smaller.
+    pub fn max_payload(&self) -> usize {
+        self.core().map(|c| c.max_payload()).unwrap_or(0)
+    }
+
+    /// Largest uncompressed payload for a single
+    /// [`send_reliable`](Self::send_reliable).
+    pub fn max_reliable_payload(&self) -> usize {
+        self.core().map(|c| c.max_reliable_payload()).unwrap_or(0)
+    }
+
+    /// Largest slice of a [`send_large`](Self::send_large) message that one
+    /// frame carries.
+    pub fn max_fragment_payload(&self) -> usize {
+        self.core().map(|c| c.max_fragment_payload()).unwrap_or(0)
+    }
+
+    /// Fragmented messages this side has begun receiving but not completed.
+    pub fn reassembling(&self) -> usize {
+        self.core().map(|c| c.peer.reassembly.in_progress()).unwrap_or(0)
+    }
+
+    /// Reliable messages still awaiting acknowledgement.
+    pub fn unacknowledged(&self) -> usize {
+        self.core()
+            .map(|c| c.peer.retransmit.in_flight())
+            .unwrap_or(0)
+    }
+
+    /// The current retransmission timeout estimate, in milliseconds.
+    pub fn rto_ms(&self) -> u32 {
+        self.core().map(|c| c.peer.retransmit.rto_ms()).unwrap_or(0)
+    }
+
+    /// The payload shape [`send`](Self::send) currently assumes.
+    pub fn default_payload_type(&self) -> PayloadType {
+        self.core()
+            .map(|c| c.default_payload_type())
+            .unwrap_or_default()
+    }
+
+    // ── settings ──────────────────────────────────────────────────────────
+
+    /// Sets the payload shape [`send`](Self::send) assumes.
+    ///
+    /// A connection usually carries one kind of data for its whole life, so
+    /// declaring the shape once here means the rest of the code keeps calling
+    /// plain `send` and still gets the codec suited to it.
+    pub fn set_default_payload_type(&self, payload_type: PayloadType) {
+        if let Ok(mut core) = self.core() {
+            core.set_default_payload_type(payload_type);
+        }
+    }
+
+    /// Pads outgoing frames to a 64-byte boundary to mask payload lengths.
+    ///
+    /// Off by default: a 10-byte message becomes a 64-byte one, which is a
+    /// steep price for the small messages this protocol targets.
+    pub fn set_padding(&self, enabled: bool) {
+        if let Ok(mut core) = self.core() {
+            core.set_padding(enabled);
+        }
+    }
+
+    /// How long [`recv`](Self::recv) waits before reporting a timeout.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        self.core()?.set_read_timeout(timeout)
+    }
+
+    /// Sends `data` to the peer as one datagram.
+    ///
+    /// Returns once the bytes are handed to the kernel. There is no
+    /// acknowledgement and no retransmission: a lost datagram is lost.
+    pub fn send(&self, data: &[u8]) -> Result<()> {
+        let mut core = self.core()?;
+        let payload_type = core.default_payload_type();
+        core.send_typed(data, payload_type)
+    }
+
+    /// [`send`](Self::send), telling the transport what shape the payload has.
+    pub fn send_typed(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
+        self.core()?.send_typed(data, payload_type)
+    }
+
+    /// Sends `data` and keeps resending it until the peer acknowledges it.
+    pub fn send_reliable(&self, data: &[u8]) -> Result<MessageId> {
+        let mut core = self.core()?;
+        let payload_type = core.default_payload_type();
+        core.send_reliable_typed(data, payload_type)
+    }
+
+    /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
+    pub fn send_reliable_typed(
+        &self,
+        data: &[u8],
+        payload_type: PayloadType,
+    ) -> Result<MessageId> {
+        self.core()?.send_reliable_typed(data, payload_type)
+    }
+
     /// Receives the next authentic datagram, writing its payload to `out`.
     ///
     /// Frames that fail to authenticate, that replay a sequence number already
-    /// seen, or that belong to another session are discarded and the call
-    /// keeps waiting. Anyone can send bytes to a UDP port, so a forged frame
-    /// is not an application-level error; surfacing it as one would hand an
-    /// off-path attacker a denial of service.
-    pub fn recv(&mut self, out: &mut [u8]) -> Result<usize> {
+    /// seen, or that belong to another session are discarded and the call keeps
+    /// waiting. Anyone can send bytes to a UDP port, so a forged frame is not
+    /// an application-level error; surfacing it as one would hand an off-path
+    /// attacker a denial of service.
+    pub fn recv(&self, out: &mut [u8]) -> Result<usize> {
         // Anything queued while flushing is delivered before going back to the
         // socket, so ordering between the two paths stays sane.
-        if let Some(message) = self.inbox.pop_front() {
-            let mut scratch = core::mem::take(&mut self.scratch);
-            let delivered = deliver(&message, false, &mut scratch, out);
-            self.scratch = scratch;
-            return delivered;
+        let queued = self.core()?.inbox.pop_front();
+        if let Some(message) = queued {
+            let mut reader = self.reader.lock().map_err(|_| Error::Closed)?;
+            return deliver(&message, false, &mut reader.scratch, out);
         }
 
-        let deadline = self.read_timeout.map(|t| Instant::now() + t);
+        let deadline = self.core()?.read_timeout.map(|t| Instant::now() + t);
         loop {
             if let Some(len) = self.pump(deadline, Some(out))? {
                 return Ok(len);
@@ -915,37 +1075,175 @@ impl Connection {
         }
     }
 
-    /// One turn of the event loop: retransmit what is due, wait for a frame,
-    /// and dispatch it.
+    /// Waits until every reliable message has been acknowledged.
     ///
-    /// Returns `Ok(Some(len))` when a data frame was delivered into `out`.
-    /// With `out` as `None`, data frames are queued for a later `recv`, which
-    /// is what lets `flush` wait for acknowledgements without dropping them.
-    fn pump(&mut self, deadline: Option<Instant>, out: Option<&mut [u8]>) -> Result<Option<usize>> {
-        self.drive_retransmits()?;
+    /// Fails with [`Error::Unacknowledged`] if any message was abandoned after
+    /// exhausting its retries, or if the timeout expires first.
+    pub fn flush(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        self.core()?.peer.abandoned.clear();
 
+        loop {
+            {
+                let core = self.core()?;
+                if core.peer.retransmit.in_flight() == 0 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::Unacknowledged {
+                        count: core.peer.retransmit.in_flight() + core.peer.abandoned.len(),
+                    });
+                }
+            }
+            self.pump(Some(deadline), None)?;
+        }
+
+        let abandoned = self.core()?.peer.abandoned.len();
+        if abandoned > 0 {
+            return Err(Error::Unacknowledged { count: abandoned });
+        }
+        Ok(())
+    }
+
+    /// Sends a message too large for one frame, and waits for all of it.
+    ///
+    /// [`send`](Self::send) and [`send_reliable`](Self::send_reliable) refuse a
+    /// payload above [`max_payload`](Self::max_payload), because a datagram
+    /// larger than the path MTU is cut up by IP, and an IP-fragmented datagram
+    /// is lost entire if any piece of it is. This cuts the message at the
+    /// protocol layer instead, where a lost piece is retransmitted on its own.
+    ///
+    /// Every fragment is a reliable message, so this needs a peer that
+    /// acknowledges. It returns once the peer has acknowledged all of them,
+    /// which is why it takes a timeout: there is no useful sense in which a
+    /// large message has been "sent" while most of it is still queued behind a
+    /// send window.
+    ///
+    /// Fragments are coded individually rather than the message being coded
+    /// whole, so each frame is self-describing. That costs compression ratio —
+    /// a compressor sees one fragment of context, not the message — and buys a
+    /// receiver that can decode any frame without waiting for the rest.
+    ///
+    /// Messages above [`MAX_MESSAGE_LEN`] are refused rather than fragmented.
+    pub fn send_large(&self, data: &[u8], timeout: Duration) -> Result<()> {
+        let payload_type = self.core()?.default_payload_type();
+        self.send_large_typed(data, payload_type, timeout)
+    }
+
+    /// [`send_large`](Self::send_large), declaring the payload's shape.
+    pub fn send_large_typed(
+        &self,
+        data: &[u8],
+        payload_type: PayloadType,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let (per_fragment, count, message) = {
+            let mut core = self.core()?;
+            if !core.peer.session.peer_capabilities().supports_reliable() {
+                return Err(Error::ReliabilityUnsupported);
+            }
+            let limit = core.transport.max_datagram_size();
+            let per_fragment = core.peer.max_fragment_payload(limit);
+            let count =
+                fragments_needed(data.len(), per_fragment).ok_or(Error::PayloadTooLarge {
+                    len: data.len(),
+                    limit: MAX_MESSAGE_LEN,
+                })?;
+            let message = core.peer.next_message;
+            core.peer.next_message = core.peer.next_message.wrapping_add(1);
+            (per_fragment, count, message)
+        };
+
+        for index in 0..count {
+            let start = index as usize * per_fragment;
+            let end = (start + per_fragment).min(data.len());
+            let chunk = &data[start..end];
+
+            // The in-flight bound doubles as the send window. Waiting here
+            // rather than failing is what makes this usable for a message of
+            // many more fragments than the window holds — and it is also the
+            // only thing pacing the send, so a burst cannot outrun the
+            // receiver's socket buffer.
+            loop {
+                let sealed = {
+                    let mut core = self.core()?;
+                    let now = core.now_ms();
+                    match core.peer.retransmit.register(now) {
+                        Ok(id) => Some(core.seal_fragment(
+                            chunk,
+                            payload_type,
+                            id,
+                            Fragment {
+                                message,
+                                index,
+                                count,
+                            },
+                        )),
+                        Err(fectp_core::Error::WindowFull) => {
+                            if Instant::now() >= deadline {
+                                return Err(Error::Unacknowledged {
+                                    count: core.peer.retransmit.in_flight(),
+                                });
+                            }
+                            None
+                        }
+                        Err(e) => return Err(Error::Protocol(e)),
+                    }
+                };
+                match sealed {
+                    Some(result) => {
+                        result?;
+                        break;
+                    }
+                    None => {
+                        self.pump(Some(deadline), None)?;
+                    }
+                }
+            }
+        }
+
+        let left = deadline.saturating_duration_since(Instant::now());
+        self.flush(left)
+    }
+
+    /// Reads one datagram and applies it, driving retransmission on the way.
+    ///
+    /// The blocking read holds only the reader lock, so a send on another
+    /// thread proceeds while this is waiting.
+    fn pump(&self, deadline: Option<Instant>, out: Option<&mut [u8]>) -> Result<Option<usize>> {
         // Wake for whichever comes first: the caller's timeout or the next
         // retransmission deadline. Sleeping past the latter would leave a lost
         // message unnoticed until some unrelated frame arrived.
-        let now = self.now_ms();
-        let until_retransmit = self
-            .peer
-            .retransmit
-            .next_deadline_ms()
-            .map(|at| Duration::from_millis(at.saturating_sub(now)));
-        let until_deadline = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        let wait = match (until_retransmit, until_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let wait = {
+            let mut core = self.core()?;
+            core.drive_retransmits()?;
+            let now = core.now_ms();
+            let until_retransmit = core
+                .peer
+                .retransmit
+                .next_deadline_ms()
+                .map(|at| Duration::from_millis(at.saturating_sub(now)));
+            let until_deadline = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            match (until_retransmit, until_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            }
         };
+
+        let mut reader = self.reader.lock().map_err(|_| Error::Closed)?;
+        let Reader {
+            transport,
+            rx,
+            scratch,
+        } = &mut *reader;
+
         // A zero timeout means "block forever" to the socket layer, which is
         // the opposite of what is meant here.
-        self.transport
-            .set_read_timeout(wait.map(|w| w.max(Duration::from_millis(1))))?;
-
-        let n = match self.transport.recv(&mut self.rx) {
+        transport.set_read_timeout(wait.map(|w| w.max(Duration::from_millis(1))))?;
+        let n = match transport.recv(rx) {
             Ok(n) => n,
             // Whose deadline expired, and what that means, is the caller's
             // business: `recv` reports a timeout, `flush` reports the messages
@@ -954,13 +1252,19 @@ impl Connection {
             Err(e) => return Err(Error::Io(e)),
         };
 
-        let now = self.now_ms();
+        let mut core = self.core()?;
+        let now = core.now_ms();
         let mut ack_len = 0;
-        let ingested = self
-            .peer
-            .ingest(&mut self.rx[..n], now, &mut self.tx, &mut ack_len)?;
+        let Core {
+            peer,
+            transport: sender,
+            tx,
+            inbox,
+            ..
+        } = &mut *core;
+        let ingested = peer.ingest(&mut rx[..n], now, tx, &mut ack_len)?;
         if ack_len > 0 {
-            self.transport.send(&self.tx[..ack_len])?;
+            sender.send(&tx[..ack_len])?;
         }
 
         let (len, compressed) = match ingested {
@@ -979,48 +1283,38 @@ impl Connection {
                     return Ok(Some(data.len()));
                 }
                 None => {
-                    self.inbox.push_back(data);
+                    inbox.push_back(data);
                     return Ok(None);
                 }
             },
         };
 
         let body = HEADER_LEN..HEADER_LEN + len;
-        let mut scratch = core::mem::take(&mut self.scratch);
-        let result = match out {
-            Some(out) => deliver(&self.rx[body], compressed, &mut scratch, out).map(Some),
+        match out {
+            Some(out) => deliver(&rx[body], compressed, scratch, out).map(Some),
             None => {
-                let mut staging = vec![0u8; decoded_capacity(&self.rx[body.clone()], compressed)];
-                deliver(&self.rx[body], compressed, &mut scratch, &mut staging).map(|written| {
+                let mut staging = vec![0u8; decoded_capacity(&rx[body.clone()], compressed)];
+                deliver(&rx[body], compressed, scratch, &mut staging).map(|written| {
                     staging.truncate(written);
-                    self.inbox.push_back(staging);
+                    inbox.push_back(staging);
                     None
                 })
             }
-        };
-        self.scratch = scratch;
-        result
-    }
-
-    /// Resends whatever has timed out, and drops whatever has run out of
-    /// retries.
-    fn drive_retransmits(&mut self) -> Result<()> {
-        let now = self.now_ms();
-        let limit = self.transport.max_datagram_size();
-        let transport = &mut self.transport;
-        self.peer
-            .drive_retransmits(now, limit, &mut self.tx, |frame| {
-                transport.send(frame).map_err(Error::Io)
-            })
+        }
     }
 }
 
+
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Connection")
-            .field("peer", &self.transport.peer_addr().ok())
-            .field("session_id", &self.peer.session.session_id())
-            .finish_non_exhaustive()
+        let mut out = f.debug_struct("Connection");
+        match self.core.lock() {
+            Ok(core) => out
+                .field("peer", &core.transport.peer_addr().ok())
+                .field("session_id", &core.peer.session.session_id()),
+            Err(_) => out.field("state", &"poisoned"),
+        }
+        .finish_non_exhaustive()
     }
 }
 

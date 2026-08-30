@@ -34,7 +34,7 @@ fn incompressible(len: usize) -> Vec<u8> {
 #[test]
 fn a_message_larger_than_one_frame_arrives_whole() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let payload = incompressible(client.max_payload() * 3 + 17);
 
     client.send_large(&payload, TIMEOUT).expect("send_large");
@@ -47,7 +47,7 @@ fn a_message_larger_than_one_frame_arrives_whole() {
 #[test]
 fn a_message_needing_more_fragments_than_the_window_holds_still_arrives() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
 
     // Comfortably more fragments than MAX_UNACKED, so the send has to wait for
     // acknowledgements part-way through rather than queueing the lot.
@@ -63,7 +63,7 @@ fn a_message_needing_more_fragments_than_the_window_holds_still_arrives() {
 #[test]
 fn a_single_frame_message_still_works_through_the_large_path() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let payload = incompressible(64);
 
     client.send_large(&payload, TIMEOUT).expect("send_large");
@@ -75,7 +75,7 @@ fn a_single_frame_message_still_works_through_the_large_path() {
 #[test]
 fn an_empty_message_survives_the_round_trip() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
 
     client.send_large(&[], TIMEOUT).expect("send_large");
 
@@ -86,7 +86,7 @@ fn an_empty_message_survives_the_round_trip() {
 #[test]
 fn a_message_above_the_reassembly_ceiling_is_refused() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
 
     // A receiver commits memory on the strength of the sender's fragment
     // count, so there has to be a size no sender can ask for.
@@ -100,7 +100,7 @@ fn a_message_above_the_reassembly_ceiling_is_refused() {
 #[test]
 fn typed_fragments_round_trip() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
 
     // Sensor data long enough to need several frames. Each fragment is coded
     // on its own, so this also checks that a coded fragment is reassembled
@@ -120,7 +120,7 @@ fn typed_fragments_round_trip() {
 #[test]
 fn ordinary_sends_are_unaffected_by_a_fragmented_one() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let big = incompressible(client.max_payload() * 2);
 
     client.send_large(&big, TIMEOUT).expect("send_large");
@@ -134,7 +134,7 @@ fn ordinary_sends_are_unaffected_by_a_fragmented_one() {
 #[test]
 fn two_fragmented_messages_do_not_mix() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let first = incompressible(client.max_payload() * 2 + 5);
     let second: Vec<u8> = incompressible(client.max_payload() * 2 + 5)
         .into_iter()
@@ -153,7 +153,7 @@ fn two_fragmented_messages_do_not_mix() {
 #[test]
 fn nothing_is_left_half_assembled_afterwards() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let payload = incompressible(client.max_payload() * 4);
 
     client.send_large(&payload, TIMEOUT).expect("send_large");
@@ -166,7 +166,7 @@ fn nothing_is_left_half_assembled_afterwards() {
 #[test]
 fn a_reliable_message_of_exactly_its_advertised_limit_is_sendable() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let payload = incompressible(client.max_reliable_payload());
 
     // A reliable frame carries a message identifier too, so its ceiling is
@@ -184,7 +184,7 @@ fn a_reliable_message_of_exactly_its_advertised_limit_is_sendable() {
 #[test]
 fn an_oversized_reliable_message_is_refused_clearly() {
     let echo = Echo::collector();
-    let mut client = client(&echo);
+    let client = client(&echo);
     let payload = incompressible(client.max_reliable_payload() + 1);
 
     // One byte over. This must be the protocol saying the payload is too

@@ -113,7 +113,7 @@ fn modes() -> fectp::Result<()> {
 
     // Pre-shared key: encrypted, but nothing to distribute except the secret.
     let psk = with_server_mode(Endpoint::bind_psk("127.0.0.1:0", SECRET)?, |addr, _| {
-        let mut conn = Connection::connect_psk(addr, SECRET, timeout)?;
+        let conn = Connection::connect_psk(addr, SECRET, timeout)?;
         assert!(conn.is_encrypted());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.send(b"psk")?;
@@ -125,7 +125,7 @@ fn modes() -> fectp::Result<()> {
 
     // Plaintext: framing and codecs, no crypto.
     let plain = with_server_mode(Endpoint::bind_plain("127.0.0.1:0")?, |addr, _| {
-        let mut conn = Connection::connect_plain(addr, timeout)?;
+        let conn = Connection::connect_plain(addr, timeout)?;
         assert!(!conn.is_encrypted());
         assert!(conn.resumption_ticket().is_none());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -151,7 +151,7 @@ fn modes() -> fectp::Result<()> {
 /// USAGE.md — "The shortest working pair"
 fn shortest_pair() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.send(b"hello")?;
 
@@ -166,7 +166,7 @@ fn shortest_pair() -> fectp::Result<()> {
 /// USAGE.md — "Timeouts" and "Zero-RTT"
 fn timeouts_and_zero_rtt() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let (mut conn, _reply) = Connection::connect_with_zero_rtt(
+        let (conn, _reply) = Connection::connect_with_zero_rtt(
             addr,
             &server_public,
             &Identity::generate(),
@@ -205,7 +205,7 @@ fn timeouts_and_zero_rtt() -> fectp::Result<()> {
 /// USAGE.md — "Reliable delivery"
 fn reliable_delivery() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
 
         conn.send_reliable(b"this must arrive")?;
@@ -226,27 +226,30 @@ fn reliable_delivery() -> fectp::Result<()> {
 fn duplex() -> fectp::Result<()> {
     with_server(|addr, server_public| {
         let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
-        let (tx, rx) = conn.into_duplex();
+        conn.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-        let reader = std::thread::spawn(move || rx.recv_timeout(Duration::from_secs(5)));
+        // Both directions on one `&Connection`, no wrapper and no conversion.
+        std::thread::scope(|s| -> fectp::Result<()> {
+            let reader = s.spawn(|| {
+                let mut buf = [0u8; 2048];
+                conn.recv(&mut buf).map(|n| buf[..n].to_vec())
+            });
 
-        // Sent while the other thread is blocked reading, which a `&mut self`
-        // API cannot express.
-        std::thread::sleep(Duration::from_millis(20));
-        tx.send(b"sent while the other thread is blocked reading")?;
+            std::thread::sleep(Duration::from_millis(20));
+            conn.send(b"sent while the other thread is blocked reading")?;
 
-        let message = reader.join().expect("reader thread")?;
-        assert_eq!(message, b"sent while the other thread is blocked reading");
-
-        println!("duplex: {} bytes received on another thread", message.len());
-        Ok(())
+            let message = reader.join().expect("reader thread")?;
+            assert_eq!(message, b"sent while the other thread is blocked reading");
+            println!("duplex: {} bytes received on another thread", message.len());
+            Ok(())
+        })
     })
 }
 
 /// USAGE.md — "Large messages"
 fn large_messages() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
 
         // Comfortably past what one frame carries, so the outbound trip
@@ -296,7 +299,7 @@ fn large_from_an_endpoint() -> fectp::Result<()> {
         }
     });
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+    let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
     conn.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut buf = vec![0u8; expected.len()];
     let n = conn.recv(&mut buf)?;
@@ -313,7 +316,7 @@ fn large_from_an_endpoint() -> fectp::Result<()> {
 /// USAGE.md — "Typed payloads"
 fn typed_payloads() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
 
         // Four interleaved channels of slowly varying i16.
@@ -348,7 +351,7 @@ fn typed_payloads() -> fectp::Result<()> {
 fn resumption() -> fectp::Result<()> {
     with_server(|addr, server_public| {
         let identity = Identity::generate();
-        let mut conn = Connection::connect(addr, &server_public, &identity)?;
+        let conn = Connection::connect(addr, &server_public, &identity)?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.send(b"first")?;
         let mut buf = vec![0u8; 2048];
@@ -361,7 +364,7 @@ fn resumption() -> fectp::Result<()> {
         // Always keep the full-handshake fallback: a restarted or forgetful
         // server cannot answer a resumption.
         let ticket = Ticket::from_key(key);
-        let mut conn = match Connection::resume(
+        let conn = match Connection::resume(
             addr,
             &ticket,
             &server_public,
@@ -400,7 +403,7 @@ fn many_peers() -> fectp::Result<()> {
     let clients = std::thread::spawn(move || -> fectp::Result<()> {
         let mut conns: Vec<Connection> = (0..PEERS)
             .map(|_| {
-                let mut c = Connection::connect(addr, &server_public, &Identity::generate())?;
+                let c = Connection::connect(addr, &server_public, &Identity::generate())?;
                 c.set_read_timeout(Some(Duration::from_secs(5)))?;
                 Ok(c)
             })
@@ -498,7 +501,7 @@ fn peer_to_peer() -> fectp::Result<()> {
 /// USAGE.md — "Length masking"
 fn length_masking() -> fectp::Result<()> {
     with_server(|addr, server_public| {
-        let mut conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.set_padding(true);
 
