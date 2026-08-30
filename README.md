@@ -408,7 +408,9 @@ codecs, optional Zstandard compression.
 **Not built:** congestion control, ordered delivery, address migration, ticket
 expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
 
-141 tests pass; the crate builds for `thumbv7em-none-eabihf`.
+177 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+**22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
+reliable delivery — plus the caller's buffers.
 
 ---
 

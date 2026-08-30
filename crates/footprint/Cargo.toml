@@ -1,0 +1,31 @@
+# Deliberately outside the workspace: this only builds for a bare-metal target,
+# so `cargo build --workspace` on a host would try to link it and fail. Its
+# profile also differs from the workspace's, which is the point — the numbers
+# only mean something with fat LTO, size optimisation and section garbage
+# collection all on.
+[package]
+name = "fectp-footprint"
+description = "A bare-metal image that links FECTP, for measuring what it costs on a microcontroller"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+publish = false
+
+[features]
+default = []
+# Links the same image with the protocol call removed, so the difference is
+# what FECTP costs rather than what a bare-metal Rust image costs.
+baseline = []
+
+[dependencies]
+fectp-core = { path = "../fectp-core" }
+rand_core = { version = "0.6", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true

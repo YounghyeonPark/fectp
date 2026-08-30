@@ -421,3 +421,42 @@ fn a_peer_advertising_no_codecs_is_representable() {
     assert!(!minimal.accepts_compression());
     assert!(minimal.supports_codecs(CODEC_I16_DELTA | CODEC_I32_DELTA | CODEC_TRANSPOSE));
 }
+
+/// Not a specification requirement — the RAM a constrained peer has to find.
+///
+/// The core allocates nothing, so every byte it needs is either in one of these
+/// structures or in a buffer the caller supplies. Pinning the sizes here means
+/// a change that quietly doubles what a microcontroller must hold shows up as a
+/// failing test rather than as a linker error on someone's board.
+#[test]
+fn state_a_constrained_peer_must_hold() {
+    use core::mem::size_of;
+    use fectp_core::reliability::{DedupWindow, RetransmitQueue};
+    use fectp_core::session::{Capabilities, Session};
+
+    // Generous bounds rather than exact figures: the point is to catch a change
+    // of order, not to freeze the layout.
+    assert!(
+        size_of::<Session>() <= 512,
+        "Session is {} bytes",
+        size_of::<Session>()
+    );
+    assert!(
+        size_of::<DedupWindow>() <= 32,
+        "DedupWindow is {} bytes",
+        size_of::<DedupWindow>()
+    );
+    assert!(
+        size_of::<Capabilities>() <= 8,
+        "Capabilities is {} bytes",
+        size_of::<Capabilities>()
+    );
+
+    // The sender's queue is the largest single item, and it is bounded by
+    // MAX_IN_FLIGHT. A peer that never sends reliably does not need one.
+    assert!(
+        size_of::<RetransmitQueue>() <= 2048,
+        "RetransmitQueue is {} bytes",
+        size_of::<RetransmitQueue>()
+    );
+}

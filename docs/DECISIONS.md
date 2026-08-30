@@ -558,7 +558,6 @@ These are unimplemented, not overlooked.
 | **Path MTU discovery** | Frame size is fixed at 1200 bytes or the peer's advertised limit. | Fine on a LAN; a real network path may be smaller. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
-| **Linked footprint figure** | Only a pre-link upper bound has been measured. | `fectp-core`'s own code is ~21 KiB for `thumbv7em-none-eabihf`; the crypto dependencies add roughly 95 KiB before dead-code elimination, dominated by `curve25519-dalek`. A real figure needs a firmware image linked with LTO and `--gc-sections`. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam. |
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Block-wise bit-packing would make the ratio track the signal smoothly instead of stepping. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
@@ -749,6 +748,43 @@ and then calls none of them will not retransmit. That is the same contract
 `Connection` has always had, and `flush` is the answer to it — but it is the
 one thing the discarded thread-based version did better, and the trade was
 made deliberately for an API with fewer parts.
+
+## D23 — The microcontroller premise, measured
+
+**Problem**: the project was scoped around running on a 32-bit microcontroller,
+and that premise had never been checked. What `DECISIONS.md` carried was a
+pre-link upper bound — the core's own code at about 21 KiB, plus roughly 95 KiB
+of crypto dependencies *before* dead-code elimination. Read together that is
+about 116 KiB, which is enough to rule the protocol out on a lot of parts. It
+is also not a number anyone can plan with, because most of `curve25519-dalek`
+is never reached and the linker discards it.
+
+**Measured**: `crates/footprint` links a real image for `thumbv7em-none-eabihf`
+with fat LTO, `opt-level = "z"` and `--gc-sections`, driving a full public-key
+handshake in both roles, a sealed and opened data frame, and the codec path so
+nothing that matters is discarded.
+
+| | flash |
+|---|---|
+| full protocol | 22,572 bytes |
+| the same image with the protocol removed | 36 bytes |
+| **FECTP** | **22,536 bytes (22.0 KiB)** |
+
+The estimate was five times too pessimistic. RAM is smaller still: 294 bytes of
+session state, or 1,334 with the reliable-delivery queue, plus whatever buffers
+the caller supplies — about 3.7 KiB for a full-duplex reliable session at the
+default frame size (`cargo run -p fectp-core --example sizes`).
+
+**Decision**: the premise holds, and the estimate is replaced by the
+measurement. On a Cortex-M4 with 256 KiB of flash and 64 KiB of RAM — a small
+part by current standards — this is 9% of the flash and 6% of the RAM.
+
+The footprint crate sits outside the workspace deliberately: it only links for
+a bare-metal target, and its profile differs from the workspace's because the
+numbers mean nothing without LTO, size optimisation and section garbage
+collection all on. A conformance test pins the structure sizes, so a change
+that quietly doubles what a constrained peer must hold fails a test rather than
+someone's board.
 
 ## Not carried over
 

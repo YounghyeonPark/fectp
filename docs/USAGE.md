@@ -539,6 +539,25 @@ Build check:
 cargo build -p fectp-core --target thumbv7em-none-eabihf --release
 ```
 
+### What it costs
+
+Measured on a linked image rather than estimated — `crates/footprint` builds
+one for `thumbv7em-none-eabihf` with LTO and `--gc-sections`:
+
+| | |
+|---|---|
+| flash | **22.0 KiB**, handshake, session and codec included |
+| RAM, session state | 294 bytes, or 1,334 with reliable delivery |
+| RAM, buffers | the caller's — 2,400 bytes for send and receive at the default frame size |
+
+```bash
+cd crates/footprint && cargo build --release && python size.py
+cargo run -p fectp-core --example sizes
+```
+
+The core allocates nothing, so those numbers are the whole answer. On a
+Cortex-M4 with 256 KiB of flash that is 9% of it.
+
 ## Common mistakes
 
 | | |

@@ -1,0 +1,25 @@
+C:\dev\fectp\crates\footprint\target\thumbv7em-none-eabihf\release\deps\fectp_core-7fe0a6d6d0012284.d: C:\dev\fectp\crates\fectp-core\src\lib.rs C:\dev\fectp\crates\fectp-core\src\codec\mod.rs C:\dev\fectp\crates\fectp-core\src\codec\numeric.rs C:\dev\fectp\crates\fectp-core\src\codec\transpose.rs C:\dev\fectp\crates\fectp-core\src\codec\varint.rs C:\dev\fectp\crates\fectp-core\src\error.rs C:\dev\fectp\crates\fectp-core\src\fragment.rs C:\dev\fectp\crates\fectp-core\src\frame.rs C:\dev\fectp\crates\fectp-core\src\keys.rs C:\dev\fectp\crates\fectp-core\src\noise\mod.rs C:\dev\fectp\crates\fectp-core\src\noise\cipher.rs C:\dev\fectp\crates\fectp-core\src\noise\resume.rs C:\dev\fectp\crates\fectp-core\src\noise\handshake.rs C:\dev\fectp\crates\fectp-core\src\noise\hash.rs C:\dev\fectp\crates\fectp-core\src\noise\symmetric.rs C:\dev\fectp\crates\fectp-core\src\plain.rs C:\dev\fectp\crates\fectp-core\src\reliability.rs C:\dev\fectp\crates\fectp-core\src\session.rs C:\dev\fectp\crates\fectp-core\src\transport.rs
+
+C:\dev\fectp\crates\footprint\target\thumbv7em-none-eabihf\release\deps\libfectp_core-7fe0a6d6d0012284.rlib: C:\dev\fectp\crates\fectp-core\src\lib.rs C:\dev\fectp\crates\fectp-core\src\codec\mod.rs C:\dev\fectp\crates\fectp-core\src\codec\numeric.rs C:\dev\fectp\crates\fectp-core\src\codec\transpose.rs C:\dev\fectp\crates\fectp-core\src\codec\varint.rs C:\dev\fectp\crates\fectp-core\src\error.rs C:\dev\fectp\crates\fectp-core\src\fragment.rs C:\dev\fectp\crates\fectp-core\src\frame.rs C:\dev\fectp\crates\fectp-core\src\keys.rs C:\dev\fectp\crates\fectp-core\src\noise\mod.rs C:\dev\fectp\crates\fectp-core\src\noise\cipher.rs C:\dev\fectp\crates\fectp-core\src\noise\resume.rs C:\dev\fectp\crates\fectp-core\src\noise\handshake.rs C:\dev\fectp\crates\fectp-core\src\noise\hash.rs C:\dev\fectp\crates\fectp-core\src\noise\symmetric.rs C:\dev\fectp\crates\fectp-core\src\plain.rs C:\dev\fectp\crates\fectp-core\src\reliability.rs C:\dev\fectp\crates\fectp-core\src\session.rs C:\dev\fectp\crates\fectp-core\src\transport.rs
+
+C:\dev\fectp\crates\footprint\target\thumbv7em-none-eabihf\release\deps\libfectp_core-7fe0a6d6d0012284.rmeta: C:\dev\fectp\crates\fectp-core\src\lib.rs C:\dev\fectp\crates\fectp-core\src\codec\mod.rs C:\dev\fectp\crates\fectp-core\src\codec\numeric.rs C:\dev\fectp\crates\fectp-core\src\codec\transpose.rs C:\dev\fectp\crates\fectp-core\src\codec\varint.rs C:\dev\fectp\crates\fectp-core\src\error.rs C:\dev\fectp\crates\fectp-core\src\fragment.rs C:\dev\fectp\crates\fectp-core\src\frame.rs C:\dev\fectp\crates\fectp-core\src\keys.rs C:\dev\fectp\crates\fectp-core\src\noise\mod.rs C:\dev\fectp\crates\fectp-core\src\noise\cipher.rs C:\dev\fectp\crates\fectp-core\src\noise\resume.rs C:\dev\fectp\crates\fectp-core\src\noise\handshake.rs C:\dev\fectp\crates\fectp-core\src\noise\hash.rs C:\dev\fectp\crates\fectp-core\src\noise\symmetric.rs C:\dev\fectp\crates\fectp-core\src\plain.rs C:\dev\fectp\crates\fectp-core\src\reliability.rs C:\dev\fectp\crates\fectp-core\src\session.rs C:\dev\fectp\crates\fectp-core\src\transport.rs
+
+C:\dev\fectp\crates\fectp-core\src\lib.rs:
+C:\dev\fectp\crates\fectp-core\src\codec\mod.rs:
+C:\dev\fectp\crates\fectp-core\src\codec\numeric.rs:
+C:\dev\fectp\crates\fectp-core\src\codec\transpose.rs:
+C:\dev\fectp\crates\fectp-core\src\codec\varint.rs:
+C:\dev\fectp\crates\fectp-core\src\error.rs:
+C:\dev\fectp\crates\fectp-core\src\fragment.rs:
+C:\dev\fectp\crates\fectp-core\src\frame.rs:
+C:\dev\fectp\crates\fectp-core\src\keys.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\mod.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\cipher.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\resume.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\handshake.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\hash.rs:
+C:\dev\fectp\crates\fectp-core\src\noise\symmetric.rs:
+C:\dev\fectp\crates\fectp-core\src\plain.rs:
+C:\dev\fectp\crates\fectp-core\src\reliability.rs:
+C:\dev\fectp\crates\fectp-core\src\session.rs:
+C:\dev\fectp\crates\fectp-core\src\transport.rs:
