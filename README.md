@@ -47,10 +47,17 @@ before any real data may move**.
 sequenceDiagram
     participant A as Your app
     participant B as Peer
-    Note over A,B: the request rides in packet 1
+    Note over A,B: once, when the session opens
     A->>B: handshake + request
     B->>A: handshake + answer
+    Note over A,B: every message after that
+    A->>B: data
+    B->>A: data
 ```
+
+**The handshake happens once per session, not per message.** Afterwards each
+`send` is one symmetric encryption — about a microsecond — and a 14-byte
+header. No key agreement, ever again, until the session ends.
 
 | Before your first byte can be sent | Round trips |
 |---|---|
@@ -63,6 +70,10 @@ FECTP manages this on *first* contact because of one trade: the caller must
 already know the peer's public key. Nothing has to be negotiated, so the first
 packet can carry both the handshake and the payload. That key has to reach you
 some other way — the same bargain as an SSH host key.
+
+A session lasts until you drop it. The only thing that costs another handshake
+is losing the session — a restart, a reboot, a new peer — and
+[resumption](#session-resumption) cuts even that to a single X25519 operation.
 
 > 0-RTT data is encrypted but **replayable** by anyone who captures the packet.
 > Put idempotent requests there, or none.
