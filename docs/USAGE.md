@@ -304,37 +304,50 @@ message that had to be split reports its outcome as `Event::Sent { delivered }`.
 ## Typed payloads
 
 A generic compressor sees only bytes. Telling it the shape lets a transform run
-first — on interleaved `i16` sensor data this is the difference between no
-saving at all and about 2x.
+first — interleaved sensor samples are split by channel and delta-coded, which
+a byte-oriented compressor cannot do for itself.
+
+Every send names the shape:
 
 ```rust
-use fectp::PayloadType;
+let shape = PayloadType::I16 { channels: 4 };   // 4 channels of 16-bit ADC
+conn.send(&samples, shape)?;
+conn.send(&more, shape)?;
 
-conn.send_typed(&samples, PayloadType::I16 { channels: 4 })?;
+conn.send(b"a status line", PayloadType::Opaque)?;   // just bytes
 ```
 
-If the connection always carries one shape, say so once:
-
-```rust
-conn.set_default_payload_type(PayloadType::I16 { channels: 4 });
-conn.send(&samples)?;                                  // uses the default
-conn.send_typed(&status, PayloadType::Opaque)?;        // override for one message
-```
-
-Available shapes:
-
-| | for |
+| | |
 |---|---|
-| `PayloadType::Opaque` | unknown structure (the default) |
-| `PayloadType::I16 { channels }` | interleaved little-endian `i16` samples |
-| `PayloadType::I32 { channels }` | interleaved little-endian `i32` samples |
-| `PayloadType::Elements { size }` | `f32`/`f64` arrays, fixed-layout records |
+| `Opaque` | Just bytes. Always correct; the compressor is on its own. |
+| `I16 { channels }` | Interleaved 16-bit samples. |
+| `I32 { channels }` | Interleaved 32-bit samples or counters. |
+| `Elements { size }` | Fixed-size elements, byte-transposed. `4` for `f32`, `8` for `f64`. |
 
-Declaring the wrong shape is safe: the payload still round-trips, it just
-compresses badly. If the peer cannot reverse the transform, or coding does not
-shrink the payload, the original bytes are sent.
+What it is worth, measured on 8 KiB:
 
-To support a new data shape, see [`ADDING-A-CODEC.md`](ADDING-A-CODEC.md).
+| | as `Opaque` | declared |
+|---|---|---|
+| sensor i16 ×4, slow | 1.12x | **3.46x** |
+| counter i32 ×2 | 1.67x | **292.57x** |
+| f32 array | 1.14x | **8.21x** |
+| JSON text | 126.03x | 126.03x |
+| random bytes | 1.00x | 1.00x |
+
+Structured binary gains a lot; text and random bytes gain nothing.
+
+**A wrong declaration is safe.** The payload still round-trips — it just
+compresses badly, and the peer reverses whatever was applied.
+
+**Why it is named every time and not set once.** A setting would mean this
+line's behaviour depended on a call made somewhere else, and forgetting it
+would cost compression with no error and no warning. Repeating a shape costs
+nothing: `PayloadType` is two bytes and `Copy`, so bind it to a local and pass
+it. Changing the channel count then means changing one line.
+
+**Below 32 bytes no transform runs at all**, and a stream that repeatedly fails
+to compress stops being asked — so a wrong shape on incompressible data costs a
+few microseconds at the start and almost nothing after that.
 
 ## Resumption
 

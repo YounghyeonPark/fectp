@@ -34,7 +34,7 @@ impl Echo {
             while !flag.load(Ordering::Relaxed) {
                 match server.poll(Some(Duration::from_millis(50))) {
                     Ok(Event::Message { peer, data }) => {
-                        let _ = server.send(peer, &data);
+                        let _ = server.send(peer, &data, PayloadType::Opaque);
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -73,7 +73,7 @@ fn plain_server() -> Echo {
 
 fn exchange(conn: &mut Connection, message: &[u8]) -> Vec<u8> {
     conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-    conn.send(message).expect("send");
+    conn.send(message, PayloadType::Opaque).expect("send");
     let mut buf = vec![0u8; 64 * 1024];
     let n = conn.recv(&mut buf).expect("recv");
     buf[..n].to_vec()
@@ -204,14 +204,14 @@ fn the_upper_layers_behave_identically_in_every_mode() {
         conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 
         // Typed payloads, well over one frame, so coding has to work.
-        conn.send_typed(&samples, PayloadType::I16 { channels: 4 })
+        conn.send(&samples, PayloadType::I16 { channels: 4 })
             .unwrap_or_else(|e| panic!("{label}: send_typed failed: {e}"));
         let mut buf = vec![0u8; 64 * 1024];
         let n = conn.recv(&mut buf).expect("recv");
         assert_eq!(&buf[..n], &samples[..], "{label}: coded payload");
 
         // Reliable delivery.
-        conn.send_reliable(b"must arrive")
+        conn.send_reliable(b"must arrive", PayloadType::Opaque)
             .unwrap_or_else(|e| panic!("{label}: send_reliable failed: {e}"));
         conn.flush(Duration::from_secs(2))
             .unwrap_or_else(|e| panic!("{label}: flush failed: {e}"));

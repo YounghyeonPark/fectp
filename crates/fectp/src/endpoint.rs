@@ -34,14 +34,14 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use fectp::{Event, Identity, Endpoint};
+//! use fectp::{Endpoint, Event, Identity, PayloadType};
 //!
 //! # fn main() -> fectp::Result<()> {
 //! let mut server = Endpoint::bind("0.0.0.0:4433", Identity::generate())?;
 //! loop {
 //!     match server.poll(Some(Duration::from_millis(100)))? {
 //!         Event::Connected { peer, .. } => println!("{peer:?} arrived"),
-//!         Event::Message { peer, data } => server.send(peer, &data)?,
+//!         Event::Message { peer, data } => server.send(peer, &data, PayloadType::Opaque)?,
 //!         _ => {}
 //!     }
 //! }
@@ -794,39 +794,21 @@ impl Endpoint {
     }
 
     /// Sends `data` to one peer, unreliably.
-    pub fn send(&mut self, peer: PeerId, data: &[u8]) -> Result<()> {
-        let payload_type = self
-            .peers
-            .get(&peer)
-            .map(|e| e.peer.default_payload_type)
-            .ok_or(Error::UnknownPeer)?;
-        self.send_typed(peer, data, payload_type)
-    }
-
-    /// Sends `data` to one peer, declaring its shape.
-    pub fn send_typed(
-        &mut self,
-        peer: PeerId,
-        data: &[u8],
-        payload_type: PayloadType,
-    ) -> Result<()> {
+    ///
+    /// `payload_type` says what shape the bytes have, so a transform suited to
+    /// them runs before the generic compressor. [`PayloadType::Opaque`] means
+    /// "just bytes" and is always correct.
+    ///
+    /// One frame only; anything larger is refused. A lost datagram is lost.
+    pub fn send(&mut self, peer: PeerId, data: &[u8], payload_type: PayloadType) -> Result<()> {
         let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
         let addr = entry.addr;
         let limit = entry.datagram_limit;
-        let n = entry.peer.seal(data, payload_type, None, None, limit, &mut self.tx)?;
+        let n = entry
+            .peer
+            .seal(data, payload_type, None, None, limit, &mut self.tx)?;
         self.socket.send_to(&self.tx[..n], addr)?;
         Ok(())
-    }
-
-    /// Sets the payload shape [`send`](Self::send) assumes for one peer.
-    pub fn set_default_payload_type(&mut self, peer: PeerId, payload_type: PayloadType) -> bool {
-        match self.peers.get_mut(&peer) {
-            Some(entry) => {
-                entry.peer.default_payload_type = payload_type;
-                true
-            }
-            None => false,
-        }
     }
 
     /// Sends `data` to one peer, retransmitting until acknowledged.
@@ -837,17 +819,7 @@ impl Endpoint {
     ///
     /// Progress happens inside [`poll`](Self::poll); an endpoint that queues a
     /// message and never polls sends nothing further.
-    pub fn send_reliable(&mut self, peer: PeerId, data: &[u8]) -> Result<()> {
-        let payload_type = self
-            .peers
-            .get(&peer)
-            .map(|e| e.peer.default_payload_type)
-            .ok_or(Error::UnknownPeer)?;
-        self.send_reliable_typed(peer, data, payload_type)
-    }
-
-    /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
-    pub fn send_reliable_typed(
+    pub fn send_reliable(
         &mut self,
         peer: PeerId,
         data: &[u8],

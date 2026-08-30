@@ -10,7 +10,7 @@ use std::time::Duration;
 mod common;
 
 use common::Echo;
-use fectp::{Connection, Identity, Ticket};
+use fectp::{Connection, Identity, PayloadType, Ticket};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -25,7 +25,7 @@ fn ticket_of(conn: &Connection) -> Ticket {
 /// Runs one request/response exchange.
 fn exchange(conn: &mut Connection, message: &[u8]) -> Vec<u8> {
     conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-    conn.send(message).expect("send");
+    conn.send(message, PayloadType::Opaque).expect("send");
     let mut buf = vec![0u8; 4096];
     let n = conn.recv(&mut buf).expect("recv");
     buf[..n].to_vec()

@@ -337,7 +337,7 @@ fn crypto_cost() {
     let plain = FectpEcho::plain_drain();
     let pconn = Connection::connect_plain(plain.addr).expect("connect");
     let plain_send = measure_batched(WARMUP, 40, 500, || {
-        pconn.send(&payload).expect("send");
+        pconn.send(&payload, PayloadType::Opaque).expect("send");
     });
     drop(pconn);
     drop(plain);
@@ -347,7 +347,7 @@ fn crypto_cost() {
         Connection::connect(pk.addr, &pk.public.expect("identity"), &Identity::generate())
             .expect("connect");
     let sealed = measure_batched(WARMUP, 40, 500, || {
-        conn.send(&payload).expect("send");
+        conn.send(&payload, PayloadType::Opaque).expect("send");
     });
     drop(conn);
     drop(pk);
@@ -668,7 +668,7 @@ fn under_loss() {
             // The window is 32, so this blocks partway through and the send
             // rate becomes whatever acknowledgements allow.
             loop {
-                match conn.send_reliable(&payload) {
+                match conn.send_reliable(&payload, PayloadType::Opaque) {
                     Ok(_) => break,
                     Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
                 }
@@ -730,7 +730,7 @@ fn under_loss() {
         const SIZE: usize = 256 * 1024;
         let payload = datasets::incompressible(SIZE);
         let start = std::time::Instant::now();
-        let outcome = conn.send_reliable(&payload).and_then(|()| conn.flush(Duration::from_secs(60)));
+        let outcome = conn.send_reliable(&payload, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(60)));
         let elapsed = start.elapsed();
         let ms_taken = elapsed.as_secs_f64() * 1000.0;
         drop(conn);
@@ -811,7 +811,7 @@ fn other_things_a_path_does() {
         let start = std::time::Instant::now();
         for _ in 0..MESSAGES {
             loop {
-                match conn.send_reliable(&payload) {
+                match conn.send_reliable(&payload, PayloadType::Opaque) {
                     Ok(_) => break,
                     Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
                 }
@@ -865,7 +865,7 @@ fn other_things_a_path_does() {
         const SIZE: usize = 256 * 1024;
         let payload = datasets::incompressible(SIZE);
         let start = std::time::Instant::now();
-        let outcome = conn.send_reliable(&payload).and_then(|()| conn.flush(Duration::from_secs(60)));
+        let outcome = conn.send_reliable(&payload, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(60)));
         let elapsed = start.elapsed();
 
         let offered = relay.offered.load(std::sync::atomic::Ordering::Relaxed);
@@ -917,11 +917,11 @@ fn other_things_a_path_does() {
         Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
     conn.set_read_timeout(Some(Duration::from_millis(500)))
         .expect("timeout");
-    conn.send(b"before").expect("send");
+    conn.send(b"before", PayloadType::Opaque).expect("send");
     let mut buf = [0u8; 256];
     let before = conn.recv(&mut buf).is_ok();
 
-    conn.send(b"after the mapping moved").expect("send");
+    conn.send(b"after the mapping moved", PayloadType::Opaque).expect("send");
     let after = conn.recv(&mut buf).is_ok();
     drop(conn);
     drop(relay);
@@ -981,7 +981,7 @@ fn jitter_asymmetry_and_crowding() {
         let start = std::time::Instant::now();
         for _ in 0..MESSAGES {
             loop {
-                match conn.send_reliable(&payload) {
+                match conn.send_reliable(&payload, PayloadType::Opaque) {
                     Ok(_) => break,
                     Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
                 }
@@ -1033,7 +1033,7 @@ fn jitter_asymmetry_and_crowding() {
         let start = std::time::Instant::now();
         for _ in 0..MESSAGES {
             loop {
-                match conn.send_reliable(&payload) {
+                match conn.send_reliable(&payload, PayloadType::Opaque) {
                     Ok(_) => break,
                     Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
                 }
@@ -1099,7 +1099,7 @@ fn jitter_asymmetry_and_crowding() {
                     // starvation on a shared machine instead of what a peer
                     // waits for at the endpoint.
                     while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        if conn.send(&filler).is_err() {
+                        if conn.send(&filler, PayloadType::Opaque).is_err() {
                             break;
                         }
                         let _ = conn.recv(&mut buf);

@@ -331,7 +331,6 @@ can run first:
 conn.send_typed(&samples, PayloadType::I16 { channels: 4 })?;
 
 // Or, if the connection always carries the same shape:
-conn.set_default_payload_type(PayloadType::I16 { channels: 4 });
 conn.send(&samples)?;
 ```
 

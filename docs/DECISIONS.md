@@ -218,8 +218,8 @@ The third row is the point: the win comes from knowing the *channel layout*,
 not from delta coding alone.
 
 **Decision**: a codec *registry* rather than a fixed set of codecs. The caller
-declares a payload's shape (`Connection::send_typed`, or
-`set_default_payload_type` once per connection) and that selects a transform.
+declares a payload's shape on every send (`Connection::send`) and that selects
+a transform.
 Adding a new data type later means writing one transform and registering it —
 see [`ADDING-A-CODEC.md`](ADDING-A-CODEC.md). Shapes implemented today: Shapes implemented:
 interleaved `i16`/`i32` (de-interleave, delta, zigzag, varint) and fixed-size
@@ -935,6 +935,44 @@ comparable to the protocol differences §2 measures; over a million it is
 nothing. The table is decisive for short connections — a sensor that wakes,
 reports and sleeps — and close to meaningless for one that stays open and
 streams. The condition is now stated, with the arithmetic.
+
+## D28 — The payload's shape is an argument, not a setting
+
+**Problem**: there were two ways to declare a shape and four ways to send. A
+setter fixed a default for the connection, `send` used it, and `send_typed`
+overrode it for one message — the same again for reliable sends, and the same
+again on `Endpoint`. Eight methods where two would do.
+
+The count was the smaller half. The setter meant this line:
+
+```rust
+conn.send(&data)?;
+```
+
+did something different depending on a call made somewhere else, possibly in
+another function. Forgetting the setter cost compression **silently** — no
+error, no warning, just a worse ratio nobody would notice. That is a bad shape
+for a knob whose only effect is invisible.
+
+**Decision**: `send(data, shape)` and `send_reliable(data, shape)`. The setter
+and the `_typed` twins are gone; 50 public methods become 43.
+
+Naming a shape at every call is not the burden it looks like. `PayloadType` is
+two bytes and `Copy`, so a stream binds it once to a local and passes it:
+
+```rust
+let shape = PayloadType::I16 { channels: 4 };
+conn.send(&samples, shape)?;
+```
+
+That gives what the setter was for — one place to change the channel count —
+without letting a send inherit a shape from a call it cannot see.
+
+**What it costs**: a program that never compresses anything must still write
+`PayloadType::Opaque` on every send. That is a real tax on the simplest case,
+and it was weighed against keeping `send(data)` as an opaque-only shortcut. The
+argument that settled it is that two calls with one obvious rule beat four
+calls with a rule about which is which.
 
 ## Not carried over
 

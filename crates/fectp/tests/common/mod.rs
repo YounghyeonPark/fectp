@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fectp::{Event, Identity, PeerId, Endpoint};
+use fectp::{Endpoint, Event, Identity, PayloadType, PeerId};
 
 /// What the server has seen so far.
 #[derive(Default, Clone)]
@@ -84,7 +84,7 @@ impl Echo {
                     }
                     Ok(Event::Message { peer, data }) => {
                         if echo {
-                            let _ = server.send(peer, &data);
+                            let _ = server.send(peer, &data, PayloadType::Opaque);
                         }
                         record.lock().expect("lock").messages.push(data);
                     }

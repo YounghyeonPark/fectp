@@ -37,7 +37,7 @@ fn a_message_larger_than_one_frame_arrives_whole() {
     let client = client(&echo);
     let payload = incompressible(client.max_payload() * 3 + 17);
 
-    client.send_reliable(&payload).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert_eq!(received.len(), 1, "a fragmented message is delivered once");
@@ -53,7 +53,7 @@ fn a_message_needing_more_fragments_than_the_window_holds_still_arrives() {
     // acknowledgements part-way through rather than queueing the lot.
     let payload = incompressible(client.max_payload() * (fectp::MAX_UNACKED * 3));
 
-    client.send_reliable(&payload).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert_eq!(received[0].len(), payload.len());
@@ -66,7 +66,7 @@ fn a_single_frame_message_still_works_through_the_large_path() {
     let client = client(&echo);
     let payload = incompressible(64);
 
-    client.send_reliable(&payload).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert_eq!(received[0], payload);
@@ -77,7 +77,7 @@ fn an_empty_message_survives_the_round_trip() {
     let echo = Echo::collector();
     let client = client(&echo);
 
-    client.send_reliable(&[]).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send_reliable(&[], PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert!(received[0].is_empty());
@@ -92,7 +92,7 @@ fn a_message_above_the_reassembly_ceiling_is_refused() {
     // count, so there has to be a size no sender can ask for.
     let huge = vec![0u8; fectp::MAX_MESSAGE_LEN + 1];
     assert!(
-        client.send_reliable(&huge).and_then(|()| client.flush(TIMEOUT)).is_err(),
+        client.send_reliable(&huge, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).is_err(),
         "a message past the ceiling must be refused, not fragmented anyway"
     );
 }
@@ -110,7 +110,7 @@ fn typed_fragments_round_trip() {
         .collect();
 
     client
-        .send_reliable_typed(&samples, PayloadType::I16 { channels: 4 })
+        .send_reliable(&samples, PayloadType::I16 { channels: 4 })
         .and_then(|()| client.flush(TIMEOUT))
         .expect("send_reliable_typed");
 
@@ -124,8 +124,8 @@ fn ordinary_sends_are_unaffected_by_a_fragmented_one() {
     let client = client(&echo);
     let big = incompressible(client.max_payload() * 2);
 
-    client.send_reliable(&big).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
-    client.send(b"after").expect("send");
+    client.send_reliable(&big, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send(b"after", PayloadType::Opaque).expect("send");
 
     let received = echo.messages(2, TIMEOUT);
     assert_eq!(received[0], big, "the large message stays one message");
@@ -142,8 +142,8 @@ fn two_fragmented_messages_do_not_mix() {
         .map(|b| !b)
         .collect();
 
-    client.send_reliable(&first).and_then(|()| client.flush(TIMEOUT)).expect("first");
-    client.send_reliable(&second).and_then(|()| client.flush(TIMEOUT)).expect("second");
+    client.send_reliable(&first, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("first");
+    client.send_reliable(&second, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("second");
 
     let received = echo.messages(2, TIMEOUT);
     assert_eq!(received[0], first);
@@ -157,7 +157,7 @@ fn nothing_is_left_half_assembled_afterwards() {
     let client = client(&echo);
     let payload = incompressible(client.max_payload() * 4);
 
-    client.send_reliable(&payload).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
+    client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(TIMEOUT)).expect("send_reliable");
     echo.messages(1, TIMEOUT);
 
     // The sender's own table: it should never have started a reassembly, and
@@ -174,7 +174,7 @@ fn a_reliable_message_of_exactly_its_advertised_limit_is_sendable() {
     // below `max_payload`. Sending exactly the advertised number must work,
     // or the number is not the limit.
     client
-        .send_reliable(&payload)
+        .send_reliable(&payload, PayloadType::Opaque)
         .expect("send_reliable at the advertised limit");
     client.flush(TIMEOUT).expect("flush");
 
@@ -192,7 +192,7 @@ fn one_byte_past_the_frame_limit_is_split_rather_than_refused() {
     // matters, because it depends on what the peer advertised at handshake
     // and is not knowable in advance.
     client
-        .send_reliable(&payload)
+        .send_reliable(&payload, PayloadType::Opaque)
         .and_then(|()| client.flush(TIMEOUT))
         .expect("one byte over the frame limit is split, not refused");
 
@@ -209,7 +209,7 @@ fn an_unreliable_send_is_still_one_frame_only() {
     // one piece went missing. For a message of two hundred fragments at 1%
     // loss that is nine times out of ten, so it is refused rather than offered
     // as a feature.
-    match client.send(&payload) {
+    match client.send(&payload, PayloadType::Opaque) {
         Err(fectp::Error::PayloadTooLarge { .. }) => {}
         other => panic!("expected PayloadTooLarge, got {other:?}"),
     }

@@ -24,7 +24,7 @@ fn spawn_echo(mut server: Endpoint, expected: usize) -> (mpsc::Receiver<()>, thr
         while echoed < expected && std::time::Instant::now() < deadline {
             match server.poll(Some(POLL)) {
                 Ok(Event::Message { peer, data }) => {
-                    server.send(peer, &data).expect("echo");
+                    server.send(peer, &data, PayloadType::Opaque).expect("echo");
                     echoed += 1;
                 }
                 Ok(_) => {}
@@ -66,7 +66,7 @@ fn concurrent_peers_do_not_steal_each_others_traffic() {
     for round in 0..PER_PEER {
         for (index, client) in clients.iter_mut().enumerate() {
             let message = format!("peer {index} round {round}");
-            client.send(message.as_bytes()).expect("send");
+            client.send(message.as_bytes(), PayloadType::Opaque).expect("send");
 
             let mut buf = vec![0u8; 4096];
             let n = client.recv(&mut buf).expect("recv");
@@ -135,7 +135,7 @@ fn a_disconnected_peer_stops_resolving() {
     let handle = thread::spawn(move || {
         let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-        client.send(b"hello").expect("send");
+        client.send(b"hello", PayloadType::Opaque).expect("send");
         thread::sleep(Duration::from_millis(300));
     });
 
@@ -149,7 +149,7 @@ fn a_disconnected_peer_stops_resolving() {
     assert!(server.disconnect(peer));
     assert_eq!(server.peer_count(), 0);
     assert!(!server.disconnect(peer), "a second disconnect is a no-op");
-    assert!(server.send(peer, b"gone").is_err());
+    assert!(server.send(peer, b"gone", PayloadType::Opaque).is_err());
     assert!(server.peer_public_key(peer).is_none());
 
     handle.join().expect("thread");
@@ -187,7 +187,7 @@ fn the_server_delivers_reliably_to_a_chosen_peer() {
     rx.recv().expect("clients connected");
 
     server
-        .send_reliable(peers[1], b"only for the second peer")
+        .send_reliable(peers[1], b"only for the second peer", PayloadType::Opaque)
         .expect("send reliable");
     assert_eq!(server.unacknowledged(peers[1]), 1);
 
@@ -214,7 +214,7 @@ fn a_peer_can_resume_against_the_server() {
     let handle = thread::spawn(move || {
         let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-        client.send(b"first").expect("send");
+        client.send(b"first", PayloadType::Opaque).expect("send");
         let mut buf = vec![0u8; 4096];
         client.recv(&mut buf).expect("echo");
         let key = *client.resumption_ticket().expect("encrypted session").key();
@@ -225,7 +225,7 @@ fn a_peer_can_resume_against_the_server() {
         let resumed = Connection::resume(addr, &Ticket::from_key(key), &public)
             .expect("resume");
         resumed.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-        resumed.send(b"second").expect("send");
+        resumed.send(b"second", PayloadType::Opaque).expect("send");
         let n = resumed.recv(&mut buf).expect("echo");
         buf[..n].to_vec()
     });
@@ -238,7 +238,7 @@ fn a_peer_can_resume_against_the_server() {
     while echoed < 2 && std::time::Instant::now() < deadline {
         match server.poll(Some(Duration::from_millis(100))) {
             Ok(Event::Message { peer, data }) => {
-                server.send(peer, &data).expect("echo");
+                server.send(peer, &data, PayloadType::Opaque).expect("echo");
                 echoed += 1;
                 if !sent_go {
                     // The client has its ticket now; let it reconnect.
@@ -263,7 +263,7 @@ fn typed_payloads_work_per_peer() {
     let handle = thread::spawn(move || {
         let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-        client.send(b"ping").expect("send");
+        client.send(b"ping", PayloadType::Opaque).expect("send");
         let mut buf = vec![0u8; 64 * 1024];
         let n = client.recv(&mut buf).expect("recv");
         buf[..n].to_vec()
@@ -276,9 +276,8 @@ fn typed_payloads_work_per_peer() {
             _ => continue,
         }
     };
-    assert!(server.set_default_payload_type(peer, PayloadType::I16 { channels: 4 }));
     server
-        .send_typed(peer, &samples, PayloadType::I16 { channels: 4 })
+        .send(peer, &samples, PayloadType::I16 { channels: 4 })
         .expect("send typed");
 
     assert_eq!(
@@ -302,7 +301,7 @@ fn garbage_and_stray_datagrams_are_ignored() {
         let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         stray.send_to(&[0x11; 200], addr).expect("noise");
-        client.send(b"real message").expect("send");
+        client.send(b"real message", PayloadType::Opaque).expect("send");
 
         let mut buf = vec![0u8; 4096];
         let n = client.recv(&mut buf).expect("recv");
@@ -314,7 +313,7 @@ fn garbage_and_stray_datagrams_are_ignored() {
         match server.poll(Some(Duration::from_millis(100))).expect("poll") {
             Event::Message { peer, data } => {
                 assert_eq!(data, b"real message");
-                server.send(peer, &data).expect("echo");
+                server.send(peer, &data, PayloadType::Opaque).expect("echo");
                 break;
             }
             _ => continue,

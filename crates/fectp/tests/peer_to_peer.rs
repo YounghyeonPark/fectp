@@ -74,7 +74,7 @@ fn settle(pair: &mut Pair) -> (PeerId, PeerId) {
 
 /// Sends from `from` to `to` and returns what arrived.
 fn deliver(from: &mut Endpoint, from_peer: PeerId, to: &mut Endpoint, payload: &[u8]) -> Vec<u8> {
-    from.send(from_peer, payload).expect("send");
+    from.send(from_peer, payload, PayloadType::Opaque).expect("send");
     let deadline = Instant::now() + TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(Event::Message { data, .. }) = to.poll(Some(Duration::from_millis(20))) {
@@ -133,10 +133,10 @@ fn the_session_is_symmetric_once_established() {
     // Every capability is available from both ends.
     let samples: Vec<u8> = (0..256i16).flat_map(|i| (i / 4).to_le_bytes()).collect();
     pair.a
-        .send_typed(a_to_b, &samples, PayloadType::I16 { channels: 4 })
+        .send(a_to_b, &samples, PayloadType::I16 { channels: 4 })
         .expect("A sends typed");
     pair.b
-        .send_reliable(b_from_a, b"B sends reliably")
+        .send_reliable(b_from_a, b"B sends reliably", PayloadType::Opaque)
         .expect("B sends reliably");
 
     let deadline = Instant::now() + TIMEOUT;

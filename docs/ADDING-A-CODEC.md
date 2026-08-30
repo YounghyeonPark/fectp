@@ -68,9 +68,8 @@ In `crates/fectp/src/compress.rs`, add a `PayloadType` variant and map it in
 `PayloadType::transform()`. Callers then reach it through:
 
 ```rust
-conn.send_typed(&data, PayloadType::YourShape { param })?;
+conn.send(&data, PayloadType::YourShape { param })?;
 // or, for a stream that is always this shape:
-conn.set_default_payload_type(PayloadType::YourShape { param });
 ```
 
 ## Wire-format budget

@@ -29,7 +29,7 @@ fn the_documented_constants_are_the_real_ones() {
     );
 }
 
-/// API.md — "Sending": two kinds, each with a `_typed` twin, any size.
+/// API.md — "Sending": two calls, each naming the payload's shape.
 #[test]
 fn every_send_has_the_shape_the_reference_claims() {
     let echo = Echo::start();
@@ -40,20 +40,17 @@ fn every_send_has_the_shape_the_reference_claims() {
     let shape = PayloadType::I16 { channels: 2 };
     let small = [0x11u8; 64];
 
-    // Fire and forget, and its twin.
-    conn.send(&small).expect("send");
-    conn.send_typed(&small, shape).expect("send_typed");
+    // The shape is named at the call, so a line says what it does without
+    // reference to a setting made elsewhere. There is no setter to forget.
+    conn.send(&small, PayloadType::Opaque).expect("send");
+    conn.send(&small, shape).expect("send, typed");
+    conn.send_reliable(&small, PayloadType::Opaque)
+        .expect("send_reliable");
+    conn.send_reliable(&small, shape)
+        .expect("send_reliable, typed");
 
-    // Reliable, and its twin. Neither takes a size and neither waits.
-    conn.send_reliable(&small).expect("send_reliable");
-    conn.send_reliable_typed(&small, shape)
-        .expect("send_reliable_typed");
-
-    // The same calls with a payload far past the frame limit. That is the
-    // whole point of the shape: the caller never has to know where the limit
-    // is, which matters because it depends on what the peer advertised.
-    // High-entropy, or it would code down under the frame limit and the
-    // unreliable case below would wrongly succeed.
+    // The same reliable call with a payload far past the frame limit: the
+    // caller never has to know where the limit is.
     let mut state = 0x2545_F491_4F6C_DD1Du64;
     let big: Vec<u8> = (0..conn.max_payload() * 5)
         .map(|_| {
@@ -63,13 +60,12 @@ fn every_send_has_the_shape_the_reference_claims() {
             (state >> 24) as u8
         })
         .collect();
-    conn.send_reliable(&big).expect("a large payload needs no other method");
+    conn.send_reliable(&big, PayloadType::Opaque)
+        .expect("a large payload needs no other method");
     conn.flush(Duration::from_secs(10)).expect("flush");
 
-    // Unreliable is still one frame only. Splitting a payload that cannot be
-    // retransmitted would fail whenever any one piece went missing, which for
-    // a message of two hundred fragments is most of the time.
-    match conn.send(&big) {
+    // Unreliable is still one frame only.
+    match conn.send(&big, PayloadType::Opaque) {
         Err(fectp::Error::PayloadTooLarge { .. }) => {}
         other => panic!("expected PayloadTooLarge, got {other:?}"),
     }
@@ -123,18 +119,18 @@ fn one_receive_method_covers_every_kind_of_message() {
     let mut buf = vec![0u8; 8192];
 
     // Plain, coded, and fragmented all arrive through `recv`, whole.
-    conn.send(b"plain").expect("send");
+    conn.send(b"plain", PayloadType::Opaque).expect("send");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(&buf[..n], b"plain");
 
     let samples: Vec<u8> = (0..512i16).flat_map(|i| i.to_le_bytes()).collect();
-    conn.send_typed(&samples, PayloadType::I16 { channels: 2 })
+    conn.send(&samples, PayloadType::I16 { channels: 2 })
         .expect("send_typed");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(&buf[..n], &samples[..], "coded payloads arrive decoded");
 
     let big = vec![0x7Eu8; conn.max_payload() * 3];
-    conn.send_reliable(&big).and_then(|()| conn.flush(Duration::from_secs(5)))
+    conn.send_reliable(&big, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(5)))
         .expect("send_reliable");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(n, big.len(), "fragmented messages arrive whole");

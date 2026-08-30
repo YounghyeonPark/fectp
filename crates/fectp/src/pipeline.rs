@@ -252,7 +252,6 @@ pub(crate) enum Ingested {
 /// One peer's protocol state, independent of how bytes reach it.
 pub(crate) struct Peer {
     pub session: Link,
-    pub default_payload_type: PayloadType,
 
     /// Sender side of the reliability layer.
     pub retransmit: RetransmitQueue,
@@ -299,7 +298,6 @@ impl Peer {
     pub fn new(session: Link, buffer_hint: usize) -> Self {
         Self {
             session,
-            default_payload_type: PayloadType::Opaque,
             retransmit: RetransmitQueue::new(),
             pending: Vec::new(),
             dedup: DedupWindow::new(),

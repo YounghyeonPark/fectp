@@ -45,11 +45,24 @@ saving a round trip is not worth a way of connecting.
 
 | | size | if it is lost |
 |---|---|---|
-| `send(data)` | one frame | gone |
-| `send_reliable(data)` | **any** | resent until acknowledged |
+| `send(data, shape)` | one frame | gone |
+| `send_reliable(data, shape)` | **any** | resent until acknowledged |
 
-Each has a `_typed` twin taking a `PayloadType`, for a message whose shape
-differs from the connection's default: `send_typed`, `send_reliable_typed`.
+Two calls, not four. `shape` is a [`PayloadType`](#payloadtype) naming what the
+bytes are, so a transform suited to them can run before the generic compressor.
+`PayloadType::Opaque` means "just bytes" and is always correct.
+
+**The shape is named at every call rather than set once.** A setting would mean
+a line's behaviour depended on a call somewhere else, and forgetting it would
+cost compression silently — no error, no warning. Repeating it is cheap:
+`PayloadType` is two bytes and `Copy`, so bind it to a local and pass it.
+
+```rust
+let shape = PayloadType::I16 { channels: 4 };
+conn.send(&samples, shape)?;
+conn.send(&more, shape)?;
+conn.send(b"a status line", PayloadType::Opaque)?;
+```
 
 **There is no size for you to check.** `send_reliable` splits a payload larger
 than a frame across several, each retransmitted on its own. That matters
@@ -101,13 +114,11 @@ its retries, or if the timeout expires.
 | `reassembling()` | Split messages half-arrived. |
 | `queued()` | Split messages not yet fully sent. |
 | `rto_ms()` | The current retransmission timeout estimate. |
-| `default_payload_type()` | What `send` assumes. |
 
 ### Setting
 
 | | |
 |---|---|
-| `set_default_payload_type(t)` | The shape `send` assumes from now on. |
 | `set_read_timeout(t)` | How long `recv` waits before reporting a timeout. |
 | `set_padding(on)` | Pads frames to 64 bytes to mask payload lengths. Off by default. |
 
@@ -158,13 +169,12 @@ hole punching possible at all.
 
 ### Sending
 
-The same two kinds as `Connection`, each taking a `PeerId` first, each with a
-`_typed` twin:
+The same two calls as `Connection`, with a `PeerId` first:
 
 | | size | |
 |---|---|---|
-| `send(peer, data)` | one frame | Fire and forget. |
-| `send_reliable(peer, data)` | **any** | Resent until acknowledged. |
+| `send(peer, data, shape)` | one frame | Fire and forget. |
+| `send_reliable(peer, data, shape)` | **any** | Resent until acknowledged. |
 
 A message that had to be split reports its outcome as `Event::Sent`, since
 there is nothing here to block on. Progress happens inside `poll`.
@@ -181,11 +191,31 @@ there is nothing here to block on. Progress happens inside `poll`.
 | `unacknowledged(peer)` | Reliable messages still in flight to one peer. |
 | `outstanding_tickets()` | Resumption tickets issued and not yet redeemed. |
 
-### Setting
+---
+
+## PayloadType
+
+What the bytes are, so the right transform runs before the compressor.
 
 | | |
 |---|---|
-| `set_default_payload_type(peer, t)` | Per peer, unlike the connection-wide one. |
+| `Opaque` | Just bytes. Always correct; the compressor is on its own. |
+| `I16 { channels }` | Interleaved 16-bit samples — an ADC or sensor stream. |
+| `I32 { channels }` | Interleaved 32-bit samples or counters. |
+| `Elements { size }` | Fixed-size elements, byte-transposed. `4` for `f32`, `8` for `f64`. |
+
+Measured on 8 KiB (BENCHMARKS.md §7), declaring the shape is worth a lot on
+structured binary and nothing on text or random bytes:
+
+| | as `Opaque` | declared |
+|---|---|---|
+| sensor i16 ×4, slow | 1.12x | **3.46x** |
+| counter i32 ×2 | 1.67x | **292.57x** |
+| f32 array | 1.14x | **8.21x** |
+| JSON text | 126.03x | 126.03x |
+
+A wrong declaration is safe: the payload still round-trips, it just compresses
+badly.
 
 ---
 
@@ -207,15 +237,12 @@ there is nothing here to block on. Progress happens inside `poll`.
 
 ## Where this list is untidy
 
-Recorded rather than smoothed over, because it is visible above.
+Nothing, now. Both of the entries that were here have been dealt with:
+`send_large` was folded into `send_reliable` so there is no size to compare
+against, and the timeout argument that appeared on some constructors and not
+others turned out to be covering a hang.
 
-**`_typed` doubles every send.** Two kinds of send become four on each type,
-eight across both, and the twin differs by one argument. Rust has no default
-arguments, so the alternatives are a builder — which adds a concept — or making
-the type argument mandatory everywhere, which taxes the common case to tidy the
-list.
-
-Neither is a correctness problem, and neither is fixed here. There used to be
-three kinds rather than two: `send_large` was a separate call, and the caller
-had to compare their payload against `max_reliable_payload()` to know which to
-use. That comparison is gone.
+The `_typed` twins are gone too. They existed because Rust has no default
+arguments, so `send(data)` and `send_typed(data, shape)` had to be separate
+methods; the shape is now an argument on `send` itself, and the setter that
+made `send(data)` mean different things at different times is gone with it.

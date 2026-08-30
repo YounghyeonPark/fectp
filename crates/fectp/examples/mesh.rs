@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use fectp::{Endpoint, Event, PeerId};
+use fectp::{Endpoint, Event, PayloadType, PeerId};
 
 const NODES: usize = 3;
 const SECRET: &[u8] = b"mesh-demo-secret";
@@ -89,7 +89,7 @@ fn main() -> fectp::Result<()> {
         let greeting = format!("hello from {}", node.name);
         let peers: Vec<PeerId> = node.peers.keys().copied().collect();
         for peer in peers {
-            node.endpoint.send(peer, greeting.as_bytes())?;
+            node.endpoint.send(peer, greeting.as_bytes(), PayloadType::Opaque)?;
         }
     }
 

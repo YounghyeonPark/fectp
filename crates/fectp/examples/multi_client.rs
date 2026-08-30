@@ -7,7 +7,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fectp::{Connection, Event, Identity, Endpoint};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
 const CLIENTS: usize = 6;
 const ROUNDS: usize = 3;
@@ -34,7 +34,7 @@ fn main() -> fectp::Result<()> {
             for (index, conn) in conns.iter_mut().enumerate() {
                 let message = format!("client {index}, round {round}");
                 let start = Instant::now();
-                conn.send(message.as_bytes())?;
+                conn.send(message.as_bytes(), PayloadType::Opaque)?;
                 let n = conn.recv(&mut buf)?;
                 assert_eq!(&buf[..n], message.as_bytes(), "crossed wires");
                 if round == 0 {
@@ -58,7 +58,7 @@ fn main() -> fectp::Result<()> {
                 );
             }
             Event::Message { peer, data } => {
-                server.send(peer, &data)?;
+                server.send(peer, &data, PayloadType::Opaque)?;
                 echoed += 1;
             }
             Event::Idle => {}

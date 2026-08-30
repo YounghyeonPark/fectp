@@ -55,7 +55,7 @@ where
         while !flag.load(Ordering::Relaxed) {
             match server.poll(Some(Duration::from_millis(50))) {
                 Ok(Event::Message { peer, data }) => {
-                    let _ = server.send(peer, &data);
+                    let _ = server.send(peer, &data, PayloadType::Opaque);
                 }
                 Ok(_) => {}
                 Err(_) => break,
@@ -91,7 +91,7 @@ where
         while !flag.load(Ordering::Relaxed) {
             match server.poll(Some(Duration::from_millis(50))) {
                 Ok(Event::Message { peer, data }) => {
-                    let _ = server.send(peer, &data);
+                    let _ = server.send(peer, &data, PayloadType::Opaque);
                 }
                 Ok(_) => {}
                 Err(_) => break,
@@ -115,7 +115,7 @@ fn modes() -> fectp::Result<()> {
         let conn = Connection::connect_psk(addr, SECRET)?;
         assert!(conn.is_encrypted());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"psk")?;
+        conn.send(b"psk", PayloadType::Opaque)?;
         let mut buf = vec![0u8; 2048];
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"psk");
@@ -128,7 +128,7 @@ fn modes() -> fectp::Result<()> {
         assert!(!conn.is_encrypted());
         assert!(conn.resumption_ticket().is_none());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"plain")?;
+        conn.send(b"plain", PayloadType::Opaque)?;
         let mut buf = vec![0u8; 2048];
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"plain");
@@ -152,7 +152,7 @@ fn shortest_pair() -> fectp::Result<()> {
     with_server(|addr, server_public| {
         let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"hello")?;
+        conn.send(b"hello", PayloadType::Opaque)?;
 
         let mut buf = vec![0u8; 2048];
         let n = conn.recv(&mut buf)?;
@@ -205,7 +205,7 @@ fn reliable_delivery() -> fectp::Result<()> {
         let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-        conn.send_reliable(b"this must arrive")?;
+        conn.send_reliable(b"this must arrive", PayloadType::Opaque)?;
         assert_eq!(conn.unacknowledged(), 1);
         conn.flush(Duration::from_secs(2))?;
         assert_eq!(conn.unacknowledged(), 0);
@@ -213,7 +213,7 @@ fn reliable_delivery() -> fectp::Result<()> {
         // More than the congestion window opens at, so this exercises the
         // waiting a caller has to be ready for.
         for i in 0..12u32 {
-            while conn.send_reliable(&i.to_le_bytes()).is_err() {
+            while conn.send_reliable(&i.to_le_bytes(), PayloadType::Opaque).is_err() {
                 conn.flush(Duration::from_secs(2))?;
             }
         }
@@ -243,7 +243,7 @@ fn duplex() -> fectp::Result<()> {
             });
 
             std::thread::sleep(Duration::from_millis(20));
-            conn.send(b"sent while the other thread is blocked reading")?;
+            conn.send(b"sent while the other thread is blocked reading", PayloadType::Opaque)?;
 
             let message = reader.join().expect("reader thread")?;
             assert_eq!(message, b"sent while the other thread is blocked reading");
@@ -264,7 +264,7 @@ fn large_messages() -> fectp::Result<()> {
         // server is an `Endpoint`, and the reply only
         // gets back because it codes down into a single frame.
         let recording = vec![0x5Au8; conn.max_payload() * 5];
-        conn.send_reliable(&recording).and_then(|()| conn.flush(Duration::from_secs(10)))?;
+        conn.send_reliable(&recording, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(10)))?;
 
         let mut buf = vec![0u8; recording.len()];
         let n = conn.recv(&mut buf)?;
@@ -298,7 +298,7 @@ fn large_from_an_endpoint() -> fectp::Result<()> {
                 Event::Connected { peer, .. } => {
                     // Returns at once: an endpoint serving many peers cannot
                     // wait on one of them.
-                    server.send_reliable(peer, &recording)?;
+                    server.send_reliable(peer, &recording, PayloadType::Opaque)?;
                 }
                 Event::Sent { delivered, .. } => return Ok(delivered),
                 _ => {}
@@ -328,27 +328,27 @@ fn typed_payloads() -> fectp::Result<()> {
 
         // Four interleaved channels of slowly varying i16.
         let samples: Vec<u8> = (0..512i16).flat_map(|i| (i / 4).to_le_bytes()).collect();
-        conn.send_typed(&samples, PayloadType::I16 { channels: 4 })?;
+        conn.send(&samples, PayloadType::I16 { channels: 4 })?;
 
         let mut buf = vec![0u8; 64 * 1024];
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], &samples[..]);
 
-        // Or declare it once and keep calling plain `send`.
-        conn.set_default_payload_type(PayloadType::I16 { channels: 4 });
-        conn.send(&samples)?;
+        // A shape is named at every call, so bind it once and pass it. There
+        // is no setting to make, and none to forget.
+        let shape = PayloadType::I16 { channels: 4 };
+        conn.send(&samples, shape)?;
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], &samples[..]);
 
-        // One odd message can still override the default.
-        conn.send_typed(b"a status line", PayloadType::Opaque)?;
+        // A message of a different shape says so, on its own line.
+        conn.send(b"a status line", PayloadType::Opaque)?;
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"a status line");
 
         println!(
-            "typed payloads: {} bytes of i16 x4 round-tripped, default type {:?}",
-            samples.len(),
-            conn.default_payload_type()
+            "typed payloads: {} bytes of i16 x4 round-tripped, shape named per send",
+            samples.len()
         );
         Ok(())
     })
@@ -360,7 +360,7 @@ fn resumption() -> fectp::Result<()> {
         let identity = Identity::generate();
         let conn = Connection::connect(addr, &server_public, &identity)?;
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"first")?;
+        conn.send(b"first", PayloadType::Opaque)?;
         let mut buf = vec![0u8; 2048];
         conn.recv(&mut buf)?;
 
@@ -383,7 +383,7 @@ fn resumption() -> fectp::Result<()> {
         };
 
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"second")?;
+        conn.send(b"second", PayloadType::Opaque)?;
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"second");
 
@@ -414,7 +414,7 @@ fn many_peers() -> fectp::Result<()> {
         let mut buf = vec![0u8; 4096];
         for (index, conn) in conns.iter_mut().enumerate() {
             let message = format!("from client {index}");
-            conn.send(message.as_bytes())?;
+            conn.send(message.as_bytes(), PayloadType::Opaque)?;
             let n = conn.recv(&mut buf)?;
             assert_eq!(&buf[..n], message.as_bytes(), "crossed wires");
         }
@@ -435,7 +435,7 @@ fn many_peers() -> fectp::Result<()> {
                 assert!(server.peer_public_key(peer).is_some());
             }
             Event::Message { peer, data } => {
-                server.send(peer, &data)?;
+                server.send(peer, &data, PayloadType::Opaque)?;
                 echoed += 1;
             }
             Event::Idle => {}
@@ -453,7 +453,7 @@ fn many_peers() -> fectp::Result<()> {
     // Handles stop resolving once a peer is dropped.
     if let Some(&peer) = server.peers().first() {
         assert!(server.disconnect(peer));
-        assert!(server.send(peer, b"gone").is_err());
+        assert!(server.send(peer, b"gone", PayloadType::Opaque).is_err());
     }
     Ok(())
 }
@@ -485,7 +485,7 @@ fn peer_to_peer() -> fectp::Result<()> {
     let (on_a, on_b) = (on_a.expect("A connected"), on_b.expect("B connected"));
 
     // The responder can send just as freely as the initiator.
-    b.send(on_b, b"from the side that was dialled")?;
+    b.send(on_b, b"from the side that was dialled", PayloadType::Opaque)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut heard = None;
     while heard.is_none() && std::time::Instant::now() < deadline {
@@ -507,7 +507,7 @@ fn length_masking() -> fectp::Result<()> {
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.set_padding(true);
 
-        conn.send(b"short")?;
+        conn.send(b"short", PayloadType::Opaque)?;
         let mut buf = vec![0u8; 2048];
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"short");

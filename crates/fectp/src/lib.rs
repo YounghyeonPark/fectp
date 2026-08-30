@@ -5,7 +5,7 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use fectp::{Connection, Event, Identity, Endpoint};
+//! use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 //!
 //! # fn main() -> fectp::Result<()> {
 //! // Endpoint
@@ -16,10 +16,10 @@
 //! // Client. The server's public key must already be known; FECTP has no
 //! // certificate authority to look one up from.
 //! let mut client = Connection::connect("127.0.0.1:4433", &server_public, &Identity::generate())?;
-//! client.send(b"hello")?;
+//! client.send(b"hello", PayloadType::Opaque)?;
 //!
 //! match server.poll(Some(Duration::from_secs(1)))? {
-//!     Event::Message { peer, data } => server.send(peer, &data)?,
+//!     Event::Message { peer, data } => server.send(peer, &data, PayloadType::Opaque)?,
 //!     _ => {}
 //! }
 //! # Ok(())
@@ -643,24 +643,7 @@ impl Core {
     }
 
 
-    /// Sets the payload shape [`send`](Self::send) assumes.
-    ///
-    /// A connection usually carries one kind of data for its whole life — a
-    /// sensor stream stays a sensor stream. Declaring the shape once here
-    /// means the rest of the code keeps calling plain `send` and still gets
-    /// the codec suited to it.
-    ///
-    /// Defaults to [`PayloadType::Opaque`]. Individual messages that do not
-    /// match can still override it with
-    /// [`send_typed`](Self::send_typed).
-    pub fn set_default_payload_type(&mut self, payload_type: PayloadType) {
-        self.peer.default_payload_type = payload_type;
-    }
 
-    /// The payload shape [`send`](Self::send) currently assumes.
-    pub fn default_payload_type(&self) -> PayloadType {
-        self.peer.default_payload_type
-    }
 
     /// Sends `data`, telling the transport what shape it has.
     ///
@@ -673,7 +656,7 @@ impl Core {
     /// A wrong declaration is safe: the payload still round-trips, it just
     /// compresses badly. If the peer cannot reverse the transform, or coding
     /// does not actually shrink the payload, the original bytes are sent.
-    pub fn send_typed(&mut self, data: &[u8], payload_type: PayloadType) -> Result<()> {
+    pub fn send_one(&mut self, data: &[u8], payload_type: PayloadType) -> Result<()> {
         let n = self.seal(data, payload_type, None)?;
         self.transport.send(&self.tx[..n])?;
         Ok(())
@@ -759,11 +742,12 @@ struct Reader {
 /// ```no_run
 /// # fn main() -> fectp::Result<()> {
 /// # let conn: fectp::Connection = unimplemented!();
+/// use fectp::PayloadType;
 /// std::thread::scope(|s| {
 ///     s.spawn(|| loop {
 ///         let _ = conn.recv(&mut [0u8; 2048]);
 ///     });
-///     conn.send(b"sent while the other thread is blocked reading")
+///     conn.send(b"sent while the other thread is blocked reading", PayloadType::Opaque)
 /// })?;
 /// # Ok(()) }
 /// ```
@@ -928,25 +912,9 @@ impl Connection {
         self.core().map(|c| c.peer.retransmit.rto_ms()).unwrap_or(0)
     }
 
-    /// The payload shape [`send`](Self::send) currently assumes.
-    pub fn default_payload_type(&self) -> PayloadType {
-        self.core()
-            .map(|c| c.default_payload_type())
-            .unwrap_or_default()
-    }
 
     // ── settings ──────────────────────────────────────────────────────────
 
-    /// Sets the payload shape [`send`](Self::send) assumes.
-    ///
-    /// A connection usually carries one kind of data for its whole life, so
-    /// declaring the shape once here means the rest of the code keeps calling
-    /// plain `send` and still gets the codec suited to it.
-    pub fn set_default_payload_type(&self, payload_type: PayloadType) {
-        if let Ok(mut core) = self.core() {
-            core.set_default_payload_type(payload_type);
-        }
-    }
 
     /// Pads outgoing frames to a 64-byte boundary to mask payload lengths.
     ///
@@ -965,17 +933,24 @@ impl Connection {
 
     /// Sends `data` to the peer as one datagram.
     ///
+    /// `payload_type` says what shape the bytes have, so a transform suited to
+    /// them can run before the generic compressor — interleaved sensor samples
+    /// are split by channel and delta-coded, for instance, which a byte-oriented
+    /// compressor cannot do for itself. [`PayloadType::Opaque`] means "just
+    /// bytes" and is always correct; a wrong declaration still round-trips, it
+    /// just compresses badly.
+    ///
+    /// It is named at every call rather than set once on the connection. A
+    /// setting would mean this line's behaviour depended on a call somewhere
+    /// else, and forgetting it would cost compression silently — no error, no
+    /// warning. Repeating a shape is cheap: `PayloadType` is two bytes and
+    /// `Copy`, so bind it to a local and pass it.
+    ///
     /// Returns once the bytes are handed to the kernel. There is no
-    /// acknowledgement and no retransmission: a lost datagram is lost.
-    pub fn send(&self, data: &[u8]) -> Result<()> {
-        let mut core = self.core()?;
-        let payload_type = core.default_payload_type();
-        core.send_typed(data, payload_type)
-    }
-
-    /// [`send`](Self::send), telling the transport what shape the payload has.
-    pub fn send_typed(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
-        self.core()?.send_typed(data, payload_type)
+    /// acknowledgement and no retransmission: a lost datagram is lost, and
+    /// anything above one frame is refused.
+    pub fn send(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
+        self.core()?.send_one(data, payload_type)
     }
 
     /// Sends `data` and keeps resending it until the peer acknowledges it.
@@ -996,13 +971,7 @@ impl Connection {
     /// [`Error::ReliabilityUnsupported`] if the peer never advertised the
     /// capability. Payloads above [`MAX_MESSAGE_LEN`] are refused rather than
     /// split.
-    pub fn send_reliable(&self, data: &[u8]) -> Result<()> {
-        let payload_type = self.core()?.default_payload_type();
-        self.send_reliable_typed(data, payload_type)
-    }
-
-    /// [`send_reliable`](Self::send_reliable), declaring the payload's shape.
-    pub fn send_reliable_typed(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
+    pub fn send_reliable(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
         {
             let mut core = self.core()?;
             let limit = core.transport.max_datagram_size();

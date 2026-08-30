@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use fectp::{Connection, Endpoint, Event, Identity, PeerId};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType, PeerId};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(20);
@@ -40,7 +40,7 @@ fn an_endpoint_sends_a_message_larger_than_a_frame() {
         loop {
             match server.poll(Some(TICK)).expect("poll") {
                 Event::Connected { peer, .. } => {
-                    server.send_reliable(peer, &outgoing).expect("send_reliable");
+                    server.send_reliable(peer, &outgoing, PayloadType::Opaque).expect("send_reliable");
                 }
                 Event::Sent { delivered, .. } => return delivered,
                 _ => {}
@@ -80,7 +80,7 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
                 Event::Connected { peer, .. } => {
                     if first.is_none() {
                         first = Some(peer);
-                        server.send_reliable(peer, &payload).expect("send_reliable");
+                        server.send_reliable(peer, &payload, PayloadType::Opaque).expect("send_reliable");
                         let _ = ready.send(());
                     }
                 }
@@ -88,7 +88,7 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
                 // large message is still going out. This is the whole point of
                 // queuing rather than waiting.
                 Event::Message { peer, data } if Some(peer) != first => {
-                    server.send(peer, &data).expect("echo");
+                    server.send(peer, &data, PayloadType::Opaque).expect("echo");
                     return true;
                 }
                 _ => {}
@@ -102,7 +102,7 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
     let second =
         Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     second.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-    second.send(b"are you still there").expect("send");
+    second.send(b"are you still there", PayloadType::Opaque).expect("send");
 
     let mut buf = [0u8; 128];
     let n = second.recv(&mut buf).expect("the endpoint must still answer");
@@ -125,9 +125,9 @@ fn queueing_more_than_the_limit_is_refused() {
                 // the queue has to be bounded or one peer could make the
                 // endpoint keep any amount of memory.
                 for _ in 0..fectp::MAX_QUEUED {
-                    server.send_reliable(peer, &payload).expect("within the limit");
+                    server.send_reliable(peer, &payload, PayloadType::Opaque).expect("within the limit");
                 }
-                return server.send_reliable(peer, &payload).is_err();
+                return server.send_reliable(peer, &payload, PayloadType::Opaque).is_err();
             }
         }
     });
@@ -154,8 +154,8 @@ fn two_queued_messages_both_arrive_in_order() {
         loop {
             match server.poll(Some(TICK)).expect("poll") {
                 Event::Connected { peer, .. } => {
-                    server.send_reliable(peer, &a).expect("first");
-                    server.send_reliable(peer, &b).expect("second");
+                    server.send_reliable(peer, &a, PayloadType::Opaque).expect("first");
+                    server.send_reliable(peer, &b, PayloadType::Opaque).expect("second");
                 }
                 Event::Sent { delivered, .. } => {
                     assert!(delivered);

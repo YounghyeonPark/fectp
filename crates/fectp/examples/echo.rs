@@ -7,7 +7,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fectp::{Connection, Event, Identity, Endpoint};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
 fn main() -> fectp::Result<()> {
     let identity = Identity::generate();
@@ -26,7 +26,7 @@ fn main() -> fectp::Result<()> {
                     String::from_utf8_lossy(&zero_rtt)
                 ),
                 Event::Message { peer, data } => {
-                    server.send(peer, &data)?;
+                    server.send(peer, &data, PayloadType::Opaque)?;
                     echoed += 1;
                 }
                 _ => {}
@@ -50,7 +50,7 @@ fn main() -> fectp::Result<()> {
     for i in 0..5 {
         let message = format!("message {i}");
         let start = Instant::now();
-        client.send(message.as_bytes())?;
+        client.send(message.as_bytes(), PayloadType::Opaque)?;
         let n = client.recv(&mut buf)?;
         println!(
             "  {:>10} -> echoed in {:?}",

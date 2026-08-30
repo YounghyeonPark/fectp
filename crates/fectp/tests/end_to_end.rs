@@ -5,7 +5,7 @@ use std::time::Duration;
 mod common;
 
 use common::Echo;
-use fectp::{Connection, Identity};
+use fectp::{Connection, Identity, PayloadType};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -25,7 +25,7 @@ fn round_trip_over_udp() {
     // The client authenticated the server by its static key.
     assert_eq!(client.peer_public_key().expect("connected"), echo.public());
 
-    client.send(b"hello over the wire").expect("client send");
+    client.send(b"hello over the wire", PayloadType::Opaque).expect("client send");
     let mut buf = [0u8; 2048];
     let n = client.recv(&mut buf).expect("client recv");
     assert_eq!(&buf[..n], b"hello over the wire");
@@ -83,7 +83,7 @@ fn many_messages_in_sequence() {
     let client =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..64u32 {
-        client.send(&i.to_le_bytes()).expect("send");
+        client.send(&i.to_le_bytes(), PayloadType::Opaque).expect("send");
     }
 
     let received = echo.messages(64, TIMEOUT);
@@ -112,7 +112,7 @@ fn oversized_payload_is_refused() {
         })
         .collect();
     assert!(
-        client.send(&huge).is_err(),
+        client.send(&huge, PayloadType::Opaque).is_err(),
         "an incompressible payload above the frame limit must be refused, not \
          silently truncated"
     );
@@ -151,7 +151,7 @@ mod coding_is_skipped_when_it_stops_paying {
         // are sent with coding switched off.
         let sent: Vec<Vec<u8>> = (0..64).map(|i| incompressible(512, 0x9e37 + i)).collect();
         for message in &sent {
-            client.send(message).expect("send");
+            client.send(message, PayloadType::Opaque).expect("send");
         }
 
         let received = echo.messages(sent.len(), TIMEOUT);
@@ -168,7 +168,7 @@ mod coding_is_skipped_when_it_stops_paying {
 
         // Stop coding being attempted at all.
         for i in 0..32 {
-            client.send(&incompressible(512, 0x2545 + i)).expect("send");
+            client.send(&incompressible(512, 0x2545 + i), PayloadType::Opaque).expect("send");
         }
 
         // This is larger than a frame can carry raw, and only goes out if
@@ -176,7 +176,7 @@ mod coding_is_skipped_when_it_stops_paying {
         // never be the reason a legal send fails.
         let compressible = vec![0xA5u8; limit * 4];
         client
-            .send(&compressible)
+            .send(&compressible, PayloadType::Opaque)
             .expect("a payload that fits once coded must be sent, not refused");
 
         let received = echo.messages(33, TIMEOUT);
@@ -196,7 +196,7 @@ mod coding_is_skipped_when_it_stops_paying {
         let limit = client.max_payload();
 
         for i in 0..32 {
-            client.send(&incompressible(512, 0x7f4a + i)).expect("send");
+            client.send(&incompressible(512, 0x7f4a + i), PayloadType::Opaque).expect("send");
         }
 
         // A stream's content can change. Once it does, payloads too large to
@@ -204,7 +204,7 @@ mod coding_is_skipped_when_it_stops_paying {
         // is periodically retried rather than abandoned for good.
         let compressible = vec![0x5Cu8; limit * 2];
         for _ in 0..64 {
-            client.send(&compressible).expect("send");
+            client.send(&compressible, PayloadType::Opaque).expect("send");
         }
 
         let received = echo.messages(96, TIMEOUT);
@@ -276,7 +276,7 @@ mod compression {
             .collect();
         assert!(payload.len() > client.max_payload());
 
-        client.send(&payload).expect("send compressible payload");
+        client.send(&payload, PayloadType::Opaque).expect("send compressible payload");
         assert_eq!(echo.messages(1, TIMEOUT), vec![payload]);
     }
 }
@@ -401,7 +401,7 @@ mod typed {
         ] {
             let client = client(&echo);
             let before = echo.observed().messages.len();
-            client.send_typed(&payload, ty).expect("send_typed");
+            client.send(&payload, ty).expect("send_typed");
             let received = echo.messages(before + 1, TIMEOUT);
             assert_eq!(received[before], payload, "{label}");
         }
@@ -414,47 +414,54 @@ mod typed {
         let client = client(&echo);
         let text = b"this is plain text, not interleaved samples at all!!".repeat(8);
         client
-            .send_typed(&text, PayloadType::I16 { channels: 4 })
+            .send(&text, PayloadType::I16 { channels: 4 })
             .expect("send_typed");
         assert_eq!(echo.messages(1, TIMEOUT), vec![text]);
     }
 }
 
-/// Declaring the shape once, then using plain `send`.
+/// A stream of one shape: bind it once, pass it every time.
 #[test]
-fn a_connection_can_default_to_one_payload_shape() {
+fn a_stream_of_one_shape_names_it_every_time() {
     let echo = Echo::collector();
     let client = client(&echo);
-    assert_eq!(client.default_payload_type(), fectp::PayloadType::Opaque);
 
-    // A sensor stream stays a sensor stream: say so once, then the rest of the
-    // code keeps calling plain `send`.
-    client.set_default_payload_type(fectp::PayloadType::I16 { channels: 4 });
+    // The shape is a local, not a setting on the connection. Changing the
+    // channel count means changing one line, and no send can be left behind
+    // holding a stale one.
+    let shape = PayloadType::I16 { channels: 4 };
 
     let mut blocks = Vec::new();
     for block in 0..3u16 {
         let payload: Vec<u8> = (0..128 * 4)
             .flat_map(|i| ((block as i16) * 100 + (i as i16 / 4)).to_le_bytes())
             .collect();
-        client.send(&payload).expect("send");
+        client.send(&payload, shape).expect("send");
         blocks.push(payload);
     }
 
     assert_eq!(echo.messages(3, TIMEOUT), blocks);
 }
 
-/// One odd message in a typed stream still goes through.
+/// Shapes may be mixed freely, because nothing is remembered between sends.
 #[test]
-fn a_single_message_can_override_the_default_shape() {
+fn shapes_can_be_mixed_within_one_connection() {
     let echo = Echo::collector();
     let client = client(&echo);
-    client.set_default_payload_type(fectp::PayloadType::I16 { channels: 4 });
 
+    let samples: Vec<u8> = (0..512i16).flat_map(|i| i.to_le_bytes()).collect();
     let text = b"a status line, not samples".to_vec();
+
     client
-        .send_typed(&text, fectp::PayloadType::Opaque)
-        .expect("send_typed");
-    assert_eq!(echo.messages(1, TIMEOUT), vec![text]);
+        .send(&samples, PayloadType::I16 { channels: 4 })
+        .expect("send samples");
+    client
+        .send(&text, PayloadType::Opaque)
+        .expect("send text");
+
+    // Each line said what it was sending, so neither could be misread as the
+    // other — which is what a remembered default made possible.
+    assert_eq!(echo.messages(2, TIMEOUT), vec![samples, text]);
 }
 
 #[test]

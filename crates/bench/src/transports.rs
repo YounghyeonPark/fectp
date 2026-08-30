@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fectp::{Connection, Endpoint, Event, Identity};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
 // ────────────────────────────────────────────────────────────── FECTP ─────
 
@@ -49,7 +49,7 @@ impl FectpEcho {
                 match endpoint.poll(Some(Duration::from_millis(5))) {
                     Ok(Event::Message { peer, data }) => {
                         if echo {
-                            let _ = endpoint.send(peer, &data);
+                            let _ = endpoint.send(peer, &data, PayloadType::Opaque);
                         }
                     }
                     Ok(_) => {}
@@ -97,7 +97,7 @@ impl Drop for FectpEcho {
 
 /// One request and its echo, on an established FECTP connection.
 pub fn fectp_round_trip(conn: &mut Connection, payload: &[u8], buf: &mut [u8]) {
-    conn.send(payload).expect("send");
+    conn.send(payload, PayloadType::Opaque).expect("send");
     conn.recv(buf).expect("recv");
 }
 
