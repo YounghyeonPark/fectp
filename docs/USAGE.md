@@ -587,6 +587,12 @@ Cortex-M4 with 256 KiB of flash that is 9% of it.
 | `send` after `connect` fails | An `Endpoint` dial is not finished until `Event::Connected` arrives; poll first. |
 | `resumption_ticket()` is `None` | Plaintext sessions have nothing to resume. |
 
+## The whole list
+
+[API.md](API.md) has every public method grouped by task, the constants with
+their values, and an honest note about the two places the list is untidy. This
+document explains *when* to reach for each; that one is the index.
+
 ## Further reading
 
 | | |

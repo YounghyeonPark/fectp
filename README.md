@@ -408,7 +408,7 @@ codecs, optional Zstandard compression.
 **Not built:** congestion control, ordered delivery, address migration, ticket
 expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas.
 
-179 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+183 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
 reliable delivery — plus the caller's buffers.
 
@@ -465,6 +465,7 @@ cargo run -p fectp --example mesh          --features compress   # three peers, 
 | | |
 |---|---|
 | [USAGE.md](docs/USAGE.md) | How to use it. Every snippet is compiled by `examples/tour.rs`. |
+| [API.md](docs/API.md) | Every public method, grouped by what you are trying to do. |
 | [SPEC.md](docs/SPEC.md) | Normative wire format — everything an independent implementation needs. |
 | [DECISIONS.md](docs/DECISIONS.md) | Why the protocol is shaped this way, and where it departs from the original design note. |
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data type. |
