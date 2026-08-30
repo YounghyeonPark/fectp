@@ -17,3 +17,10 @@ blake2           = { version = "0.10", default-features = false }
 zeroize          = { version = "1", default-features = false }
 subtle           = { version = "2", default-features = false }
 rand_core        = { version = "0.6", default-features = false }
+
+# This protocol's whole claim is speed, and its hot path crosses a crate
+# boundary on every send: fectp calls into fectp-core to frame and seal. The
+# default release profile will not inline across that boundary.
+[profile.release]
+lto = true
+codegen-units = 1

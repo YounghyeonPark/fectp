@@ -83,9 +83,9 @@ Against raw UDP and TCP + TLS 1.3, on loopback:
 
 | | median | vs raw UDP |
 |---|---|---|
-| raw UDP, no encryption | 26.2 µs | — |
-| **FECTP, encrypted** | **30.7 µs** | **+17%** |
-| TCP + TLS 1.3 | 59.0 µs | +125% |
+| raw UDP, no encryption | 31.6 µs | — |
+| **FECTP, encrypted** | **35.8 µs** | **+13%** |
+| TCP + TLS 1.3 | 64.4 µs | +104% |
 
 But the round-trip table above is what actually decides anything: at 150 ms of
 path latency, FECTP answers a first request 300 ms sooner than TCP + TLS, and
@@ -93,8 +93,9 @@ every microsecond in this table put together is a rounding error beside that.
 
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
 per-message overhead, compression against gzip and Zstandard, and an honest
-account of the encryption trade-offs and of a defect the benchmark found in the
-default compression level.
+account of the encryption trade-offs. It has also changed the implementation
+twice: it is why the default compression level moved from −4 to 1, and why the
+send path stopped trying to compress data that has already refused to.
 
 ---
 

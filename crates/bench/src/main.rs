@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use datasets::Shape;
 use fectp::{Capabilities, Connection, Identity, PayloadType};
-use timing::{measure, throughput_mib};
+use timing::{measure, measure_batched, throughput_mib};
 use transports::{FectpEcho, TlsEcho, TlsSetup, UdpEcho};
 
 const SECRET: &[u8] = b"benchmark-secret";
@@ -309,31 +309,70 @@ fn per_message_overhead() {
 // ──────────────────────────────────────────────────── 5. crypto cost ──────
 
 fn crypto_cost() {
-    heading("5. Encrypting a frame", "ChaCha20-Poly1305 over a 1200-byte payload");
+    heading(
+        "5. Cost of one send, split from the syscall",
+        "1024 incompressible bytes, against the same sendto with no protocol",
+    );
 
-    let pk = FectpEcho::public_key();
+    // The floor: the same syscall, same payload size, no protocol at all.
+    // Anything above this line is what FECTP costs to run.
+    let sink = UdpEcho::sink();
+    let bare = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    bare.connect(sink.addr).expect("connect");
+    // Incompressible, and small enough to fit a frame raw. A constant-byte
+    // payload would code down to almost nothing and the syscall would be
+    // moving 30 bytes rather than 1024 — measuring the wrong thing.
+    let payload = datasets::incompressible(1024);
+    let raw = measure_batched(WARMUP, 40, 500, || {
+        bare.send(&payload).expect("send");
+    });
+    drop(sink);
+
+    let plain = FectpEcho::plain_drain();
+    let mut pconn = Connection::connect_plain(plain.addr, Duration::from_secs(2)).expect("connect");
+    let plain_send = measure_batched(WARMUP, 40, 500, || {
+        pconn.send(&payload).expect("send");
+    });
+    drop(pconn);
+    drop(plain);
+
+    let pk = FectpEcho::public_key_drain();
     let mut conn =
         Connection::connect(pk.addr, &pk.public.expect("identity"), &Identity::generate())
             .expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
-
-    // Sending without waiting isolates the send path: coding, sealing, and the
-    // syscall, with no round trip in the way.
-    let payload = vec![0x33u8; 1200];
-    let stats = measure(WARMUP, SAMPLES, || {
+    let sealed = measure_batched(WARMUP, 40, 500, || {
         conn.send(&payload).expect("send");
     });
     drop(conn);
     drop(pk);
 
-    row_header(&["", "per frame", "throughput"]);
+    let base = raw.median_us();
+    row_header(&["", "per send", "over raw sendto", "throughput"]);
     row(&[
-        "seal 1200 bytes and hand to the kernel",
-        &us(stats.median_us()),
-        &format!("{:.0} MiB/s", throughput_mib(1200, stats.median)),
+        "raw UDP sendto (no protocol)",
+        &us(base),
+        "—",
+        &format!("{:.0} MiB/s", throughput_mib(1024, raw.median)),
     ]);
-    note("This includes the sendto syscall, which dominates: the AEAD itself is");
-    note("a fraction of it. Encryption is not what costs anything here.");
+    row(&[
+        "FECTP plaintext: + framing",
+        &us(plain_send.median_us()),
+        &us(plain_send.median_us() - base),
+        &format!("{:.0} MiB/s", throughput_mib(1024, plain_send.median)),
+    ]);
+    row(&[
+        "FECTP encrypted: + framing + AEAD",
+        &us(sealed.median_us()),
+        &us(sealed.median_us() - base),
+        &format!("{:.0} MiB/s", throughput_mib(1024, sealed.median)),
+    ]);
+    println!();
+    note(&format!(
+        "Encrypting costs {} on top of framing. The throughput column is",
+        us(sealed.median_us() - plain_send.median_us())
+    ));
+    note("bounded by the syscall, which is the largest single item here — but not");
+    note("by as much as it looks: the two protocol rows together cost more than it.");
 }
 
 // ─────────────────────────────────────────────────── 6. compression ───────
@@ -356,7 +395,15 @@ fn compression() {
         codecs: fectp::CORE_CODECS,
     };
 
-    row_header(&["dataset", "raw bytes", "gzip", "zstd -4", "FECTP typed", "no zstd"]);
+    row_header(&[
+        "dataset",
+        "raw bytes",
+        "gzip",
+        "zstd only",
+        "FECTP typed",
+        "no zstd",
+        "encode",
+    ]);
 
     for set in datasets::all() {
         let raw = set.bytes.len();
@@ -371,6 +418,11 @@ fn compression() {
         let typed = coded(&set.bytes, typed_shape, full);
         let typed_bare = coded(&set.bytes, typed_shape, no_zstd);
 
+        let encode = measure(20, 200, || {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let _ = fectp::compress::encode_payload(&set.bytes, typed_shape, full, &mut a, &mut b);
+        });
+
         row(&[
             set.name,
             &format!("{raw}"),
@@ -378,6 +430,7 @@ fn compression() {
             &ratio(raw, zstd_only),
             &ratio(raw, typed),
             &ratio(raw, typed_bare),
+            &us(encode.median_us()),
         ]);
     }
 
@@ -393,26 +446,18 @@ fn compression() {
 
 // ────────────────────────────────────────── 7. the Zstandard level ────────
 
-/// The default level was inherited from the design note's `--fast=4`
-/// recommendation, on the reasoning that a transport this latency-sensitive
-/// cannot afford a slow compressor. That reasoning deserves to be checked
-/// against the cost it was trading away, which is what this section does.
+/// The default was `-4` — the design note's `--fast=4` — on the reasoning that
+/// a transport this latency-sensitive cannot afford a slow compressor. This
+/// section is what changed it to 1.
 fn compression_level() {
     heading(
-        "7. What the Zstandard level costs and buys",
+        "7. Why the Zstandard level changed from -4 to 1",
         "level is a sender-side choice; a receiver decodes any of them",
     );
 
     const LEVELS: &[i32] = &[-4, -1, 1, 3, 9];
 
-    row_header(&[
-        "dataset",
-        "-4 (default)",
-        "-1",
-        "1",
-        "3",
-        "9",
-    ]);
+    row_header(&["dataset", "-4 (was)", "-1", "1 (now)", "3", "9"]);
     for set in datasets::all() {
         let raw = set.bytes.len();
         let cells: Vec<String> = LEVELS
@@ -425,7 +470,7 @@ fn compression_level() {
     }
 
     println!();
-    row_header(&["encode 8 KiB", "-4 (default)", "-1", "1", "3", "9"]);
+    row_header(&["encode 8 KiB", "-4 (was)", "-1", "1 (now)", "3", "9"]);
     let sample = &datasets::all()[2].bytes;
     let times: Vec<String> = LEVELS
         .iter()
@@ -441,15 +486,62 @@ fn compression_level() {
     row(&cols.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
     note("At level -4 Zstandard finds nothing in structured binary data and emits");
-    note("more bytes than it was given, so FECTP correctly falls back to sending the");
-    note("payload uncompressed — the 1.00x column is a real result, not a failure to");
-    note("run. Level 1 costs about 10 us more per 8 KiB and does substantially better.");
+    note("more bytes than it was given, so FECTP falls back to sending the payload");
+    note("uncompressed — the 1.00x column is a real result, not a failure to run.");
     println!();
-    note("Read this against section 6 before concluding the default is wrong. When a");
-    note("payload's type is declared, the transform runs first and leaves something");
-    note("repetitive enough that even level -4 finds it: the i32 counters reach 248x.");
-    note("The gap is on opaque payloads, where nothing has exposed the structure and");
-    note("-4 is the only thing standing between the data and the wire.");
+    println!();
+    row_header(&["dataset", "-4 bytes", "1 bytes", "1 wins below"]);
+    let t4 = level_time(-4);
+    let t1 = level_time(1);
+    for set in datasets::all() {
+        let b4 = zstd_size(&set.bytes, -4).min(set.bytes.len());
+        let b1 = zstd_size(&set.bytes, 1).min(set.bytes.len());
+        let verdict = match break_even_mbps((b4, t4), (b1, t1)) {
+            Some(mbps) if mbps >= 1000.0 => format!("{:.1} Gbps", mbps / 1000.0),
+            Some(mbps) => format!("{mbps:.0} Mbps"),
+            None => "never".to_string(),
+        };
+        row(&[set.name, &format!("{b4}"), &format!("{b1}"), &verdict]);
+    }
+    println!();
+    note("A send costs encode time plus bytes over the link, so the higher level wins");
+    note("on any link slower than the figure above — which is every real network for");
+    note("all but the JSON, where -4 already found nearly everything and the extra");
+    note("saving is 43 bytes. That is why the default is now 1.");
+    println!();
+    note("Section 6 is the stronger half of the case, and it is about declared types");
+    note("rather than opaque bytes: running the transform first does not make the");
+    note("level irrelevant. Sensor data goes from 2.00x to 3.46x and the f32 table");
+    note("from 5.43x to 8.21x. Only the i32 counters were already fine at -4.");
+    println!();
+    note("Raising the level is also safer than it was: the send path now stops");
+    note("attempting compression on a stream that has repeatedly failed to shrink,");
+    note("so the case where a higher level costs more and returns nothing is the one");
+    note("case that no longer pays for itself on every message.");
+}
+
+/// Median microseconds to encode the 8 KiB counter dataset at one level.
+fn level_time(level: i32) -> f64 {
+    let sample = &datasets::all()[2].bytes;
+    measure(20, 200, || {
+        let _ = zstd_size(sample, level);
+    })
+    .median_us()
+}
+
+/// The link speed at which a higher level stops paying for itself.
+///
+/// Sending takes `encode + bytes / bandwidth`, so a level that costs `dt` more
+/// and saves `db` bytes wins whenever `dt < db / bandwidth` — that is, on every
+/// link slower than `db / dt`. Above that the link is quick enough that the
+/// saved bytes arrive in less time than it took to find them.
+fn break_even_mbps(fast: (usize, f64), slow: (usize, f64)) -> Option<f64> {
+    let saved = fast.0.checked_sub(slow.0)?;
+    let extra = slow.1 - fast.1;
+    if saved == 0 || extra <= 0.0 {
+        return None;
+    }
+    Some((saved as f64 / (extra * 1e-6)) * 8.0 / 1e6)
 }
 
 /// Bytes plain Zstandard produces at a given level, with no FECTP transform.

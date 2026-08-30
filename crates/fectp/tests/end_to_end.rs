@@ -124,6 +124,104 @@ fn oversized_payload_is_refused() {
 }
 
 #[cfg(feature = "compress")]
+mod coding_is_skipped_when_it_stops_paying {
+    //! Attempting compression costs a couple of microseconds whether or not it
+    //! works, so a stream that has repeatedly failed to compress stops being
+    //! asked. That is a pure sender-side optimisation and must stay invisible:
+    //! these check it changes nothing a receiver can observe.
+
+    use super::*;
+
+    /// Bytes nothing can compress, from a fixed seed so failures reproduce.
+    fn incompressible(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_incompressible_stream_arrives_intact() {
+        let echo = Echo::collector();
+        let mut client =
+            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+                .expect("connect");
+
+        // Comfortably more than it takes to trip the skip, so most of these
+        // are sent with coding switched off.
+        let sent: Vec<Vec<u8>> = (0..64).map(|i| incompressible(512, 0x9e37 + i)).collect();
+        for message in &sent {
+            client.send(message).expect("send");
+        }
+
+        let received = echo.messages(sent.len(), TIMEOUT);
+        assert_eq!(received, sent, "skipping compression must not alter payloads");
+    }
+
+    #[test]
+    fn a_payload_that_only_fits_when_coded_is_still_coded() {
+        let echo = Echo::collector();
+        let mut client =
+            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+                .expect("connect");
+        let limit = client.max_payload();
+
+        // Stop coding being attempted at all.
+        for i in 0..32 {
+            client.send(&incompressible(512, 0x2545 + i)).expect("send");
+        }
+
+        // This is larger than a frame can carry raw, and only goes out if
+        // coding is attempted anyway. Skipping is an optimisation, so it must
+        // never be the reason a legal send fails.
+        let compressible = vec![0xA5u8; limit * 4];
+        client
+            .send(&compressible)
+            .expect("a payload that fits once coded must be sent, not refused");
+
+        let received = echo.messages(33, TIMEOUT);
+        assert_eq!(
+            received.last().expect("the large payload"),
+            &compressible,
+            "the large payload must round-trip unchanged"
+        );
+    }
+
+    #[test]
+    fn compression_resumes_when_the_data_becomes_compressible_again() {
+        let echo = Echo::collector();
+        let mut client =
+            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+                .expect("connect");
+        let limit = client.max_payload();
+
+        for i in 0..32 {
+            client.send(&incompressible(512, 0x7f4a + i)).expect("send");
+        }
+
+        // A stream's content can change. Once it does, payloads too large to
+        // send raw must start succeeding again — which only happens if coding
+        // is periodically retried rather than abandoned for good.
+        let compressible = vec![0x5Cu8; limit * 2];
+        for _ in 0..64 {
+            client.send(&compressible).expect("send");
+        }
+
+        let received = echo.messages(96, TIMEOUT);
+        assert_eq!(received.len(), 96);
+        assert!(
+            received[32..].iter().all(|m| m == &compressible),
+            "every compressible payload must arrive unchanged"
+        );
+    }
+}
+
+#[cfg(feature = "compress")]
 mod compression {
     use super::*;
     use fectp::compress::{looks_precompressed, should_compress, MIN_COMPRESS_SIZE};

@@ -50,6 +50,12 @@ fn sensor_i16(samples: usize, channels: usize, rate: f64) -> Vec<u8> {
     out
 }
 
+/// High-entropy bytes, for measuring paths that compression must not shorten.
+pub fn incompressible(len: usize) -> Vec<u8> {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    (0..len).map(|_| (rng.next() >> 24) as u8).collect()
+}
+
 pub fn all() -> Vec<Dataset> {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
 

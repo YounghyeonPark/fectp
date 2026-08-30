@@ -26,7 +26,20 @@ pub struct FectpEcho {
 }
 
 impl FectpEcho {
-    pub fn spawn(mut endpoint: Endpoint) -> Self {
+    pub fn spawn(endpoint: Endpoint) -> Self {
+        Self::run(endpoint, true)
+    }
+
+    /// Accepts and decrypts but sends nothing back.
+    ///
+    /// Echoing costs the server thread a decrypt and a send per message, and
+    /// that thread competes for the same cores as the client being measured.
+    /// For send-side measurements that contention is pure noise.
+    pub fn drain(endpoint: Endpoint) -> Self {
+        Self::run(endpoint, false)
+    }
+
+    fn run(mut endpoint: Endpoint, echo: bool) -> Self {
         let addr = endpoint.local_addr().expect("addr");
         let public = endpoint.public_key().copied();
         let stop = Arc::new(AtomicBool::new(false));
@@ -35,7 +48,9 @@ impl FectpEcho {
             while !flag.load(Ordering::Relaxed) {
                 match endpoint.poll(Some(Duration::from_millis(5))) {
                     Ok(Event::Message { peer, data }) => {
-                        let _ = endpoint.send(peer, &data);
+                        if echo {
+                            let _ = endpoint.send(peer, &data);
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -52,6 +67,14 @@ impl FectpEcho {
 
     pub fn public_key() -> Self {
         Self::spawn(Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind"))
+    }
+
+    pub fn public_key_drain() -> Self {
+        Self::drain(Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind"))
+    }
+
+    pub fn plain_drain() -> Self {
+        Self::drain(Endpoint::bind_plain("127.0.0.1:0").expect("bind"))
     }
 
     pub fn psk(secret: &[u8]) -> Self {
@@ -88,7 +111,16 @@ pub struct UdpEcho {
 }
 
 impl UdpEcho {
+    /// Receives and discards, the matching baseline for a send-side measurement.
+    pub fn sink() -> Self {
+        Self::build(false)
+    }
+
     pub fn spawn() -> Self {
+        Self::build(true)
+    }
+
+    fn build(echo: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
         socket
             .set_read_timeout(Some(Duration::from_millis(5)))
@@ -100,7 +132,9 @@ impl UdpEcho {
             let mut buf = vec![0u8; 65535];
             while !flag.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = socket.recv_from(&mut buf) {
-                    let _ = socket.send_to(&buf[..n], from);
+                    if echo {
+                        let _ = socket.send_to(&buf[..n], from);
+                    }
                 }
             }
         });

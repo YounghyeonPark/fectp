@@ -53,7 +53,24 @@ pub(crate) struct Peer {
     /// Coding scratch space, grown on demand.
     pub primary: Vec<u8>,
     pub secondary: Vec<u8>,
+    /// Consecutive coding attempts that did not shrink the payload.
+    coding_misses: u8,
+    /// Sends still to be skipped before coding is attempted again.
+    coding_skips: u8,
+    /// The shape the miss counter was accumulated for. A caller that changes
+    /// shape is describing different data, which deserves a fresh attempt.
+    coding_shape: PayloadType,
 }
+
+/// Misses in a row before coding is assumed not to pay for this stream.
+const CODING_MISS_LIMIT: u8 = 4;
+
+/// Sends skipped after that, before trying once more.
+///
+/// Compression is attempted again periodically because a stream's content can
+/// change — an opaque channel carrying encrypted blobs may later carry text.
+/// At 32 this costs about 3% of one attempt per send while it is not paying.
+const CODING_PROBE_INTERVAL: u8 = 32;
 
 impl Peer {
     pub fn new(session: Link, buffer_hint: usize) -> Self {
@@ -66,6 +83,37 @@ impl Peer {
             abandoned: 0,
             primary: vec![0u8; buffer_hint],
             secondary: vec![0u8; buffer_hint],
+            coding_misses: 0,
+            coding_skips: 0,
+            coding_shape: PayloadType::Opaque,
+        }
+    }
+
+    /// Whether coding is worth attempting for this send.
+    fn should_code(&mut self, payload_type: PayloadType) -> bool {
+        if payload_type != self.coding_shape {
+            self.coding_shape = payload_type;
+            self.coding_misses = 0;
+            self.coding_skips = 0;
+            return true;
+        }
+        if self.coding_skips > 0 {
+            self.coding_skips -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// Folds one coding outcome into the decision for the next send.
+    fn record_coding(&mut self, paid: bool) {
+        if paid {
+            self.coding_misses = 0;
+            self.coding_skips = 0;
+        } else if self.coding_misses + 1 >= CODING_MISS_LIMIT {
+            self.coding_misses = 0;
+            self.coding_skips = CODING_PROBE_INTERVAL;
+        } else {
+            self.coding_misses += 1;
         }
     }
 
@@ -99,8 +147,31 @@ impl Peer {
         let mut primary = core::mem::take(&mut self.primary);
         let mut secondary = core::mem::take(&mut self.secondary);
 
-        let coded =
-            compress::encode_payload(data, payload_type, peer_caps, &mut primary, &mut secondary);
+        // Coding costs a couple of microseconds per send whether or not it
+        // pays, which on a protocol whose whole claim is latency is worth not
+        // spending on a stream that has already shown it cannot be shrunk.
+        // Skipping is always safe: an uncompressed frame is a valid frame, and
+        // the receiver is told which it got by a flag.
+        //
+        // The exception is a payload too large to send raw. There, coding is
+        // the only thing that can get it under the limit, so it is always
+        // attempted regardless of what the stream has done so far.
+        let must_try = data.len() > limit;
+        let coded = if self.should_code(payload_type) || must_try {
+            let attempt = compress::encode_payload(
+                data,
+                payload_type,
+                peer_caps,
+                &mut primary,
+                &mut secondary,
+            );
+            if !must_try {
+                self.record_coding(attempt.is_some());
+            }
+            attempt
+        } else {
+            None
+        };
 
         let result = match coded {
             Some((header, len)) if CODEC_HEADER_LEN + len <= limit => {

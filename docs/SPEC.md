@@ -764,7 +764,8 @@ select it when the peer has not advertised one.
 
 Zstandard payloads MUST be complete, standard Zstandard frames. The compression
 level is a sender-side choice: a receiver MUST accept any valid frame. The
-reference implementation uses level −4 (`--fast=4`).
+reference implementation uses level 1; it previously used −4 (`--fast=4`),
+which measured worse end to end on every payload shape tested.
 
 ### 6.4 Sender obligations
 

@@ -8,8 +8,8 @@ cargo run -p fectp-bench --release
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
 Yours will differ. What should survive the change of machine is the *shape* of
-the results, and the two places where FECTP is worse than the alternatives —
-both of which are called out rather than buried.
+the results, and the places where FECTP is worse than the alternatives — those
+are called out rather than buried.
 
 Everything runs over loopback. That deliberately removes the network, so what
 is left is each protocol's own cost. It also flatters every protocol that needs
@@ -19,17 +19,21 @@ path they are the only thing that matters.
 **Read §3 first.** Sections 1, 2, 4 and 5 measure things that turn out not to
 decide anything.
 
+This benchmark has changed the implementation twice: §7 is why the default
+compression level moved from −4 to 1, and §8 is why the send path stopped
+attempting compression on data that has already refused to compress.
+
 ---
 
 ## 1. Opening a connection
 
 | | median | p95 | X25519 operations |
 |---|---|---|---|
-| FECTP, public key | 0.61 ms | 0.76 ms | 4 |
-| FECTP, resumed | 0.36 ms | 0.49 ms | 1 |
-| FECTP, pre-shared key | 0.32 ms | 0.47 ms | 1 |
-| FECTP, plaintext | 0.16 ms | 0.26 ms | 0 |
-| TCP + TLS 1.3 (rustls) | 1.62 ms | 1.80 ms | 1 + certificate chain |
+| FECTP, public key | 0.66 ms | 0.80 ms | 4 |
+| FECTP, resumed | 0.36 ms | 0.45 ms | 1 |
+| FECTP, pre-shared key | 0.34 ms | 0.46 ms | 1 |
+| FECTP, plaintext | 0.18 ms | 0.25 ms | 0 |
+| TCP + TLS 1.3 (rustls) | 1.53 ms | 1.72 ms | 1 + certificate chain |
 
 TLS is doing more work than FECTP here: it verifies a certificate chain, and
 FECTP has no chain to verify. That is not a free win — it is the trade in §6.
@@ -40,20 +44,20 @@ One 256-byte message out, the same back.
 
 | | median | p95 | vs raw UDP |
 |---|---|---|---|
-| raw UDP (no encryption) | 26.2 µs | 57.5 µs | — |
-| FECTP, plaintext | 26.2 µs | 34.5 µs | +0% |
-| FECTP, encrypted | 30.7 µs | 37.8 µs | +17% |
-| TCP + TLS 1.3 | 59.0 µs | 90.6 µs | +125% |
-| **raw UDP again (control)** | **28.0 µs** | **39.7 µs** | **+7%** |
+| raw UDP (no encryption) | 31.6 µs | 54.0 µs | — |
+| FECTP, plaintext | 31.3 µs | 49.9 µs | −1% |
+| FECTP, encrypted | 35.8 µs | 57.4 µs | +13% |
+| TCP + TLS 1.3 | 64.4 µs | 103.9 µs | +104% |
+| **raw UDP again (control)** | **30.6 µs** | **49.5 µs** | **−3%** |
 
-The last row is the first row's measurement repeated at the end of the run. It
-moved 7% without anything changing, which is the noise floor of this host.
-**Treat any difference smaller than 7% as noise.** That covers the plaintext
-row entirely; the encrypted row is marginal; only TLS clearly clears the bar.
+The last row is the first row's measurement repeated at the end of the run,
+with nothing changed. It moved 3%, which is this host's noise floor on this
+run — on a busier run it has been 8%. **Treat any difference smaller than the
+control as noise.** That covers the plaintext row entirely.
 
-An earlier draft of this benchmark reported FECTP plaintext as 11–15% *faster*
-than raw UDP, which is impossible — it is raw UDP plus a 14-byte header. The
-control row exists so that kind of artifact is visible instead of quotable.
+An earlier draft reported FECTP plaintext as 11–15% *faster* than raw UDP,
+which is impossible — it is raw UDP plus a 14-byte header. The control row
+exists so that kind of artifact stays visible instead of quotable.
 
 ## 3. Round trips before a request is answered
 
@@ -100,16 +104,33 @@ TLS was measured at the socket; FECTP's is fixed by its frame format. The
 datagram protocol gets message boundaries for free. TCP headers are 40 bytes
 against UDP's 28, before any retransmission.
 
-## 5. Encrypting a frame
+## 5. What one send actually costs
 
-| | per frame | throughput |
-|---|---|---|
-| seal 1200 bytes and hand to the kernel | 31.8 µs | 36 MiB/s |
+1024 incompressible bytes, against the same `sendto` with no protocol on it.
 
-This includes the `sendto` syscall, which dominates it. The AEAD is a small
-fraction. **Encryption is not what costs anything in this protocol** — which is
-the finding that shaped the design: if crypto is ~1 µs and a round trip is
-20 ms, the thing worth optimising is round trips.
+| | per send | over raw sendto | throughput |
+|---|---|---|---|
+| raw UDP sendto (no protocol) | 8.3 µs | — | 117 MiB/s |
+| FECTP plaintext: + framing | 8.5 µs | +0.2 µs | 115 MiB/s |
+| FECTP encrypted: + framing + AEAD | 10.7 µs | +2.4 µs | 91 MiB/s |
+
+**Framing is below what this can resolve** — repeated runs put it between −0.3
+and +0.2 µs, which means it costs something smaller than the measurement noise.
+Encryption costs about 2 µs. The syscall, at 8.3 µs, is the largest single item
+by a wide margin.
+
+Two things about this table are worth more than the numbers in it.
+
+The payload is deliberately incompressible. An earlier version of this section
+sent 1200 constant bytes, which code down to almost nothing — so the syscall
+was moving about 30 bytes rather than 1200, and the section was measuring the
+wrong thing. It also only fitted in a frame *because* it compressed; the same
+1200 bytes of real data are refused, as `max_payload` is 1186.
+
+It also needs a harness that can resolve a microsecond. Timing one 8 µs send at
+a time cannot: the scheduler noise around it is the same order as the thing
+being measured, and it will cheerfully report that adding work made the send
+faster. These figures time batches of 500 and divide.
 
 ---
 
@@ -184,19 +205,19 @@ implementation of it here is not.
 
 ---
 
-## 7. Compression
+## 7. Compression, and why the level changed
 
 Bytes on the wire for one 8 KiB payload. Ratios are raw ÷ coded, so higher is
 better, and FECTP's figures include its 4-byte codec header.
 
-| dataset | raw | gzip | zstd −4 | FECTP typed | FECTP typed, no zstd |
-|---|---|---|---|---|---|
-| sensor i16 ×4, slow | 8192 | 1.19x | 1.00x | **2.00x** | 2.00x |
-| sensor i16 ×4, fast | 8192 | 1.18x | 1.00x | 1.04x | 1.03x |
-| counter i32 ×2 | 8192 | 2.77x | 1.00x | **248.24x** | 3.99x |
-| f32 array | 8192 | 1.56x | 1.00x | **5.43x** | 1.00x |
-| JSON log lines | 8192 | **78.77x** | 75.85x | 75.85x | 1.00x |
-| random bytes | 8192 | 1.00x | 1.00x | 1.00x | 1.00x |
+| dataset | raw | gzip | zstd only | **FECTP typed** | typed, no zstd | encode |
+|---|---|---|---|---|---|---|
+| sensor i16 ×4, slow | 8192 | 1.19x | 1.12x | **3.46x** | 2.00x | 16.7 µs |
+| sensor i16 ×4, fast | 8192 | 1.18x | 1.07x | **1.34x** | 1.03x | 29.8 µs |
+| counter i32 ×2 | 8192 | 2.77x | 1.67x | **292.57x** | 3.99x | 6.3 µs |
+| f32 array | 8192 | 1.56x | 1.14x | **8.21x** | 1.00x | 13.3 µs |
+| JSON log lines | 8192 | 78.77x | **126.03x** | 126.03x | 1.00x | 3.8 µs |
+| random bytes | 8192 | 1.00x | 1.00x | 1.00x | 1.00x | 6.4 µs |
 
 - **sensor i16 ×4** — 4 channels of 16-bit ADC, one slowly varying and one not
 - **counter i32 ×2** — 2 channels of monotonic 32-bit counters
@@ -204,64 +225,103 @@ better, and FECTP's figures include its 4-byte codec header.
 - **JSON log lines** — repetitive structured text
 - **random bytes** — incompressible, the floor nothing can beat
 
-The point of the last column is that it is what a microcontroller peer gets.
-The transforms are plain integer code in the `no_std` core — de-interleave,
-delta, zigzag, varint — so a device with no room for a Zstandard decoder still
-gets 2.00x on telemetry and 3.99x on counters.
+The "typed, no zstd" column is what a microcontroller peer gets. Those
+transforms are plain integer code in the `no_std` core — de-interleave, delta,
+zigzag, varint — so a device with no room for a Zstandard decoder still gets
+2.00x on telemetry and 3.99x on counters.
 
-Two honest caveats:
+**The fast sensor row is the honest limit of the approach.** Delta coding only
+wins when successive samples are close, and a varint only saves a byte when the
+delta crosses a 7-bit boundary. A fast-moving signal defeats both, and 1.34x is
+what is left. That is a property of the transform, not a tuning problem.
 
-- **On text, FECTP loses to gzip** (75.85x vs 78.77x). Declaring a shape buys
-  nothing there; the entropy stage does all the work, and see §8 for why it is
-  not doing as much of it as it could.
-- **The "fast" sensor row barely compresses** (1.04x). Delta coding only wins
-  when successive samples are close, and varint only saves a byte when the
-  delta crosses a 7-bit boundary. Fast-changing signals defeat both. This is a
-  real limit of the approach, not a tuning problem.
-
-## 8. The Zstandard level, and a defect in the default
+### Why the default level is now 1
 
 The level is a sender-side choice — `SPEC.md` §7 requires a receiver to accept
 any valid frame — so this is an implementation default, not a wire question.
+It was −4, the design note's `--fast=4`, chosen on the reasoning that a
+latency-sensitive transport cannot afford a slow compressor.
 
-| dataset | **−4 (default)** | −1 | 1 | 3 | 9 |
+| dataset | **−4 (was)** | −1 | **1 (now)** | 3 | 9 |
 |---|---|---|---|---|---|
 | sensor i16 ×4, slow | 1.00x | 1.00x | 1.12x | 1.12x | 1.13x |
 | sensor i16 ×4, fast | 1.00x | 1.00x | 1.07x | 1.10x | 1.10x |
 | counter i32 ×2 | 1.00x | 1.00x | 1.67x | 1.67x | 1.67x |
 | f32 array | 1.00x | 1.00x | 1.14x | 1.14x | 1.14x |
-| JSON log lines | 78.77x | **134.30x** | 134.30x | 134.30x | 134.30x |
+| JSON log lines | 78.77x | 134.30x | 134.30x | 134.30x | 134.30x |
 | random bytes | 1.00x | 1.00x | 1.00x | 1.00x | 1.00x |
+| **encode 8 KiB** | **3.3 µs** | 3.7 µs | **13.7 µs** | 18.0 µs | 56.4 µs |
 
-Encode time for 8 KiB:
+**At level −4, Zstandard does not merely fail on structured binary data — it
+emits more bytes than it was given** (8202 from 8192), so FECTP falls back to
+sending the payload unchanged. The 1.00x row is a real result, not a benchmark
+that failed to run.
 
-| | −4 (default) | −1 | 1 | 3 | 9 |
-|---|---|---|---|---|---|
-| counter i32 ×2 | 3.4 µs | 3.7 µs | 13.6 µs | 18.6 µs | 70.0 µs |
+The reasoning that picked −4 counts only half the clock. A send costs encode
+time *plus* bytes over the link, so a level that spends `dt` more and saves
+`db` bytes wins on every link slower than `db / dt`:
 
-**At level −4, Zstandard does not merely fail to compress structured binary
-data — it emits more bytes than it was given** (8202 from 8192), so FECTP
-correctly falls back to sending the payload unchanged. The 1.00x column is a
-real result, not a benchmark that failed to run. Level 1 gets 1.67x on the same
-input for about 10 µs more per 8 KiB.
+| dataset | bytes at −4 | bytes at 1 | level 1 wins below |
+|---|---|---|---|
+| sensor i16 ×4, slow | 8192 | 7296 | 710 Mbps |
+| sensor i16 ×4, fast | 8192 | 7640 | 437 Mbps |
+| counter i32 ×2 | 8192 | 4902 | **2.6 Gbps** |
+| f32 array | 8192 | 7184 | 798 Mbps |
+| JSON log lines | 104 | 61 | 34 Mbps |
+| random bytes | 8192 | 8192 | never |
 
-`compress::LEVEL = -4` was inherited from the original design note's
-`--fast=4` recommendation, on the reasoning that a latency-sensitive transport
-cannot afford a slow compressor. Measured, that reasoning does not hold: 10 µs
-against the 20 ms round trip of §3 is not a trade worth making.
+Every real network is below those thresholds, so on this data level 1 is the
+faster choice *end to end*, not the slower one. The JSON row is the exception
+worth noting: −4 already found nearly everything, and the extra saving is 43
+bytes, so above 34 Mbps the lower level was right there.
 
-**But read it against §7 before concluding the default is simply wrong.** When
-a payload's type is declared, the transform runs first and leaves something
-repetitive enough that even level −4 finds it — the i32 counters still reach
-248x. The gap is on *opaque* payloads, where nothing has exposed the structure
-and −4 is all that stands between the data and the wire. On the JSON row that
-costs a real 1.7x in final size.
+**The stronger half of the case is the typed column in the table above**, and
+it corrects something an earlier draft of this document got wrong. That draft
+argued the default was fine for declared types, on the grounds that the
+transform exposes the redundancy before Zstandard sees it — but it generalised
+from the one dataset where that holds. Running the transform first does not
+make the level irrelevant:
 
-So the defect is narrow but genuine: **the default is well chosen for typed
-payloads and poorly chosen for opaque ones.** The obvious fix is to raise the
-default to 1, or to pick the level from whether a transform ran. Changing it is
-a judgement call about which payloads matter more, so it is recorded here
-rather than made silently.
+| declared type | at −4 | at 1 |
+|---|---|---|
+| sensor i16 ×4, slow | 2.00x | **3.46x** |
+| f32 array | 5.43x | **8.21x** |
+| JSON log lines | 75.85x | **126.03x** |
+| counter i32 ×2 | 248.24x | 292.57x |
+
+Only the i32 counters were already fine at −4.
+
+## 8. Not compressing what will not compress
+
+Attempting compression costs a few microseconds whether or not it works, and
+before this change the send path paid it on **every** message — including on a
+stream of encrypted blobs or random telemetry that had never once compressed.
+
+The send path now counts consecutive failures. After four, it stops attempting
+and retries once every 32 sends, so a stream whose content changes is picked up
+again within a bounded delay. Measured on 1024 incompressible bytes, three runs
+each:
+
+| | before | after |
+|---|---|---|
+| `Connection::send`, plaintext | 9.41 µs | **7.45 µs** (−21%) |
+| `Connection::send`, encrypted | 10.83 µs | **9.21 µs** (−15%) |
+
+Compressible payloads are unaffected: the counter never advances, so coding is
+attempted every time exactly as before.
+
+This is invisible on the wire — an uncompressed frame is a valid frame and the
+receiver is told which it got by a flag — with one exception that matters. A
+payload too large to send raw only fits *because* it codes down, so coding is
+always attempted for those regardless of what the stream has done before.
+Without that carve-out the optimisation silently breaks large sends;
+`a_payload_that_only_fits_when_coded_is_still_coded` fails without it, which is
+how it is kept honest.
+
+The two changes also support each other. Raising the level (§7) makes a failed
+attempt more expensive, and skipping makes the failed attempts rare — the case
+where a higher level costs more and returns nothing is now the one case that
+stops being paid for on every message.
 
 ---
 
@@ -277,3 +337,8 @@ The TLS figures use rustls with a self-signed certificate and `TCP_NODELAY`. A
 production TLS deployment with session tickets and a warm connection pool would
 close most of the §1 and §3 gaps — the honest comparison there is FECTP against
 *resumed* TLS, not against a cold handshake.
+
+The break-even figures in §7 model a link as pure bandwidth. They ignore
+serialisation across multiple frames, congestion response, and the fact that a
+smaller payload can be the difference between one datagram and two — which is
+worth far more than the microseconds either way.

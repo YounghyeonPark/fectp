@@ -563,6 +563,56 @@ These are unimplemented, not overlooked.
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
+## D17 — The compression level was raised after measuring it
+
+**Original**: the document recommends Zstandard at `--fast=4` (level −4), on the
+reasoning that a latency-sensitive transport cannot afford a slow compressor.
+The implementation took that as `compress::LEVEL`.
+
+**Problem**: measured, level −4 does not compress structured binary data at
+all. On the four binary datasets in `BENCHMARKS.md` §7 it produces *more* bytes
+than it is given — 8202 from 8192 — so the payload goes out raw. Level 1 gets
+1.67x on the same input.
+
+The reasoning that picked −4 counts only half the clock. A send costs encode
+time **plus** bytes over the link, so a level costing `dt` more and saving `db`
+bytes is the faster choice on any link slower than `db / dt`. For this data
+that threshold is 437 Mbps to 2.6 Gbps — above every real network it will run
+on. Declaring a payload type does not rescue the low level either: sensor data
+goes from 2.00x to 3.46x and an `f32` table from 5.43x to 8.21x.
+
+**Decision**: `LEVEL` is 1. Nothing on the wire depends on it — SPEC §7 already
+required a receiver to accept any level, so this is a sender-side default that
+any implementation may set differently.
+
+The one case the old level suited is a link fast enough that bytes are cheaper
+than cycles. That is not the case this protocol is for, and a sender that finds
+itself in it can change the constant without coordinating with anyone.
+
+## D18 — Compression stops being attempted when it stops working
+
+**Problem**: coding cost a few microseconds per send whether or not it
+achieved anything, and the send path paid it on every message. For a stream
+that never compresses — encrypted blobs, random telemetry, anything already
+packed — that is a pure loss repeated forever, and it is 21% of a plaintext
+send.
+
+**Decision**: the send path counts consecutive attempts that did not shrink the
+payload. After four it stops attempting, and retries once every 32 sends.
+Plaintext sends fell from 9.41 µs to 7.45 µs, encrypted from 10.83 µs to
+9.21 µs. Compressible streams are untouched: the counter never advances.
+
+Two properties keep this from being a trap. It is invisible on the wire, since
+an uncompressed frame is a valid frame and a flag says which one arrived. And a
+payload too large to send raw is *always* coded regardless of the counter,
+because for those, coding is the only thing that makes the send legal at all —
+an optimisation must never be the reason a correct call fails.
+
+Retrying periodically rather than giving up matters for the same reason the
+codec registry exists: what a connection carries can change. A channel of
+opaque bytes that starts carrying text should start compressing again, and 32
+sends bounds how long it takes to notice.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

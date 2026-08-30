@@ -30,9 +30,20 @@ pub const MIN_COMPRESS_SIZE: usize = 1024;
 
 /// Compression level used for payloads that qualify.
 ///
-/// Level `-4` is Zstandard's `--fast=4`, the throughput/ratio balance the
-/// specification selected.
-pub const LEVEL: i32 = -4;
+/// The design note specified `-4` (Zstandard's `--fast=4`) on the reasoning
+/// that a latency-sensitive transport cannot afford a slow compressor.
+/// Measured, that reasoning does not survive: at `-4` Zstandard finds nothing
+/// in structured binary data and emits *more* bytes than it was given, so the
+/// payload goes out raw. Level 1 costs single-digit microseconds more and is
+/// worth it well past any link speed this will run on — sending takes encode
+/// time plus bytes over the wire, and the bytes it saves outweigh the time it
+/// spends on anything slower than about 2 Gbit/s. On declared payload types,
+/// where the transform runs first, it is the difference between 2.00x and
+/// 3.46x on sensor data.
+///
+/// Nothing on the wire depends on this: a receiver decodes any level, so a
+/// sender may pick another without coordination. See `docs/BENCHMARKS.md` §7.
+pub const LEVEL: i32 = 1;
 
 /// Whether `payload` should be compressed before being sent to a peer with
 /// `peer_caps`.
