@@ -45,13 +45,11 @@ before any real data may move**.
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant A as Your app
     participant B as Peer
-    Note over A,B: FECTP — the request is inside the first packet
-    A->>B: handshake + "GET /status"
-    B->>A: handshake + the answer
-    Note over A,B: done in one round trip
+    Note over A,B: the request rides in packet 1
+    A->>B: handshake + request
+    B->>A: handshake + answer
 ```
 
 | Before your first byte can be sent | Round trips |
@@ -78,10 +76,10 @@ lets the same protocol run on a microcontroller and a server.
 
 ```mermaid
 flowchart TB
-    A["Your application<br/>send bytes · receive bytes"]
-    B["fectp — needs std<br/>Connection · Endpoint · codecs · Zstandard"]
-    C["fectp-core — no_std, no allocator, ~29 KiB<br/>Noise handshake · framing · replay window · reliability"]
-    D["Transport — a trait you implement<br/>UDP today; QUIC or a serial link just as well"]
+    A["Your application"]
+    B["fectp · needs std<br/>Connection · Endpoint<br/>codecs · Zstandard"]
+    C["fectp-core · no_std · ~29 KiB<br/>Noise handshake · framing<br/>replay window · reliability"]
+    D["Transport trait<br/>UDP, or a link you supply"]
     A --> B --> C --> D
 ```
 
@@ -90,14 +88,16 @@ and buffers. A server uses both crates. They speak the same protocol:
 
 ```mermaid
 flowchart LR
-    subgraph big["Server or desktop"]
+    subgraph big["Server"]
         s1["fectp"] --> s2["fectp-core"]
     end
-    subgraph small["Microcontroller · 32 KiB RAM"]
+    subgraph small["Microcontroller"]
         m["fectp-core"]
     end
-    big <-->|"same wire format"| small
+    big <--> small
 ```
+
+Same wire format on both sides.
 
 ---
 
@@ -146,15 +146,15 @@ Full walkthrough, with every snippet compiled and run by
 every branch that costs anything is skipped when it would not pay:
 
 ```mermaid
-flowchart LR
-    P["your bytes"] --> T{"shape<br/>declared?"}
+flowchart TD
+    P["your bytes"] --> T{"shape declared?"}
     T -->|yes| TR["transform<br/>split channels, delta"]
-    T -->|no| Z
-    TR --> Z{"compressing<br/>worth it?"}
+    T -->|no| Z{"worth compressing?"}
+    TR --> Z
     Z -->|yes| ZS["Zstandard"]
-    Z -->|no| E
-    ZS --> E["encrypt + authenticate<br/>ChaCha20-Poly1305"]
-    E --> W["14-byte header<br/>+ frame"]
+    Z -->|no| E["encrypt + authenticate<br/>ChaCha20-Poly1305"]
+    ZS --> E
+    E --> W["prepend 14-byte header"]
     W --> S(["one UDP datagram"])
 ```
 
@@ -230,10 +230,13 @@ privileged.
 
 ```mermaid
 flowchart LR
-    A(["Node A<br/>:4433"]) <-->|"A dialled B"| B(["Node B<br/>:4433"])
-    B <-->|"B dialled C"| C(["Node C<br/>:4433"])
-    A <-->|"A dialled C"| C
+    A(["Node A"]) <--> B(["Node B"])
+    B <--> C(["Node C"])
+    A <--> C
 ```
+
+Each node binds one port. Every link was dialled by one side and accepted by
+the other, and after the handshake it makes no difference which.
 
 ```rust
 let mut node = Endpoint::bind_psk("0.0.0.0:4433", b"mesh-secret")?;
