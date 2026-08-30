@@ -116,9 +116,15 @@ against UDP's 28, before any retransmission.
 
 | | per send | over raw sendto | throughput |
 |---|---|---|---|
-| raw UDP sendto (no protocol) | 8.3 µs | — | 117 MiB/s |
-| FECTP plaintext: + framing | 8.5 µs | +0.2 µs | 115 MiB/s |
-| FECTP encrypted: + framing + AEAD | 10.7 µs | +2.4 µs | 91 MiB/s |
+| raw UDP sendto (no protocol) | 7.6 µs | — | 128 MiB/s |
+| FECTP plaintext: + framing | 6.9 µs | −0.7 µs | 141 MiB/s |
+| FECTP encrypted: + framing + AEAD | 8.8 µs | +1.2 µs | 111 MiB/s |
+| FECTP encrypted, duplex sender | 8.3 µs | +1.1 µs | 118 MiB/s |
+
+The duplex sender seals under a lock, because the protocol thread seals
+acknowledgements on the same session. Idle, that lock is inside the noise —
+which says it is free when uncontended, not that it is free under load, an
+arrangement this does not measure.
 
 **Framing is below what this can resolve** — repeated runs put it between −0.3
 and +0.2 µs, which means it costs something smaller than the measurement noise.

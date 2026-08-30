@@ -281,6 +281,39 @@ Progress happens only inside `poll`. An endpoint that queues a message and
 never polls sends nothing. The queue is bounded at `fectp::MAX_QUEUED_LARGE`
 messages per peer, since each holds its payload until acknowledged.
 
+## Sending and receiving at once
+
+`send` and `recv` both take `&mut self`, so one cannot run while the other is
+blocked. `into_duplex` hands back two handles that can:
+
+```rust
+let (tx, rx) = conn.into_duplex();
+
+std::thread::spawn(move || {
+    while let Ok(message) = rx.recv() {
+        println!("{} bytes", message.len());
+    }
+});
+
+tx.send(b"sent while the other thread is blocked reading")?;
+```
+
+**The two halves owe each other nothing.** Acknowledgements go out and lost
+messages are retransmitted whether or not anything is calling `rx.recv()`,
+because the protocol runs on a thread of its own rather than inside the calls.
+That is the difference from a plain two-halves split, where the receiving half
+has to keep being polled or the *sending* half quietly stops retransmitting.
+
+`tx.send` takes `&self` and seals on the calling thread, so it is as short a
+path as a plain `Connection::send` — measured, the difference is inside the
+noise. `rx.recv` blocks; `recv_timeout` and `try_recv` are there too.
+
+The thread stops when either half is dropped, and the other then reports
+`Error::Closed`.
+
+An `Endpoint` needs none of this: it is already an event loop, and one thread
+can send and receive on it for any number of peers.
+
 ## Typed payloads
 
 A generic compressor sees only bytes. Telling it the shape lets a transform run

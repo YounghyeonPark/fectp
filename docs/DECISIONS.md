@@ -709,6 +709,37 @@ The conservatism this removes is real but misplaced. Guarding against spurious
 retransmission is what the round-trip estimate is *for*; refusing to use it
 below 200 ms discards the measurement rather than acting on it.
 
+## D22 — Full duplex is a thread, not a split
+
+**Problem**: `Connection::send` and `recv` both take `&mut self`, so a program
+cannot have one thread reading while another writes. That is an API limit, not
+a protocol one: after the Noise split the two directions have separate cipher
+states, and one UDP socket may be sent on and received on at once.
+
+The obvious fix is `split()` into a sending half and a receiving half. It does
+not work, and the reason is worth recording because the flaw is not visible in
+the signature.
+
+**An acknowledgement is an encrypted frame in the send direction**, so the
+receiving half has to send — and a retransmission has to happen whether or not
+the application is asking for anything. Today both live inside `recv` and
+`flush`. Split the connection and they stay on the receiving half, which means
+the two halves are not peers: **the sender's reliability silently depends on
+someone draining the receiver.** A caller who only sends gets no
+retransmissions at all, and nothing in the types says so.
+
+**Decision**: `into_duplex` puts the protocol on its own thread and returns two
+handles with no contract between them. The thread owns the receive path, the
+acknowledgements and the retransmit timer, so those happen because it is
+running. `DuplexSender::send` takes `&self` and seals on the calling thread
+under a lock the protocol thread also takes for acknowledgements — measured
+idle, that lock is inside the noise of a send (BENCHMARKS.md §5).
+
+What this costs is one thread per connection and a `Vec` per received message,
+which is why it is a separate constructor rather than the default. A program
+that does not need both directions at once should keep using `Connection`, and
+one serving many peers should use `Endpoint`, which is already an event loop.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

@@ -352,6 +352,24 @@ fn crypto_cost() {
     drop(conn);
     drop(pk);
 
+    // The duplex sender seals under a lock, because the protocol thread also
+    // seals to acknowledge. That lock is the whole cost of being able to send
+    // and receive at once, so it is worth knowing.
+    let duplex_echo = FectpEcho::public_key_drain();
+    let duplex_conn = Connection::connect(
+        duplex_echo.addr,
+        &duplex_echo.public.expect("identity"),
+        &Identity::generate(),
+    )
+    .expect("connect");
+    let (duplex_tx, duplex_rx) = duplex_conn.into_duplex();
+    let duplex = measure_batched(WARMUP, 40, 500, || {
+        duplex_tx.send(&payload).expect("send");
+    });
+    drop(duplex_tx);
+    drop(duplex_rx);
+    drop(duplex_echo);
+
     let base = raw.median_us();
     row_header(&["", "per send", "over raw sendto", "throughput"]);
     row(&[
@@ -372,6 +390,21 @@ fn crypto_cost() {
         &us(sealed.median_us() - base),
         &format!("{:.0} MiB/s", throughput_mib(1024, sealed.median)),
     ]);
+    row(&[
+        "FECTP encrypted, duplex sender",
+        &us(duplex.median_us()),
+        &us(duplex.median_us() - base),
+        &format!("{:.0} MiB/s", throughput_mib(1024, duplex.median)),
+    ]);
+    println!();
+    note(&format!(
+        "The duplex sender differs from the plain one by {}, which is inside the",
+        us((duplex.median_us() - sealed.median_us()).abs())
+    ));
+    note("noise: an uncontended lock costs nanoseconds. It seals under one because");
+    note("the protocol thread seals acknowledgements on the same session, so this");
+    note("says the lock is free when idle — not that it is free under load, which");
+    note("this arrangement does not measure.");
     println!();
     note(&format!(
         "Encrypting costs {} on top of framing. The throughput column is",

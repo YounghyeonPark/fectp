@@ -17,6 +17,7 @@ fn main() -> fectp::Result<()> {
     shortest_pair()?;
     timeouts_and_zero_rtt()?;
     reliable_delivery()?;
+    duplex()?;
     large_messages()?;
     typed_payloads()?;
     resumption()?;
@@ -217,6 +218,27 @@ fn reliable_delivery() -> fectp::Result<()> {
             conn.rto_ms(),
             fectp::MAX_UNACKED
         );
+        Ok(())
+    })
+}
+
+/// USAGE.md — "Sending and receiving at once"
+fn duplex() -> fectp::Result<()> {
+    with_server(|addr, server_public| {
+        let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
+        let (tx, rx) = conn.into_duplex();
+
+        let reader = std::thread::spawn(move || rx.recv_timeout(Duration::from_secs(5)));
+
+        // Sent while the other thread is blocked reading, which a `&mut self`
+        // API cannot express.
+        std::thread::sleep(Duration::from_millis(20));
+        tx.send(b"sent while the other thread is blocked reading")?;
+
+        let message = reader.join().expect("reader thread")?;
+        assert_eq!(message, b"sent while the other thread is blocked reading");
+
+        println!("duplex: {} bytes received on another thread", message.len());
         Ok(())
     })
 }

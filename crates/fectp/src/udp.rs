@@ -73,6 +73,20 @@ impl UdpTransport {
         self.max_datagram = size;
     }
 
+    /// A second handle on the same socket.
+    ///
+    /// Both handles refer to one kernel socket, which may be sent on and
+    /// received on at the same time from different threads — that property is
+    /// the operating system's, not this crate's, and it is what lets the two
+    /// directions run independently.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+            peer: self.peer,
+            max_datagram: self.max_datagram,
+        })
+    }
+
     /// The local address the socket is bound to.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()

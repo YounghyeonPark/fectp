@@ -62,7 +62,8 @@ mod link;
 mod pipeline;
 use link::Link;
 use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
-pub mod endpoint;
+pub mod duplex;
+mod endpoint;
 pub mod udp;
 
 use std::collections::VecDeque;
@@ -83,6 +84,7 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
+pub use duplex::{DuplexReceiver, DuplexSender};
 pub use endpoint::{Endpoint, Event, PeerId, MAX_QUEUED_LARGE};
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
@@ -111,6 +113,12 @@ fn resolve(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// The duplex protocol thread has stopped, so the connection is over.
+    ///
+    /// Either half being dropped ends it, as does an unrecoverable socket
+    /// error on the thread.
+    Closed,
+
     /// The underlying socket failed.
     Io(io::Error),
     /// A protocol-level failure from the core.
@@ -162,6 +170,7 @@ impl std::fmt::Display for Error {
             Error::MissingPeerKey => {
                 f.write_str("public-key mode requires the peer's public key")
             }
+            Error::Closed => f.write_str("the connection is closed"),
         }
     }
 }
