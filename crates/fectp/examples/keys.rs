@@ -1,154 +1,189 @@
-//! Public-key identities, end to end: making one, keeping it, handing out the
-//! public half, and deciding who is allowed in.
+//! Public-key identities, end to end — as **two separate processes**, because
+//! that is the only part of this that is actually awkward.
 //!
 //! ```bash
-//! cargo run -p fectp --example keys
+//! cargo run -p fectp --example keys -- serve
+//! # prints the server's public key; copy it, then in another terminal:
+//! cargo run -p fectp --example keys -- connect <that key>
 //! ```
 //!
-//! The other examples call `Identity::generate()` and pass the key straight to
-//! the peer as a variable, which skips the only part that is actually awkward
-//! in a real deployment: the two sides are different machines, started at
-//! different times, and the only thing that travels between them beforehand is
-//! a string somebody copied.
+//! Run `serve` with no other arguments and it tells you what to do next.
 //!
-//! Four things this shows, in order:
+//! The point of splitting it is that a public key has to *travel*, and every
+//! way of faking that inside one process — a shared variable, a channel, a
+//! moved `String` — quietly skips the step you actually have to get right. Here
+//! the key reaches the client the way it reaches a real one: as text somebody
+//! copied, parsed from `argv`.
 //!
-//! 1. An identity is generated **once** and stored. Generating a fresh one on
-//!    every start would change the server's public key every restart, and every
-//!    client would stop trusting it.
-//! 2. The **secret never leaves the machine**. Only the public half is copied.
-//! 3. A public key is 32 raw bytes, which is not something you can paste into a
-//!    config file, so it is printed as hex and parsed back.
-//! 4. **Authentication is not authorisation.** The handshake proves *which* key
-//!    a peer holds. Deciding whether that key may do anything is your job, and
-//!    here it is an allow-list.
+//! What it shows, in order:
+//!
+//! 1. An identity is generated **once** and stored. Generating a fresh one each
+//!    start would change the public key every restart and every client would
+//!    stop trusting it.
+//! 2. The **secret never moves.** Only the public half is copied, and it is
+//!    printed as hex because 32 raw bytes do not go in a config file.
+//! 3. **Authentication is not authorisation.** The handshake proves *which* key
+//!    a peer holds. Whether that key may do anything is your decision, and here
+//!    it is a file of permitted keys — so the first `connect` is refused, and
+//!    you have to add the client before it works.
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
-use std::thread;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 // `PeerKey` is the public name for a 32-byte X25519 public key. Method
-// signatures spell the underlying type `PublicKey`; this is the name to
-// import when you want to store one.
+// signatures spell the underlying type `PublicKey`; this is the name to import
+// when you want to store one.
 use fectp::{Connection, Endpoint, Error, Event, Identity, PayloadType, PeerKey};
 
+const ADDR: &str = "127.0.0.1:4433";
+
 fn main() -> fectp::Result<()> {
-    // Somewhere to keep the key files. A real deployment uses a fixed path the
-    // service owns — /etc/myservice/identity.key, or a flash partition.
-    let dir = std::env::temp_dir().join("fectp-keys-example");
-    fs::create_dir_all(&dir).map_err(Error::Io)?;
-
-    // ── 1. The server's identity ─────────────────────────────────────────
-    //
-    // Created on first run, loaded on every run after. The public key stays
-    // the same across restarts because the secret does.
-    let server_identity = load_or_create(&dir.join("server.key"))?;
-    let server_public = *server_identity.public();
-
-    println!("server identity: {}", dir.join("server.key").display());
-    println!("  public key  : {}", to_hex(&server_public));
-    println!("  ^ this is the line you put in a client's configuration\n");
-
-    // ── 2. Who is allowed to connect ─────────────────────────────────────
-    //
-    // Each client has its own identity, exactly as the server does. The server
-    // keeps the public halves of the ones it will accept. This is a plain file
-    // here; a real service might read a directory, a database, or a config.
-    let known_client = load_or_create(&dir.join("client.key"))?;
-    let allow_list: HashSet<PeerKey> = [*known_client.public()].into_iter().collect();
-
-    println!("allow-list ({} entry):", allow_list.len());
-    println!("  {}\n", to_hex(known_client.public()));
-
-    let mut server = Endpoint::bind("127.0.0.1:0", server_identity)?;
-    let addr = server.local_addr()?;
-
-    // ── 3. The client side ───────────────────────────────────────────────
-    //
-    // A client does not have the server's `Identity` — only the hex string
-    // above, out of its configuration file. That string is all it needs, and
-    // it is the only thing that had to travel between the two machines.
-    let configured = to_hex(&server_public);
-    assert_eq!(from_hex(&configured), Some(server_public), "hex must round-trip");
-    assert!(from_hex("nonsense").is_none(), "a bad string must not become a zero key");
-
-    let client = thread::spawn(move || -> fectp::Result<()> {
-        let server_public = from_hex(&configured).expect("a valid key in the config");
-
-        // The known client: on the allow-list, so it gets an answer.
-        let conn = Connection::connect(addr, &server_public, &known_client)?;
-        conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"reading: 23.5", PayloadType::Opaque)?;
-
-        let mut buf = vec![0u8; 1024];
-        let n = conn.recv(&mut buf)?;
-        println!("known client   <- {}", String::from_utf8_lossy(&buf[..n]));
-
-        // A stranger: a perfectly valid identity that nobody put on the list.
-        // Its handshake succeeds — it is a real key, and the server can prove
-        // it — and then the server drops it anyway.
-        let stranger = Identity::generate();
-        let conn = Connection::connect(addr, &server_public, &stranger)?;
-        conn.set_read_timeout(Some(Duration::from_millis(500)))?;
-        conn.send(b"let me in", PayloadType::Opaque)?;
-        match conn.recv(&mut buf) {
-            Ok(n) => println!("stranger       <- {}", String::from_utf8_lossy(&buf[..n])),
-            Err(_) => println!("stranger       <- nothing; it was not on the list"),
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("serve") => serve(),
+        Some("connect") => match args.get(1) {
+            Some(key) => connect(key),
+            None => {
+                eprintln!("usage: keys connect <server public key, 64 hex characters>");
+                eprintln!("start the server first; it prints the key to use.");
+                Ok(())
+            }
+        },
+        _ => {
+            println!("Public-key identities across two processes.\n");
+            println!("  1. cargo run -p fectp --example keys -- serve");
+            println!("     Creates an identity if there is not one, and prints its public key.\n");
+            println!("  2. cargo run -p fectp --example keys -- connect <that key>");
+            println!("     In another terminal. It will be REFUSED the first time —");
+            println!("     the server has no reason to trust it yet, and says so.\n");
+            println!("  3. Add the client's key to the allow-list, as the output tells you.");
+            println!("     Run step 2 again and it works.\n");
+            println!("Files live in {}", dir().display());
+            Ok(())
         }
-        Ok(())
-    });
+    }
+}
 
-    // ── 4. The server loop ───────────────────────────────────────────────
-    let mut accepted = 0;
-    let mut refused = 0;
-    while accepted + refused < 2 {
+/// The server: holds an identity, and a list of clients it will talk to.
+fn serve() -> fectp::Result<()> {
+    let identity = load_or_create(&dir().join("server.key"))?;
+    let public = *identity.public();
+
+    println!("server listening on {ADDR}");
+    println!("public key: {}", to_hex(&public));
+    println!("\nrun this in another terminal:");
+    println!("  cargo run -p fectp --example keys -- connect {}\n", to_hex(&public));
+
+    let allowed = load_allow_list()?;
+    match allowed.len() {
+        0 => println!("allow-list is empty — every client will be refused until you add one."),
+        n => println!("allow-list: {n} client(s)."),
+    }
+    println!("(editing {} takes effect on the next connection)\n", allow_list_path().display());
+
+    let mut server = Endpoint::bind(ADDR, identity)?;
+    loop {
+        // Re-read each time round rather than caching, so adding a key does not
+        // mean restarting the server. A real service would watch the file or
+        // reload on a signal; the point is that the list is data, not code.
+        let allowed = load_allow_list()?;
+
         match server.poll(Some(Duration::from_millis(200)))? {
             Event::Connected { peer, .. } => {
-                // The handshake authenticated this peer from its first message,
-                // so by the time we get here the key is proven. What remains is
-                // the decision: is this key one of ours?
-                let key = server.peer_public_key(peer).copied();
-                match key {
-                    Some(key) if allow_list.contains(&key) => {
-                        accepted += 1;
-                        println!("server: accepted {}…", &to_hex(&key)[..16]);
-                    }
-                    Some(key) => {
-                        refused += 1;
-                        println!("server: refused  {}… — not on the allow-list", &to_hex(&key)[..16]);
-                        server.disconnect(peer);
-                    }
-                    // Only reachable in the modes that have no identities.
-                    None => {
-                        refused += 1;
-                        server.disconnect(peer);
-                    }
+                // The handshake already authenticated this peer from its very
+                // first message, so the key below is proven, not claimed. All
+                // that is left is the decision.
+                let Some(key) = server.peer_public_key(peer).copied() else {
+                    server.disconnect(peer);
+                    continue;
+                };
+                if allowed.contains(&key) {
+                    println!("accepted {}…", &to_hex(&key)[..16]);
+                } else {
+                    println!("REFUSED  {}", to_hex(&key));
+                    println!("  ^ to let this client in, append that line to");
+                    println!("    {}", allow_list_path().display());
+                    server.disconnect(peer);
                 }
             }
             Event::Message { peer, data } => {
-                let reply = format!("received {} bytes", data.len());
+                println!("  {} bytes from {peer:?}", data.len());
+                let reply = format!("server received {} bytes", data.len());
                 server.send(peer, reply.as_bytes(), PayloadType::Opaque)?;
             }
             _ => {}
         }
     }
+}
 
-    client.join().expect("client thread")?;
+/// The client: has its own identity, and the server's key as text.
+///
+/// It never sees the server's `Identity` — only these 64 characters, which is
+/// the whole of what had to be distributed.
+fn connect(server_key: &str) -> fectp::Result<()> {
+    let Some(server_public) = from_hex(server_key) else {
+        eprintln!("that is not a public key: expected 64 hex characters, got {}", server_key.len());
+        return Ok(());
+    };
 
-    println!("\n{accepted} accepted, {refused} refused");
-    println!("run it again: the server's public key above is unchanged, because");
-    println!("its secret was loaded from disk rather than generated afresh.");
+    let identity = load_or_create(&dir().join("client.key"))?;
+    println!("client public key: {}", to_hex(identity.public()));
+    println!("connecting to {ADDR}\n");
+
+    let conn = Connection::connect(ADDR, &server_public, &identity)?;
+    conn.set_read_timeout(Some(Duration::from_secs(2)))?;
+    conn.send(b"reading: 23.5", PayloadType::Opaque)?;
+
+    let mut buf = vec![0u8; 1024];
+    match conn.recv(&mut buf) {
+        Ok(n) => println!("reply: {}", String::from_utf8_lossy(&buf[..n])),
+        Err(_) => {
+            println!("no reply — the server refused this client.");
+            println!("it printed the line to add to its allow-list; do that and try again.");
+        }
+    }
     Ok(())
+}
+
+// ---------------------------------------------------------------- storage ---
+
+fn dir() -> PathBuf {
+    std::env::temp_dir().join("fectp-keys-example")
+}
+
+fn allow_list_path() -> PathBuf {
+    dir().join("allowed-clients.txt")
+}
+
+/// Reads the permitted client keys: one 64-character hex line each.
+///
+/// A missing file means an empty list, which refuses everyone. That is the
+/// right default — the alternative, admitting anyone until told otherwise, is
+/// the kind of thing that ships by accident.
+fn load_allow_list() -> fectp::Result<HashSet<PeerKey>> {
+    let text = match fs::read_to_string(allow_list_path()) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(from_hex)
+        .collect())
 }
 
 /// Loads an identity from `path`, creating and storing one if it is not there.
 ///
-/// This is the whole lifecycle. The secret is 32 bytes and it is the only thing
-/// that must stay private — the public half is derived from it, so nothing else
-/// needs storing.
+/// The secret is 32 bytes and is the only thing that must stay private — the
+/// public half is derived from it, so nothing else needs storing.
 fn load_or_create(path: &Path) -> fectp::Result<Identity> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(Error::Io)?;
+    }
     match fs::read(path) {
         Ok(bytes) => {
             let secret: [u8; 32] = bytes
@@ -159,6 +194,7 @@ fn load_or_create(path: &Path) -> fectp::Result<Identity> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let identity = Identity::generate();
             write_secret(path, identity.secret())?;
+            println!("created {}", path.display());
             Ok(identity)
         }
         Err(e) => Err(Error::Io(e)),
@@ -168,9 +204,9 @@ fn load_or_create(path: &Path) -> fectp::Result<Identity> {
 /// Writes a secret key, readable only by its owner where the platform allows.
 fn write_secret(path: &Path, secret: &[u8; 32]) -> fectp::Result<()> {
     fs::write(path, secret).map_err(Error::Io)?;
-    // A key file the whole machine can read is not much of a secret. Unix has
-    // a mode for that; on Windows the equivalent is an ACL, which is beyond
-    // what an example should be doing.
+    // A key file the whole machine can read is not much of a secret. Unix has a
+    // mode for that; the Windows equivalent is an ACL, which is more than an
+    // example should be doing.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -179,12 +215,18 @@ fn write_secret(path: &Path, secret: &[u8; 32]) -> fectp::Result<()> {
     Ok(())
 }
 
-/// 32 bytes as 64 hex characters — something a person can paste into a config.
+// ------------------------------------------------------------------- hex ---
+
+/// 32 bytes as 64 hex characters — something a person can paste.
 fn to_hex(key: &PeerKey) -> String {
     key.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Reverses [`to_hex`], rejecting anything that is not exactly one key.
+/// Reverses [`to_hex`].
+///
+/// Returns `None` rather than a zero key for anything malformed: a typo that
+/// silently became a valid-looking key would be authenticated against the wrong
+/// peer, which is the one failure here that must never be quiet.
 fn from_hex(text: &str) -> Option<PeerKey> {
     let text = text.trim();
     if text.len() != 64 {

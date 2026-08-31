@@ -234,7 +234,8 @@ miss until you want to store one.
 
 A worked example of the first two — generating an identity, storing the secret,
 printing the public half as hex, parsing it back, and deciding which keys are
-allowed — is `cargo run -p fectp --example keys`.
+allowed — is `cargo run -p fectp --example keys`, which runs as two separate
+processes so the key genuinely has to be copied between them.
 
 ---
 

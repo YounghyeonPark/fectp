@@ -320,11 +320,19 @@ if !allow_list.contains(&their_public) {
 }
 ```
 
-> **A complete, runnable version of all four:**
-> `cargo run -p fectp --example keys` —
-> [`examples/keys.rs`](crates/fectp/examples/keys.rs). It stores identities in
-> real files, prints and re-parses the hex, and shows a stranger with a
-> perfectly valid key being turned away because nobody put it on the list.
+> **All four, as two real processes** —
+> [`examples/keys.rs`](crates/fectp/examples/keys.rs):
+>
+> ```bash
+> cargo run -p fectp --example keys -- serve            # prints its public key
+> cargo run -p fectp --example keys -- connect <key>    # another terminal
+> ```
+>
+> Two processes rather than two threads on purpose. A public key has to
+> *travel*, and faking that with a shared variable skips the step you actually
+> have to get right — so here it reaches the client through `argv`, as text you
+> copied. The first `connect` is **refused**: the server has no reason to trust
+> it yet, and prints the line to add to its allow-list.
 
 **What you get.** Both sides are authenticated, each as a distinct identity —
 and the responder authenticates the initiator from **message 1 alone**, so an
@@ -629,7 +637,7 @@ still apply.
 ### Examples
 
 ```bash
-cargo run -p fectp --example keys                        # identities, end to end
+cargo run -p fectp --example keys                        # identities: prints how to run it
 cargo run -p fectp --example echo  --features compress   # the shortest pair
 cargo run -p fectp --example mesh  --features compress   # many peers, one socket
 cargo run -p fectp --example tour  --features compress   # every documented snippet
