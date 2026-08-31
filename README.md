@@ -1,23 +1,30 @@
-# FECTP
+# FECTP — Fast Encrypted Compressed Transport Protocol
 
-**An encrypted transport that gets your data moving with as little delay as
-possible — small enough for a microcontroller, identical code on a server.**
+**Three things, in one pass over your data: it goes out encrypted, compressed
+for what it actually is, and with as little delay as possible.** Small enough
+for a microcontroller, identical code on a server.
 
-You hand it bytes, the peer gets those bytes. Encryption, framing, and the
-decision of whether compressing is even worth the CPU all happen underneath.
+You hand it bytes, the peer gets those bytes. Tell it what the bytes *are* and
+it compresses them properly — a general-purpose compressor manages 1.12x on
+4-channel sensor data, and FECTP manages **3.46x** on the same bytes.
 
 ```rust
-conn.send(b"hello", PayloadType::Opaque)?;
+conn.send(b"a status line", PayloadType::Opaque)?;        // just bytes
+conn.send(&samples, PayloadType::I16 { channels: 4 })?;   // 3.46x smaller
 let n = conn.recv(&mut buf)?;
 ```
+
+Encryption, compression, framing, and the decision of whether either is worth
+the CPU all happen underneath.
 
 ---
 
 ## Contents
 
 - [What it is for](#what-it-is-for) · [Why it's fast](#why-its-fast) · [Getting started](#getting-started)
-- [Security](#security) — [the three modes](#choosing-a-mode), [0-RTT](#data-in-the-first-packet), [resumption](#session-resumption)
-- [Sending](#sending-data) · [Typed payloads](#typed-payloads) · [Peers](#peers-not-clients-and-servers)
+- [**Compression**](#compression) — [declaring a shape](#declaring-what-your-data-is), [the numbers](#measured-against-gzip-and-zstandard), [when it does not run](#when-compression-does-not-run)
+- [**Security**](#security) — [the three modes](#choosing-a-mode), [0-RTT](#data-in-the-first-packet), [resumption](#session-resumption)
+- [Sending](#sending-data) · [Peers](#peers-not-clients-and-servers)
 - [**Limitations**](#limitations) — what this does not do, and what is not safe to assume
 - [Status](#status) · [Verification](#verification) · [Building](#building)
 
@@ -33,10 +40,14 @@ encryption, no framing, no way to know a message arrived.
 FECTP is for the middle: **an instrument, a sensor, or a service that needs to
 send data encrypted, right now, and may be running on 32 KiB of RAM.**
 
-- Data travels in the **very first packet** — no waiting for a handshake.
-- The core is `no_std`, allocates nothing, and measures **22 KiB** of flash.
-- Delivery is per-message: fire-and-forget by default, guaranteed when you ask.
-- It knows what your data *is*, so it can compress it properly.
+| | |
+|---|---|
+| **Fast** | Data travels in the **very first packet** — no round trips spent agreeing on keys. |
+| **Encrypted** | Noise, three modes, differing in what you must share beforehand rather than in how you use them. |
+| **Compressed** | It knows what your data *is*, so it compresses structured binary where gzip and Zstandard cannot. |
+| **Small** | The core is `no_std`, allocates nothing, and measures **22 KiB** of flash. |
+
+Delivery is per-message: fire-and-forget by default, guaranteed when you ask.
 
 **Not** for talking to a web browser, or anything expecting HTTP. This is a
 transport for software you control on both ends. See
@@ -144,6 +155,96 @@ let n = conn.recv(&mut buf)?;
 
 Full walkthrough, every snippet compiled and run:
 **[docs/USAGE.md](docs/USAGE.md)**.
+
+---
+
+## Compression
+
+A general-purpose compressor sees a stream of bytes and looks for repetition.
+Instrument data has plenty of structure and very little repetition: four
+interleaved ADC channels put unrelated values side by side, so gzip and
+Zstandard find almost nothing in it. **FECTP compresses it by being told what
+it is.**
+
+### Declaring what your data is
+
+```rust
+let shape = PayloadType::I16 { channels: 4 };   // 4 channels of 16-bit ADC
+conn.send(&samples, shape)?;
+conn.send(b"a status line", PayloadType::Opaque)?;   // just bytes
+```
+
+| `PayloadType` | For |
+|---|---|
+| `Opaque` | Just bytes. Always correct, and what to use when unsure. |
+| `I16 { channels }` | Interleaved 16-bit samples — an ADC or sensor stream. |
+| `I32 { channels }` | Interleaved 32-bit samples or counters. |
+| `Elements { size }` | Fixed-size elements, byte-transposed. `4` for `f32`, `8` for `f64`. |
+
+It is named at every send rather than set once on the connection, so a line
+says what it does without reference to a call somewhere else.
+
+### Measured against gzip and Zstandard
+
+8 KiB payloads; ratio is raw ÷ coded, so higher is better. FECTP's figures
+include its own 4-byte codec header.
+
+| dataset | gzip | Zstandard alone | **FECTP, shape declared** |
+|---|---|---|---|
+| sensor `i16` ×4, slowly varying | 1.19x | 1.12x | **3.46x** |
+| counter `i32` ×2, monotonic | 2.77x | 1.67x | **292.57x** |
+| `f32` calibration table | 1.56x | 1.14x | **8.21x** |
+| JSON log lines | 78.77x | **126.03x** | 126.03x |
+| random bytes | 1.00x | 1.00x | 1.00x |
+
+Three things to read out of it:
+
+- **On structured binary, knowing the shape beats a better entropy coder.**
+  Splitting by channel and delta-coding exposes redundancy that was there all
+  along and invisible to a byte-oriented compressor.
+- **On text, Zstandard already wins** — so FECTP just uses it, and the
+  transform stage gets out of the way.
+- **On incompressible data nothing helps**, and FECTP does not make it worse.
+
+### Two stages, and the second is optional
+
+The transform is plain integer code in the `no_std` core. Zstandard is a
+separate stage behind a feature flag, and needs a C toolchain. A peer with no
+room for a decoder still gets the transform:
+
+| | sensor `i16` ×4 | counter `i32` ×2 | `f32` table |
+|---|---|---|---|
+| transform only, `no_std` | 2.00x | 3.99x | 1.00x |
+| transform + Zstandard | **3.46x** | **292.57x** | **8.21x** |
+
+The `f32` row shows what the transform alone is and is not. Byte transposition
+changes no sizes — it groups the bytes so that an entropy coder can see the
+pattern. Delta coding on the integer rows shrinks the data by itself.
+
+Codecs are a registry, not a fixed set. Supporting a new data type means
+writing one transform: [docs/ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md).
+
+### When compression does not run
+
+Attempting it costs a few microseconds whether or not it works, so it is
+skipped whenever it would not pay:
+
+| Skipped when | Threshold |
+|---|---|
+| the payload is tiny | under **32 bytes**, no transform |
+| it is small | under **1 KiB**, no Zstandard |
+| it already looks compressed | detected, not guessed |
+| the peer cannot decompress | settled during the handshake |
+| coding has stopped working on this connection | it backs off, then retries periodically |
+
+And if compression runs and fails to shrink the payload, the original is sent.
+**A bad guess costs CPU, never bytes.**
+
+### It cannot cost you correctness
+
+Every codec is **lossless** — a payload comes back byte for byte, and samples
+one bit apart stay distinct. Declaring the *wrong* shape is safe too: the
+payload still round-trips, it just compresses badly.
 
 ---
 
@@ -370,45 +471,10 @@ flowchart LR
     E --> S(["UDP datagram<br/>+ 14-byte header"])
 ```
 
-The "worth it?" test is real, and the two steps have different thresholds. A
-transform runs from **32 bytes** up, because delta-coding a hundred samples
-already halves them. Zstandard waits for **1 KiB**, and is skipped anyway for a
-payload that already looks compressed or that the peer cannot decompress. If
-compression runs and fails to shrink the payload, the original is sent. **A bad
-guess costs CPU, never bytes.**
-
----
-
-## Typed payloads
-
-A general-purpose compressor sees only bytes. Tell it the shape and a transform
-runs first:
-
-```rust
-let shape = PayloadType::I16 { channels: 4 };   // 4 channels of 16-bit ADC
-conn.send(&samples, shape)?;
-conn.send(b"a status line", PayloadType::Opaque)?;   // just bytes
-```
-
-On 8 KiB of 4-channel, slowly varying `i16` — ordinary instrument data:
-
-| | Bytes on the wire |
-|---|---|
-| as `Opaque`, Zstandard alone | 7314 — **1.12x** |
-| declared as `I16 { channels: 4 }` | 2367 — **3.46x** |
-
-Interleaving is why: consecutive bytes come from different channels, so a
-byte-oriented compressor finds nothing. Splitting by channel first exposes the
-redundancy that was there all along. On monotonic `i32` counters the same trick
-reaches 292x.
-
-Every codec is **lossless** — a payload comes back byte for byte. The transforms
-are plain integer code in the `no_std` core, so a peer with no room for a
-Zstandard decoder still gets 2x on that data. Declaring the wrong shape costs
-compression, never correctness.
-
-Codecs are a registry, not a fixed set:
-[docs/ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md).
+`send` is not a thin wrapper around `sendto`, but every step that would not pay
+for itself is skipped — see
+[when compression does not run](#when-compression-does-not-run). What is left
+is one symmetric encryption and a 14-byte header.
 
 ---
 
