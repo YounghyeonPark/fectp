@@ -810,8 +810,14 @@ so that inputs such as alternating `i16::MIN`/`i16::MAX` round-trip exactly.
 Unsigned base-128, least significant group first; the high bit of each byte is
 a continuation flag. A `u32` occupies at most 5 bytes.
 
-A decoder MUST reject an encoding longer than 5 bytes and any final byte whose
-bits would overflow a `u32`.
+An encoder MUST emit the shortest encoding of a value.
+
+A decoder MUST reject an encoding longer than 5 bytes, any final byte whose
+bits would overflow a `u32`, and any encoding that is not the shortest for the
+value it carries — that is, a final byte of `0x00` preceded by at least one
+continuation byte. Without that last rule `[0x80, 0x00]` and `[0x00]` both mean
+zero, so a value has two spellings and two implementations can agree on the
+value while disagreeing about the bytes.
 
 #### 6.2.3 Byte transpose (id 3)
 

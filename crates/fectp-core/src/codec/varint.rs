@@ -43,9 +43,17 @@ pub fn encode(mut value: u32, out: &mut [u8]) -> Result<usize> {
 
 /// Reads a LEB128 varint, returning the value and the bytes consumed.
 ///
-/// Rejects encodings longer than [`MAX_LEN`] and any final byte that would
-/// overflow a `u32`, so a hostile payload cannot drive an unbounded loop or
-/// produce a value the encoder could not have written.
+/// Rejects encodings longer than [`MAX_LEN`], any final byte that would
+/// overflow a `u32`, and any encoding longer than the value needs — so a
+/// hostile payload cannot drive an unbounded loop, and every value has exactly
+/// one spelling.
+///
+/// That last rule is why a continuation byte may not be followed by a zero
+/// terminator: `[0x80, 0x00]` and `[0x00]` would otherwise both mean zero.
+/// [`encode`] never writes the longer form, so refusing it costs nothing here
+/// and keeps the transform a bijection — a decoder that accepts input its own
+/// encoder cannot produce is a place where two implementations agree on a
+/// value while disagreeing about the bytes.
 pub fn decode(input: &[u8]) -> Result<(u32, usize)> {
     let mut value: u32 = 0;
     for (n, &byte) in input.iter().take(MAX_LEN).enumerate() {
@@ -56,6 +64,11 @@ pub fn decode(input: &[u8]) -> Result<(u32, usize)> {
         }
         value |= payload << shift;
         if byte & 0x80 == 0 {
+            // A terminating byte carrying nothing means the bytes before it
+            // were enough: the encoder would have stopped one byte earlier.
+            if n > 0 && byte == 0 {
+                return Err(Error::BadHeader);
+            }
             return Ok((value, n + 1));
         }
     }

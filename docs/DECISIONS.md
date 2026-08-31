@@ -1017,6 +1017,65 @@ three commits after congestion control was built, and no extractor catches
 that. `docs/API.md` has its own guard for the constants it quotes; the claims
 in between are still held by nothing but reading them.
 
+## D30 — Every parser is driven with input nobody wrote
+
+**Problem**: every decoder in the protocol reads bytes chosen by someone else,
+and every test of them used bytes a person thought to write.
+
+That is the gap the ACK-window bug went through: it lost messages outright
+while 179 example-based tests passed. Example tests check the cases their
+author imagined. A parser's interesting inputs are the ones nobody imagined.
+
+**Decision**: `crates/fectp-core/tests/malformed_input.rs` drives every decoder
+with generated input — `proptest`, on stable, because `cargo-fuzz` needs
+nightly and libFuzzer and this project builds on Windows.
+
+`#![forbid(unsafe_code)]` already rules out memory corruption, so the two
+failures worth hunting are narrower than "a crash":
+
+- **A panic** is a remote denial of service. One socket and one loop serve
+  every peer ([D14](#d14--many-peers-share-one-socket-through-an-event-loop)), so a
+  datagram that panics the loop takes every other peer down with it.
+- **A wrong accept** is quieter and worse: a decoder returning `Ok` for bytes
+  its own encoder could not have produced hands the layer above a value it
+  will trust.
+
+So each property is one of three: it terminates without panicking on any input;
+what it accepts re-encodes to the same bytes, so no value has two spellings;
+what it accepts satisfies the invariant the next layer assumes. Frames get two
+more — a real frame with one byte flipped, and a real frame truncated — because
+those reach the arithmetic that peels the optional prefixes, which the header
+checks pass rather than reject.
+
+**What it found**: the varint decoder accepted overlong encodings. `[0x80,
+0x00]` decoded to zero, which the encoder writes as `[0x00]` — two spellings of
+one value, and it took both.
+
+The honest severity is low. The codec runs on plaintext `Session::open` has
+already authenticated, so reaching it needs the session key; this was
+malleability between implementations, not a way in. It is fixed because the
+encoder never emitted the longer form, so accepting it bought nothing, and
+because the same principle already governs the frame header, which rejects
+undefined flag bits rather than ignoring them
+([SPEC §4](SPEC.md)). Tightening now is easy; tightening after another
+implementation depends on the laxity is not.
+
+`docs/SPEC.md` §6.2.2 states the rule normatively and
+`tests/spec_conformance.rs` pins it, which it did not before — the section had
+a MUST and no test.
+
+**What it costs**: `proptest` as a dev-dependency, and a suite whose failures
+are random rather than reproducible. The second is handled: proptest records a
+failing seed in `tests/malformed_input.proptest-regressions`, which is checked
+in, and the case it found is also pinned as a named test so it does not depend
+on the seed file surviving.
+
+**What it does not cover**: the state machines. These properties are about
+parsers — one input, one output. The bug that motivated the file was in the
+retransmit queue's *sequence* of operations, which needs a stateful model to
+find, and that is not built. Nor is any of this a security audit; it is the
+part of one that can be automated.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

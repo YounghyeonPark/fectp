@@ -460,3 +460,46 @@ fn state_a_constrained_peer_must_hold() {
         size_of::<RetransmitQueue>()
     );
 }
+
+/// §6.2.2 — LEB128 is minimal, in both directions.
+///
+/// The spec states an encoder MUST emit the shortest encoding and a decoder
+/// MUST reject anything longer than the value needs. That rule is what makes
+/// the varint a bijection; without it an independent implementation could emit
+/// a padded encoding, interoperate here, and disagree with a third.
+#[test]
+fn leb128_has_exactly_one_encoding_per_value() {
+    use fectp_core::codec::varint;
+
+    // "A `u32` occupies at most 5 bytes."
+    assert_eq!(varint::MAX_LEN, 5, "SPEC.md §6.2.2 says at most 5 bytes");
+
+    // The boundary values, where the length changes.
+    for (value, expected_len) in [
+        (0u32, 1usize),
+        (127, 1),
+        (128, 2),
+        (16_383, 2),
+        (16_384, 3),
+        (u32::MAX, 5),
+    ] {
+        let mut buf = [0u8; varint::MAX_LEN];
+        let n = varint::encode(value, &mut buf).expect("encode");
+        assert_eq!(n, expected_len, "{value} must encode in {expected_len} bytes");
+        assert_eq!(varint::decode(&buf[..n]).expect("decode"), (value, n));
+    }
+
+    // "a final byte of `0x00` preceded by at least one continuation byte"
+    assert!(varint::decode(&[0x80, 0x00]).is_err(), "padded zero");
+    assert!(varint::decode(&[0x80, 0x80, 0x00]).is_err(), "twice-padded zero");
+    assert!(varint::decode(&[0xff, 0x00]).is_err(), "padded 127");
+
+    // "an encoding longer than 5 bytes"
+    assert!(varint::decode(&[0x80; 6]).is_err(), "six continuation bytes");
+
+    // "any final byte whose bits would overflow a `u32`"
+    assert!(
+        varint::decode(&[0xff, 0xff, 0xff, 0xff, 0x7f]).is_err(),
+        "a fifth byte carrying more than the four bits u32 has left"
+    );
+}

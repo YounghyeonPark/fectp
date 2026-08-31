@@ -412,7 +412,14 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-190 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+Every parser is now also driven with generated input
+([`tests/malformed_input.rs`](crates/fectp-core/tests/malformed_input.rs)):
+arbitrary bytes at each decoder, and real frames tampered with or truncated a
+byte at a time. It found the varint decoder accepting overlong encodings, so a
+value had two spellings. That one was reachable only from an authenticated
+peer, and it is the kind of thing hand-written tests do not think to try.
+
+208 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
 reliable delivery — plus the caller's buffers.
 
