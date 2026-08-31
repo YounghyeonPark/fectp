@@ -129,9 +129,25 @@ fn one_receive_method_covers_every_kind_of_message() {
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(&buf[..n], &samples[..], "coded payloads arrive decoded");
 
-    let big = vec![0x7Eu8; conn.max_payload() * 3];
+    // Incompressible, so this genuinely spans several frames. Filling with one
+    // repeated byte would code down to nothing whenever the `compress` feature
+    // is on, and the assertion below would pass without a fragment in sight.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let big: Vec<u8> = (0..conn.max_payload() * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    assert!(
+        big.len() > conn.max_payload(),
+        "this must not fit in one frame or it tests nothing"
+    );
     conn.send_reliable(&big, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(5)))
         .expect("send_reliable");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(n, big.len(), "fragmented messages arrive whole");
+    assert_eq!(&buf[..n], &big[..], "and unchanged");
 }

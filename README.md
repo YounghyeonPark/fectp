@@ -276,24 +276,55 @@ same codecs, same reliability. Only the way you open the connection changes.
 Each peer has its own long-term identity. Use this whenever the peers belong to
 different people or different organisations.
 
+An `Identity` is an X25519 keypair: a 32-byte secret you keep, and a 32-byte
+public key you hand out. Four steps, once per deployment.
+
+**1. Generate an identity and keep the secret.** Generating a fresh one on every
+start would change your public key every restart, and every peer would stop
+trusting you — so store it, exactly as an SSH host key is stored.
+
 ```rust
-// Listening side: hand out `identity.public()` however you like.
+// First run only.
 let identity = Identity::generate();
-let public_key = *identity.public();
-let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;
+save_to_flash(identity.secret());              // 32 bytes, keep private
 
-// Dialling side: needs the listener's public key in advance.
-let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
-```
-
-An `Identity` is an X25519 keypair. Persist the secret to keep the same
-identity across restarts, exactly as an SSH host key is persisted:
-
-```rust
-let secret = *identity.secret();       // 32 bytes — treat as a private key
-save_to_flash(&secret);
+// Every run after.
 let identity = Identity::from_secret(load_from_flash());
 ```
+
+**2. Print the public half so a person can copy it.** A `PeerKey` is a bare
+`[u8; 32]`, which is not something you paste into a config file:
+
+```rust
+let public_key = *identity.public();
+let shareable: String = public_key.iter().map(|b| format!("{b:02x}")).collect();
+println!("public key: {shareable}");          // 64 hex characters
+```
+
+**3. The dialling side puts that string in its configuration** and connects with
+it. That one string is the only thing that has to travel between the machines
+beforehand — the secret never moves.
+
+```rust
+let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;                  // listening
+let conn = Connection::connect(addr, &server_public, &Identity::generate())?; // dialling
+```
+
+**4. Decide who is allowed.** The handshake proves *which* key the peer holds.
+It does not decide whether that key may do anything — that is yours:
+
+```rust
+// `their_public` came from `endpoint.peer_public_key(peer)`.
+if !allow_list.contains(&their_public) {
+    server.disconnect(peer);
+}
+```
+
+> **A complete, runnable version of all four:**
+> `cargo run -p fectp --example keys` —
+> [`examples/keys.rs`](crates/fectp/examples/keys.rs). It stores identities in
+> real files, prints and re-parses the hex, and shows a stranger with a
+> perfectly valid key being turned away because nobody put it on the list.
 
 **What you get.** Both sides are authenticated, each as a distinct identity —
 and the responder authenticates the initiator from **message 1 alone**, so an
@@ -598,9 +629,10 @@ still apply.
 ### Examples
 
 ```bash
-cargo run -p fectp --example tour  --features compress   # every documented snippet
-cargo run -p fectp --example mesh  --features compress   # many peers, one socket
+cargo run -p fectp --example keys                        # identities, end to end
 cargo run -p fectp --example echo  --features compress   # the shortest pair
+cargo run -p fectp --example mesh  --features compress   # many peers, one socket
+cargo run -p fectp --example tour  --features compress   # every documented snippet
 ```
 
 ---

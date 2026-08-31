@@ -38,6 +38,7 @@ const PRELUDE: &str = r#"
     let mut server = Endpoint::bind_plain(addr)?;
     let mut node = Endpoint::bind_plain(addr)?;
     let peer = server.connect(addr, None)?;
+    let allow_list: Vec<[u8; 32]> = Vec::new();
 "#;
 
 fn main() {

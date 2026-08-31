@@ -84,7 +84,14 @@ impl Echo {
                     }
                     Ok(Event::Message { peer, data }) => {
                         if echo {
-                            let _ = server.send(peer, &data, PayloadType::Opaque);
+                            // `send` is one frame, so a message that arrived
+                            // split across several cannot go back that way.
+                            // Falling back rather than checking a limit first:
+                            // the frame size is the peer's to advertise and an
+                            // `Endpoint` does not expose it per peer.
+                            if server.send(peer, &data, PayloadType::Opaque).is_err() {
+                                let _ = server.send_reliable(peer, &data, PayloadType::Opaque);
+                            }
                         }
                         record.lock().expect("lock").messages.push(data);
                     }

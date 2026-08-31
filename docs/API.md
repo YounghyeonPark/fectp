@@ -219,6 +219,25 @@ badly.
 
 ---
 
+## Types you will need to name
+
+Most of the API takes these rather than returning them, so they are easy to
+miss until you want to store one.
+
+| | |
+|---|---|
+| `Identity` | An X25519 keypair. `generate()`, `from_secret([u8; 32])`, `public()`, `secret()`. |
+| `PeerKey` | A peer's 32-byte public key — a plain `[u8; 32]`. **This is the name to import**; method signatures spell the underlying type `PublicKey`. |
+| `PeerId` | Handle for one peer of an `Endpoint`. Returned by `connect` and carried by every `Event`. |
+| `Ticket` | A resumption ticket. `from_key([u8; 32])`, `key()`. Key material — store it like a secret. |
+| `PayloadType` | What the bytes are; see [above](#payloadtype). |
+
+A worked example of the first two — generating an identity, storing the secret,
+printing the public half as hex, parsing it back, and deciding which keys are
+allowed — is `cargo run -p fectp --example keys`.
+
+---
+
 ## Constants worth knowing
 
 | | | |
