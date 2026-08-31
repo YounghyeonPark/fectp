@@ -150,7 +150,7 @@ The simplest pair — one peer listens, one dials:
 
 ```rust
 use std::time::Duration;
-use fectp::{Connection, Endpoint, Event, Identity};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
 // ── Listening side ────────────────────────────────────────────────
 let identity = Identity::generate();
@@ -239,10 +239,11 @@ encryption — it is getting keys to where they need to be. So the modes differ 
 | **Pre-shared key** | one secret | yes | 1 × X25519 | a lab network, one closed system |
 | **Plaintext** | nothing | **no** | none | a cable you already trust, debugging |
 
+<!-- doc-check: skip -->
 ```rust
 Connection::connect(addr, &peer_public, &identity)?     // public key
-Connection::connect_psk(addr, b"shared-secret", t)?     // one secret
-Connection::connect_plain(addr, t)?                     // no crypto
+Connection::connect_psk(addr, b"shared-secret")?        // one secret
+Connection::connect_plain(addr)?                        // no crypto
 ```
 
 **Everything after the constructor is identical** — same `send`, same `recv`,
@@ -380,7 +381,7 @@ let key = *conn.resumption_ticket().expect("encrypted").key();   // 32 bytes
 save_to_flash(&key);
 
 // after a reset
-let conn = Connection::resume(addr, &Ticket::from_key(key), &peer_public, timeout)?;
+let conn = Connection::resume(addr, &Ticket::from_key(key), &peer_public)?;
 ```
 
 Authentication comes from the ticket, which an earlier authenticated handshake
@@ -411,7 +412,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-189 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+190 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with
 reliable delivery — plus the caller's buffers.
 
@@ -429,6 +430,14 @@ decryption fail, so a passing run exercises the entire handshake.
 in it is pinned by
 [`tests/spec_conformance.rs`](crates/fectp-core/tests/spec_conformance.rs), so
 the specification cannot quietly drift away from the code.
+
+The documentation is held to the same standard, because it drifted anyway.
+[`tests/doc_snippets.rs`](crates/fectp/tests/doc_snippets.rs) extracts every
+Rust block from this file and [docs/USAGE.md](docs/USAGE.md) and compiles it
+against the real API. Transcribing the examples into a runnable tour was not
+enough — a copy compiles happily while the original goes stale, which is how
+six calls kept passing a timeout argument that had been removed three commits
+earlier. The documents are now the input, so that failure is a build failure.
 
 An independent implementation needs an off-the-shelf Noise library — the two
 patterns used, `Noise_IK_25519_ChaChaPoly_BLAKE2s` and

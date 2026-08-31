@@ -974,6 +974,49 @@ and it was weighed against keeping `send(data)` as an opaque-only shortcut. The
 argument that settled it is that two calls with one obvious rule beat four
 calls with a rule about which is which.
 
+## D29 — The documentation is compiled, not transcribed
+
+**Problem**: the examples in `README.md` and `docs/USAGE.md` had drifted from
+the API and nothing noticed.
+
+Six calls still passed a timeout argument that [D26](#d26--every-way-of-connecting-has-the-same-timeout)
+had removed three commits earlier. One `match` arm was a field short of the
+`Event` it destructured, so a reader who pasted it got a compile error. The
+import list in the front-page example omitted a type the example used.
+
+This was not for want of testing. `examples/tour.rs` exists precisely to keep
+the guide honest, 189 tests passed throughout, and a documentation pass had
+just been made over these files. The reason it missed is structural: the tour
+is a **transcription**. It reimplements what the guide describes in a separate
+file, so the two are copies, and a copy compiles perfectly well after the
+original goes stale. It proves the API works. It cannot prove the guide
+describes it.
+
+**Decision**: `build.rs` extracts every ```` ```rust ```` block from those two
+documents and `tests/doc_snippets.rs` compiles them. The document is the input,
+so a snippet that no longer matches the API is a build failure.
+
+A fragment is written for a reader — `conn.send(..)` with no twenty lines
+above it — so each block is wrapped in a function with a prelude supplying the
+usual bindings. The functions are compiled and never called, so the prelude may
+bind a socket without cost, and an unreachable tail is expected rather than a
+defect.
+
+A block that illustrates rather than runs — a list of signatures, an enum's
+variants — opts out with `<!-- doc-check: skip -->` above its fence. An HTML
+comment because it is invisible on GitHub, where these files are read.
+
+**What it costs**: the prelude is a maintained list of names. A snippet that
+introduces a new variable needs a line added, and the failure mode is a build
+break on an unrelated change. That is the price of the check being a real
+compile rather than a pattern match, and a pattern match would not have caught
+the arity change, which is the bug that motivated this.
+
+**What it does not cover**: prose. "Not built: congestion control" survived
+three commits after congestion control was built, and no extractor catches
+that. `docs/API.md` has its own guard for the constants it quotes; the claims
+in between are still held by nothing but reading them.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

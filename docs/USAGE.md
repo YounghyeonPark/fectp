@@ -37,11 +37,11 @@ let conn = Connection::connect(addr, &server_public, &Identity::generate())?;
 let server = Endpoint::bind("0.0.0.0:4433", Identity::generate())?;
 
 // Pre-shared key
-let conn = Connection::connect_psk(addr, b"lab-instrument-7", timeout)?;
+let conn = Connection::connect_psk(addr, b"lab-instrument-7")?;
 let server = Endpoint::bind_psk("0.0.0.0:4433", b"lab-instrument-7")?;
 
 // Plaintext
-let conn = Connection::connect_plain(addr, timeout)?;
+let conn = Connection::connect_plain(addr)?;
 let server = Endpoint::bind_plain("0.0.0.0:4433")?;
 ```
 
@@ -357,7 +357,6 @@ save_to_flash(&key);
 use fectp::Ticket;
 let conn = Connection::resume(
     addr, &Ticket::from_key(load_from_flash()), &server_public,
-    Duration::from_secs(1),
 )?;
 ```
 
@@ -369,7 +368,7 @@ ticket fails — that is what stops a captured resumption request being replayed
 the ticket, cannot answer; the resume times out. Fall back:
 
 ```rust
-let conn = match Connection::resume(addr, &ticket, &server_public, timeout) {
+let conn = match Connection::resume(addr, &ticket, &server_public) {
     Ok(conn) => conn,
     Err(_) => Connection::connect(addr, &server_public, &identity)?,
 };
@@ -436,7 +435,7 @@ use fectp::{Event, Identity, Endpoint};
 let mut server = Endpoint::bind("0.0.0.0:4433", Identity::generate())?;
 loop {
     match server.poll(Some(Duration::from_millis(100)))? {
-        Event::Connected { peer, zero_rtt, resumed } => {
+        Event::Connected { peer, zero_rtt, resumed, .. } => {
             println!("{peer:?} connected (resumed: {resumed}), 0-RTT: {zero_rtt:?}");
         }
         Event::Message { peer, data } => {
@@ -486,6 +485,7 @@ defence against those is that FECTP compresses every message independently.
 
 ## Errors
 
+<!-- doc-check: skip -->
 ```rust
 pub enum Error {
     Closed,                      // the connection is over
