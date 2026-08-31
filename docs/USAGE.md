@@ -80,6 +80,66 @@ certificate authority and does no key discovery: distributing that key is your
 problem, the same way an SSH host key is. Ship it with the firmware, put it in a
 config file, print it on a label — but it has to arrive out of band.
 
+### Using them, start to finish
+
+An `Identity` is an X25519 keypair: a 32-byte secret you keep, and a 32-byte
+public key you hand out. Four steps, once per deployment.
+
+**1. Generate an identity and keep the secret.** Generating a fresh one on every
+start would change your public key every restart, and every peer would stop
+trusting you — so store it, exactly as an SSH host key is stored.
+
+```rust
+// First run only.
+let identity = Identity::generate();
+save_to_flash(identity.secret());              // 32 bytes, keep private
+
+// Every run after.
+let identity = Identity::from_secret(load_from_flash());
+```
+
+**2. Print the public half so a person can copy it.** A `PeerKey` is a bare
+`[u8; 32]`, which is not something you paste into a config file:
+
+```rust
+let public_key = *identity.public();
+let shareable: String = public_key.iter().map(|b| format!("{b:02x}")).collect();
+println!("public key: {shareable}");          // 64 hex characters
+```
+
+**3. The dialling side puts that string in its configuration** and connects with
+it. That one string is the only thing that has to travel between the machines
+beforehand — the secret never moves.
+
+```rust
+let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;                  // listening
+let conn = Connection::connect(addr, &server_public, &Identity::generate())?; // dialling
+```
+
+**4. Decide who is allowed.** The handshake proves *which* key the peer holds.
+It does not decide whether that key may do anything — that is yours:
+
+```rust
+// `their_public` came from `endpoint.peer_public_key(peer)`.
+if !allow_list.contains(&their_public) {
+    server.disconnect(peer);
+}
+```
+
+> **All four as two real processes**, runnable:
+> [`examples/keys.rs`](../crates/fectp/examples/keys.rs).
+>
+> ```bash
+> cargo run -p fectp --example keys -- serve            # prints its public key
+> cargo run -p fectp --example keys -- connect <key>    # another terminal
+> ```
+>
+> Two processes rather than two threads on purpose. A public key has to
+> *travel*, and faking that with a shared variable skips the step you actually
+> have to get right — so there it reaches the client through `argv`, as text you
+> copied. The first `connect` is **refused**: the server has no reason to trust
+> it yet, and prints the line to add to its allow-list.
+
 ### Where to keep the secret
 
 Two requirements, and nothing else: the same 32 bytes must be there after a
@@ -383,6 +443,40 @@ it. Changing the channel count then means changing one line.
 **Below 32 bytes no transform runs at all**, and a stream that repeatedly fails
 to compress stops being asked — so a wrong shape on incompressible data costs a
 few microseconds at the start and almost nothing after that.
+
+### Two stages, and the second is optional
+
+The transform is plain integer code in the `no_std` core. Zstandard is a
+separate stage behind a feature flag, and needs a C toolchain. A peer with no
+room for a decoder still gets the transform:
+
+| | sensor `i16` ×4 | counter `i32` ×2 | `f32` table |
+|---|---|---|---|
+| transform only, `no_std` | 2.00x | 3.99x | 1.00x |
+| transform + Zstandard | **3.46x** | **292.57x** | **8.21x** |
+
+The `f32` row shows what the transform alone is and is not. Byte transposition
+changes no sizes — it groups the bytes so that an entropy coder can see the
+pattern. Delta coding on the integer rows shrinks the data by itself.
+
+Codecs are a registry, not a fixed set. Supporting a new data type means
+writing one transform: [ADDING-A-CODEC.md](ADDING-A-CODEC.md).
+
+### When compression does not run
+
+Attempting it costs a few microseconds whether or not it works, so it is
+skipped whenever it would not pay:
+
+| Skipped when | Threshold |
+|---|---|
+| the payload is tiny | under **32 bytes**, no transform |
+| it is small | under **1 KiB**, no Zstandard |
+| it already looks compressed | detected, not guessed |
+| the peer cannot decompress | settled during the handshake |
+| coding has stopped working on this connection | it backs off, then retries periodically |
+
+And if compression runs and fails to shrink the payload, the original is sent.
+**A bad guess costs CPU, never bytes.**
 
 ## Resumption
 

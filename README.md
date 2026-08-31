@@ -22,11 +22,12 @@ the CPU all happen underneath.
 ## Contents
 
 - [What it is for](#what-it-is-for) · [Why it's fast](#why-its-fast) · [Getting started](#getting-started)
-- [**Compression**](#compression) — [declaring a shape](#declaring-what-your-data-is), [the numbers](#measured-against-gzip-and-zstandard), [when it does not run](#when-compression-does-not-run)
-- [**Security**](#security) — [the three modes](#choosing-a-mode), [0-RTT](#data-in-the-first-packet), [resumption](#session-resumption)
-- [Sending](#sending-data) · [Peers](#peers-not-clients-and-servers)
+- [**Compression**](#compression) · [**Security**](#security) · [Sending](#sending-data) · [Peers](#peers-not-clients-and-servers)
 - [**Limitations**](#limitations) — what this does not do, and what is not safe to assume
-- [Status](#status) · [Verification](#verification) · [Building](#building)
+- [Status](#status) · [Verification](#verification) · [Building](#building) · [Documentation](#documentation)
+
+Everything here is the short version. **[docs/USAGE.md](docs/USAGE.md)** is the
+task-by-task guide, and every snippet in both is compiled by the test suite.
 
 ---
 
@@ -91,7 +92,7 @@ some other way — the same bargain as an SSH host key.
 The handshake happens once per session, not per message. Afterwards each `send`
 is one symmetric encryption and a 14-byte header. A session lasts until you drop
 it; only losing it — a restart, a reboot, a new peer — costs another handshake,
-and [resumption](#session-resumption) cuts even that to a single X25519.
+and [resumption](docs/USAGE.md#resumption) cuts even that to a single X25519.
 
 ### Measured
 
@@ -160,34 +161,18 @@ Full walkthrough, every snippet compiled and run:
 
 ## Compression
 
-A general-purpose compressor sees a stream of bytes and looks for repetition.
-Instrument data has plenty of structure and very little repetition: four
-interleaved ADC channels put unrelated values side by side, so gzip and
-Zstandard find almost nothing in it. **FECTP compresses it by being told what
-it is.**
-
-### Declaring what your data is
+A general-purpose compressor sees bytes and looks for repetition. Instrument
+data has structure but little repetition — four interleaved ADC channels put
+unrelated values side by side — so gzip and Zstandard find almost nothing in it.
+**Tell FECTP what the bytes are and it compresses them properly.**
 
 ```rust
-let shape = PayloadType::I16 { channels: 4 };   // 4 channels of 16-bit ADC
-conn.send(&samples, shape)?;
-conn.send(b"a status line", PayloadType::Opaque)?;   // just bytes
+conn.send(&samples, PayloadType::I16 { channels: 4 })?;
+conn.send(b"a status line", PayloadType::Opaque)?;      // just bytes
 ```
 
-| `PayloadType` | For |
-|---|---|
-| `Opaque` | Just bytes. Always correct, and what to use when unsure. |
-| `I16 { channels }` | Interleaved 16-bit samples — an ADC or sensor stream. |
-| `I32 { channels }` | Interleaved 32-bit samples or counters. |
-| `Elements { size }` | Fixed-size elements, byte-transposed. `4` for `f32`, `8` for `f64`. |
-
-It is named at every send rather than set once on the connection, so a line
-says what it does without reference to a call somewhere else.
-
-### Measured against gzip and Zstandard
-
-8 KiB payloads; ratio is raw ÷ coded, so higher is better. FECTP's figures
-include its own 4-byte codec header.
+8 KiB payloads; ratio is raw ÷ coded, higher is better, FECTP's figures include
+its own 4-byte header:
 
 | dataset | gzip | Zstandard alone | **FECTP, shape declared** |
 |---|---|---|---|
@@ -197,276 +182,58 @@ include its own 4-byte codec header.
 | JSON log lines | 78.77x | **126.03x** | 126.03x |
 | random bytes | 1.00x | 1.00x | 1.00x |
 
-Three things to read out of it:
+**On structured binary, knowing the shape beats a better entropy coder.** On
+text Zstandard already wins, so FECTP uses it and the transform gets out of the
+way. On incompressible data nothing helps, and FECTP does not make it worse.
 
-- **On structured binary, knowing the shape beats a better entropy coder.**
-  Splitting by channel and delta-coding exposes redundancy that was there all
-  along and invisible to a byte-oriented compressor.
-- **On text, Zstandard already wins** — so FECTP just uses it, and the
-  transform stage gets out of the way.
-- **On incompressible data nothing helps**, and FECTP does not make it worse.
+Every codec is lossless, and declaring the *wrong* shape is safe — the payload
+still round-trips, it just compresses badly.
 
-### Two stages, and the second is optional
-
-The transform is plain integer code in the `no_std` core. Zstandard is a
-separate stage behind a feature flag, and needs a C toolchain. A peer with no
-room for a decoder still gets the transform:
-
-| | sensor `i16` ×4 | counter `i32` ×2 | `f32` table |
-|---|---|---|---|
-| transform only, `no_std` | 2.00x | 3.99x | 1.00x |
-| transform + Zstandard | **3.46x** | **292.57x** | **8.21x** |
-
-The `f32` row shows what the transform alone is and is not. Byte transposition
-changes no sizes — it groups the bytes so that an entropy coder can see the
-pattern. Delta coding on the integer rows shrinks the data by itself.
-
-Codecs are a registry, not a fixed set. Supporting a new data type means
-writing one transform: [docs/ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md).
-
-### When compression does not run
-
-Attempting it costs a few microseconds whether or not it works, so it is
-skipped whenever it would not pay:
-
-| Skipped when | Threshold |
-|---|---|
-| the payload is tiny | under **32 bytes**, no transform |
-| it is small | under **1 KiB**, no Zstandard |
-| it already looks compressed | detected, not guessed |
-| the peer cannot decompress | settled during the handshake |
-| coding has stopped working on this connection | it backs off, then retries periodically |
-
-And if compression runs and fails to shrink the payload, the original is sent.
-**A bad guess costs CPU, never bytes.**
-
-### It cannot cost you correctness
-
-Every codec is **lossless** — a payload comes back byte for byte, and samples
-one bit apart stay distinct. Declaring the *wrong* shape is safe too: the
-payload still round-trips, it just compresses badly.
+> The four shapes, what runs without a Zstandard decoder, and when compression
+> is skipped: **[USAGE.md § Typed payloads](docs/USAGE.md#typed-payloads)**.
+> Adding a shape: **[ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md)**.
 
 ---
 
 ## Security
 
-### Choosing a mode
+Three modes. They differ in **what has to be shared beforehand**, not in how you
+use them — everything after the constructor is identical.
 
-The friction is never the encryption — it is getting keys to where they need to
-be. So the modes differ in **what has to be shared beforehand**, not in how you
-use them.
-
-| Mode | You must share | Encrypted | Authenticated | Handshake | Suits |
-|---|---|---|---|---|---|
-| **Public key** | the peer's public key | yes | both sides, individually | 4 × X25519 | the internet, several organisations |
-| **Pre-shared key** | one secret | yes | only as "a holder of the secret" | 1 × X25519 | a lab network, one closed system |
-| **Plaintext** | nothing | **no** | **no** | none | a cable you already trust, debugging |
-
-**Everything after the constructor is identical** — same `send`, same `recv`,
-same codecs, same reliability. Only the way you open the connection changes.
-
-> **Modes never interoperate.** Their frame types do not overlap, so a peer in
-> one mode simply does not understand a peer in another. There is nothing on the
-> wire to negotiate, and therefore **nothing to downgrade**.
-
----
-
-### Public key — `Noise_IK_25519_ChaChaPoly_BLAKE2s`
-
-Each peer has its own long-term identity. Use this whenever the peers belong to
-different people or different organisations.
-
-An `Identity` is an X25519 keypair: a 32-byte secret you keep, and a 32-byte
-public key you hand out. Four steps, once per deployment.
-
-**1. Generate an identity and keep the secret.** Generating a fresh one on every
-start would change your public key every restart, and every peer would stop
-trusting you — so store it, exactly as an SSH host key is stored.
+| Mode | You must share | Encrypted | Authenticated | Handshake |
+|---|---|---|---|---|
+| **Public key** | the peer's public key | yes | both sides, individually | 4 × X25519 |
+| **Pre-shared key** | one secret | yes | as *a* holder of the secret | 1 × X25519 |
+| **Plaintext** | nothing | **no** | **no** | none |
 
 ```rust
-// First run only.
-let identity = Identity::generate();
-save_to_flash(identity.secret());              // 32 bytes, keep private
-
-// Every run after.
-let identity = Identity::from_secret(load_from_flash());
+let conn = Connection::connect(addr, &server_public, &identity)?;   // public key
+let conn = Connection::connect_psk(addr, b"lab-instrument-7")?;     // one secret
+let conn = Connection::connect_plain(addr)?;                        // no crypto
 ```
 
-**2. Print the public half so a person can copy it.** A `PeerKey` is a bare
-`[u8; 32]`, which is not something you paste into a config file:
+`X25519` · `ChaCha20-Poly1305` · `BLAKE2s-256`, in the
+[Noise](https://noiseprotocol.org/) framework, validated against an independent
+implementation in both roles. Overhead is **30 bytes** per frame — a 14-byte
+authenticated header and a 16-byte tag — or 14 in plaintext mode.
 
-```rust
-let public_key = *identity.public();
-let shareable: String = public_key.iter().map(|b| format!("{b:02x}")).collect();
-println!("public key: {shareable}");          // 64 hex characters
-```
+Three things that catch people out:
 
-**3. The dialling side puts that string in its configuration** and connects with
-it. That one string is the only thing that has to travel between the machines
-beforehand — the secret never moves.
+- **Modes never interoperate.** Their frame types are disjoint, so there is
+  nothing on the wire to negotiate and **nothing to downgrade**.
+- **A pre-shared key is symmetric.** Every holder can impersonate every other,
+  so it belongs inside one system and not across organisations.
+- **Data sent with the handshake is replayable** and has no forward secrecy.
+  Idempotent payloads only — a sensor reading, never "open the valve".
 
-```rust
-let mut server = Endpoint::bind("0.0.0.0:4433", identity)?;                  // listening
-let conn = Connection::connect(addr, &server_public, &Identity::generate())?; // dialling
-```
-
-**4. Decide who is allowed.** The handshake proves *which* key the peer holds.
-It does not decide whether that key may do anything — that is yours:
-
-```rust
-// `their_public` came from `endpoint.peer_public_key(peer)`.
-if !allow_list.contains(&their_public) {
-    server.disconnect(peer);
-}
-```
-
-> **All four, as two real processes** —
-> [`examples/keys.rs`](crates/fectp/examples/keys.rs):
+> **Working with keys** — generating an identity, storing the secret, handing
+> out the public half, and deciding which peers are allowed:
+> **[USAGE.md § Identities and keys](docs/USAGE.md#identities-and-keys)**, and a
+> runnable two-process version in
+> [`examples/keys.rs`](crates/fectp/examples/keys.rs).
 >
-> ```bash
-> cargo run -p fectp --example keys -- serve            # prints its public key
-> cargo run -p fectp --example keys -- connect <key>    # another terminal
-> ```
->
-> Two processes rather than two threads on purpose. A public key has to
-> *travel*, and faking that with a shared variable skips the step you actually
-> have to get right — so here it reaches the client through `argv`, as text you
-> copied. The first `connect` is **refused**: the server has no reason to trust
-> it yet, and prints the line to add to its allow-list.
-
-**What you get.** Both sides are authenticated, each as a distinct identity —
-and the responder authenticates the initiator from **message 1 alone**, so an
-unknown peer is rejected before it can send a second packet. Once the handshake
-completes the session has forward secrecy: recovering a static secret later does
-not decrypt traffic already captured.
-
-**What it does not do.** It does not distribute the public key. You must already
-have it, by whatever means you trust — configuration, provisioning, a QR code on
-the device. A peer who accepts *any* key on first sight has authenticated
-nothing.
-
----
-
-### Pre-shared key — `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`
-
-One secret both sides already hold. No per-peer keys to distribute.
-
-```rust
-let mut server = Endpoint::bind_psk("0.0.0.0:4433", b"lab-instrument-7")?;
-let conn = Connection::connect_psk(addr, b"lab-instrument-7")?;
-```
-
-The secret may be any length; it is hashed into the key material
-(`BLAKE2s-256("fectp/1 psk" || secret)`), so a human-chosen string is accepted
-but is only as strong as its entropy.
-
-**What you get.** Full encryption and **forward secrecy** — both peers still
-contribute fresh ephemeral keys, so a leaked secret does not decrypt past
-traffic. One X25519 per side instead of four, which is why this is the mode a
-microcontroller usually wants. Unlike a resumption ticket, a configured
-pre-shared key is *not* consumed on use; it is long-lived by definition.
-
-**What it does not do.** The secret is symmetric: **every holder can impersonate
-every other holder.** There is no way to tell two peers apart, revoke one, or
-prove which of them sent something. That is fine inside one administrative
-domain and wrong across several — there, use public-key mode.
-
----
-
-### Plaintext — no cryptography at all
-
-```rust
-let mut server = Endpoint::bind_plain("0.0.0.0:4433")?;
-let conn = Connection::connect_plain(addr)?;
-```
-
-Framing, reliability, fragmentation and codecs all still work. The 14-byte
-header is there; the 16-byte authentication tag is not, because there is nothing
-to authenticate.
-
-**Anyone on the path can read, forge, or alter every byte.** No encryption, no
-authentication, no identities. It exists for links that are physically trusted
-and for development, where a readable packet capture is worth more than
-confidentiality.
-
-**It is not the remedy for awkward key distribution.** Encrypting a frame costs
-about a microsecond; distribution is what costs anything, and pre-shared-key
-mode removes that without giving up encryption.
-
----
-
-### Data in the first packet
-
-Both encrypted modes can carry a payload in the opening handshake message, so
-the peer has your data after **zero** round trips:
-
-```rust
-let conn = Connection::connect_and_send(addr, &server_public, &identity, &reading)?;
-```
-
-> **This data is replayable.** There is no replay protection on the first
-> message, so an attacker who captures the packet can send it again later, and
-> the responder cannot tell. It also has **no forward secrecy** — it is
-> protected only by the responder's static key.
->
-> Put only idempotent, non-sensitive data here: a sensor reading, a status
-> line. Never a command, a transfer, or anything that must not happen twice.
-
-Everything after the handshake has both replay protection and forward secrecy.
-0-RTT saves exactly one round trip, once, per connection — worth it for a device
-that wakes, reports and sleeps, and worth nothing for a long-lived stream.
-
----
-
-### Session resumption
-
-A full handshake is four X25519 operations per side — roughly a hundred
-milliseconds on a microcontroller, paid again after **every reset**. Resumption
-costs one:
-
-```rust
-let key = *conn.resumption_ticket().expect("encrypted").key();   // 32 bytes
-save_to_flash(&key);
-
-// after a reset
-let conn = Connection::resume(addr, &Ticket::from_key(key), &peer_public)?;
-```
-
-**What you get.** Authentication carries over from the earlier authenticated
-handshake that issued the ticket, so identities stay bound. Fresh ephemerals are
-still exchanged, so a resumed session keeps forward secrecy. Tickets are single
-use — each handshake issues the next — which is what stops a captured resumption
-request being replayed.
-
-**What it does not do.** The ticket **is key material**: store it as carefully as
-the identity secret. Tickets have no expiry, only a bound of 256 per responder,
-evicted oldest-first. And a server that restarted or evicted yours cannot
-answer, so always keep the full handshake as a fallback.
-
----
-
-### What is under all of it
-
-`X25519` · `ChaCha20-Poly1305` · `BLAKE2s-256` · `HKDF`, in the
-[Noise](https://noiseprotocol.org/) framework. The handshake is validated
-against an independent implementation in both roles.
-
-```
- byte  0        1          2 – 5              6 – 13          14 –
-     ┌─────────┬─────────┬──────────────┬──────────────────┬───────────┐
-     │ ver·type│  flags  │  session id  │ sequence number  │  payload  │
-     └─────────┴─────────┴──────────────┴──────────────────┴───────────┘
-     └──────────────── 14 bytes, always ─────────────────────┘
-```
-
-Fixed size, no length fields: parsing a hostile packet involves no arithmetic
-before it is authenticated. That is deliberate — a microcontroller has no ASLR,
-no NX bit and no MMU to contain a mistake there, and the core carries
-`#![forbid(unsafe_code)]` so none of this parsing can reach for a raw pointer
-even by accident. The whole header is authenticated along with the payload, so
-changing any byte of it makes decryption fail.
-
-Overhead is **30 bytes** per frame (14 header + 16 tag), or 14 in plaintext mode.
+> Mode-by-mode detail, 0-RTT and session resumption:
+> **[USAGE.md](docs/USAGE.md)**. Wire format: **[SPEC.md](docs/SPEC.md)**.
 
 ---
 
@@ -480,25 +247,22 @@ conn.send_reliable(b"command", PayloadType::Opaque)?;   // resent until acknowle
 conn.flush(Duration::from_secs(2))?;                    // wait for what is outstanding
 ```
 
-`send` returns as soon as the datagram reaches the kernel. It never waits for an
-acknowledgement and never batches the way a stream protocol does.
+`send` returns as soon as the datagram reaches the kernel — no acknowledgement,
+no batching, one frame only.
 
 **`send_reliable` takes any size.** A payload above the frame limit is split
 across frames, each retransmitted on its own, and arrives as one message. There
-is no separate call and no size for you to compare against — the limit depends
-on what the peer advertised, so you could not know it in advance anyway.
+is no separate call and **no size for you to compare against** — the limit is
+whatever the peer advertised, so you could not know it in advance anyway.
 
-```rust
-conn.send_reliable(&recording, PayloadType::Opaque)?;   // any size
-conn.flush(Duration::from_secs(10))?;                   // wait for it to arrive
-```
-
-`send` stays one frame only: splitting something that cannot be retransmitted
-fails whenever any piece goes missing, which for 200 fragments at 1% loss is
-nine times out of ten.
+`send` stays one frame because splitting something that cannot be retransmitted
+fails whenever any piece goes missing: for 200 fragments at 1% loss, nine times
+out of ten.
 
 Reliable delivery is deliberately **not ordered** — see
-[Limitations](#limitations).
+[Limitations](#limitations). Driving retransmission, waiting for delivery, and
+what to do when the window is full:
+**[USAGE.md § Reliable delivery](docs/USAGE.md#reliable-delivery)**.
 
 ### What happens to a message
 
@@ -512,7 +276,7 @@ flowchart LR
 
 `send` is not a thin wrapper around `sendto`, but every step that would not pay
 for itself is skipped — see
-[when compression does not run](#when-compression-does-not-run). What is left
+[USAGE.md](docs/USAGE.md#typed-payloads). What is left
 is one symmetric encryption and a 14-byte header.
 
 ---
@@ -554,7 +318,7 @@ records what each one would cost to change.
 | | |
 |---|---|
 | **Not audited** | See [Status](#status). This is the one that matters most. |
-| **0-RTT data is replayable** | And has no forward secrecy. Idempotent payloads only — see [above](#data-in-the-first-packet). |
+| **0-RTT data is replayable** | And has no forward secrecy. Idempotent payloads only — see [USAGE.md](docs/USAGE.md#sending-with-the-handshake). |
 | **A pre-shared key is symmetric** | Every holder can impersonate every other. One administrative domain only. |
 | **Plaintext mode is genuinely plaintext** | Read, forged and altered at will by anyone on the path. |
 | **A resumption ticket is key material** | Store it as carefully as an identity secret. No expiry; 256 per responder, evicted oldest-first. |
