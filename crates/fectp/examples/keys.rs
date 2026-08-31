@@ -60,7 +60,7 @@ fn main() -> fectp::Result<()> {
             println!("     the server has no reason to trust it yet, and says so.\n");
             println!("  3. Add the client's key to the allow-list, as the output tells you.");
             println!("     Run step 2 again and it works.\n");
-            println!("Files live in {}", dir().display());
+            println!("Files live in {}", key_dir().display());
             Ok(())
         }
     }
@@ -68,7 +68,7 @@ fn main() -> fectp::Result<()> {
 
 /// The server: holds an identity, and a list of clients it will talk to.
 fn serve() -> fectp::Result<()> {
-    let identity = load_or_create(&dir().join("server.key"))?;
+    let identity = load_or_create(&key_dir().join("server.key"))?;
     let public = *identity.public();
 
     println!("server listening on {ADDR}");
@@ -128,7 +128,7 @@ fn connect(server_key: &str) -> fectp::Result<()> {
         return Ok(());
     };
 
-    let identity = load_or_create(&dir().join("client.key"))?;
+    let identity = load_or_create(&key_dir().join("client.key"))?;
     println!("client public key: {}", to_hex(identity.public()));
     println!("connecting to {ADDR}\n");
 
@@ -149,12 +149,41 @@ fn connect(server_key: &str) -> fectp::Result<()> {
 
 // ---------------------------------------------------------------- storage ---
 
-fn dir() -> PathBuf {
-    std::env::temp_dir().join("fectp-keys-example")
+/// Where the keys live.
+///
+/// **Not** the temporary directory, which is where an example is tempted to put
+/// them and where a cleaner will one day delete them — taking the identity, and
+/// every peer's trust in it, with it. A long-lived key belongs somewhere the
+/// operating system expects long-lived per-user state:
+///
+/// | | |
+/// |---|---|
+/// | Linux, BSD | `$XDG_CONFIG_HOME/fectp-example`, else `~/.config/fectp-example` |
+/// | macOS | the same; `~/Library/Application Support` is the platform convention |
+/// | Windows | `%APPDATA%\fectp-example` |
+///
+/// A system service is different again — `/etc/<service>` or a flash partition,
+/// owned by the account the service runs as. `FECTP_KEY_DIR` overrides all of
+/// it, which is what makes this testable and what a deployment would set.
+fn key_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FECTP_KEY_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+
+    // Falling back to the working directory rather than to a temporary one: a
+    // key that quietly vanishes is worse than one in an awkward place.
+    base.unwrap_or_else(|| PathBuf::from(".")).join("fectp-example")
 }
 
+
 fn allow_list_path() -> PathBuf {
-    dir().join("allowed-clients.txt")
+    key_dir().join("allowed-clients.txt")
 }
 
 /// Reads the permitted client keys: one 64-character hex line each.
@@ -182,13 +211,17 @@ fn load_allow_list() -> fectp::Result<HashSet<PeerKey>> {
 /// public half is derived from it, so nothing else needs storing.
 fn load_or_create(path: &Path) -> fectp::Result<Identity> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(Error::Io)?;
+        create_private_dir(parent)?;
     }
     match fs::read(path) {
         Ok(bytes) => {
-            let secret: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| Error::Io(std::io::Error::other("key file is not 32 bytes")))?;
+            check_permissions(path)?;
+            let secret: [u8; 32] = bytes.try_into().map_err(|_| {
+                Error::Io(std::io::Error::other(format!(
+                    "{} is not 32 bytes; it is not a key file",
+                    path.display()
+                )))
+            })?;
             Ok(Identity::from_secret(secret))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -201,17 +234,74 @@ fn load_or_create(path: &Path) -> fectp::Result<Identity> {
     }
 }
 
-/// Writes a secret key, readable only by its owner where the platform allows.
-fn write_secret(path: &Path, secret: &[u8; 32]) -> fectp::Result<()> {
-    fs::write(path, secret).map_err(Error::Io)?;
-    // A key file the whole machine can read is not much of a secret. Unix has a
-    // mode for that; the Windows equivalent is an ACL, which is more than an
-    // example should be doing.
+/// Refuses a key file that other accounts on the machine can read.
+///
+/// `ssh` does exactly this and for the same reason: a secret whose permissions
+/// drifted is still a secret you are relying on, and the only moment anyone
+/// will notice is the one where something refuses to start. Failing here is
+/// loud and cheap; failing to notice is neither.
+fn check_permissions(path: &Path) -> fectp::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(Error::Io)?;
+        let mode = fs::metadata(path).map_err(Error::Io)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(Error::Io(std::io::Error::other(format!(
+                "{} is readable by other users (mode {:o}); run: chmod 600 {}",
+                path.display(),
+                mode & 0o777,
+                path.display()
+            ))));
+        }
     }
+    // On Windows the equivalent is an ACL check. Files created under %APPDATA%
+    // inherit an ACL granting only the owning user and administrators, which is
+    // the intended outcome here; verifying it needs Win32 calls that would be
+    // the bulk of this example. A service that must be sure should check.
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Creates a directory only its owner may enter.
+fn create_private_dir(path: &Path) -> fectp::Result<()> {
+    fs::create_dir_all(path).map_err(Error::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(Error::Io)?;
+    }
+    Ok(())
+}
+
+/// Writes a secret key so that a crash cannot leave half of one behind.
+///
+/// Write to a temporary name, restrict it, then rename over the target: rename
+/// within a directory is atomic, so a reader sees either the old key or the new
+/// one. Writing in place risks a truncated file, and a truncated key file is an
+/// identity that no longer exists.
+///
+/// The permissions go on **before** the rename, so the secret is never briefly
+/// world-readable at its real name.
+fn write_secret(path: &Path, secret: &[u8; 32]) -> fectp::Result<()> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, secret).map_err(Error::Io)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).map_err(Error::Io)?;
+    }
+
+    // Windows will not rename onto an existing file; nothing is lost by
+    // removing it first, because this path only runs when there was no key.
+    #[cfg(windows)]
+    let _ = fs::remove_file(path);
+
+    fs::rename(&temporary, path).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        Error::Io(e)
+    })?;
     Ok(())
 }
 

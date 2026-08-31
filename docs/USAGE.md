@@ -80,6 +80,49 @@ certificate authority and does no key discovery: distributing that key is your
 problem, the same way an SSH host key is. Ship it with the firmware, put it in a
 config file, print it on a label — but it has to arrive out of band.
 
+### Where to keep the secret
+
+Two requirements, and nothing else: the same 32 bytes must be there after a
+restart, and nothing else may read them. Miss the first and your public key
+changes on every boot, so every peer stops trusting you. Miss the second and
+anyone who can read the file can *be* you.
+
+| | |
+|---|---|
+| Linux, BSD service | `/etc/<service>/identity.key`, owned by the service account, mode `600` |
+| Linux, BSD per-user | `$XDG_CONFIG_HOME/<app>`, else `~/.config/<app>` |
+| macOS | `~/Library/Application Support/<app>` |
+| Windows | `%APPDATA%\<app>` — files there inherit an ACL granting only the owner and administrators |
+| Microcontroller | A flash region the application does not rewrite. Better, one the bootloader write-protects after provisioning. |
+| Cloud | KMS, Vault, or the platform's secrets manager, read at start into memory |
+
+**Do not** hardcode the secret in source, commit it, pass it in an environment
+variable that shows up in `ps`, or leave it in a temporary directory — a cleaner
+will eventually delete it, and the identity with it. And do not call
+`Identity::generate()` on every start unless a fresh identity every boot is what
+you actually want.
+
+Two habits worth copying from `ssh`, both in
+[`examples/keys.rs`](../crates/fectp/examples/keys.rs):
+
+- **Refuse a key file others can read.** Check the mode on load and fail loudly.
+  Permissions drift, and the moment you find out should not be an incident.
+- **Write atomically** — a temporary name, restricted, then renamed over the
+  target. Writing in place risks a truncated file, and a truncated key file is
+  an identity that no longer exists.
+
+```rust
+let secret = *identity.secret();
+// ...store it by whichever route above...
+let identity = Identity::from_secret(secret);
+```
+
+**The secret must be in your process's memory.** `Identity::from_secret` takes
+the raw 32 bytes and the handshake performs its own Diffie-Hellman, so a secure
+element or HSM that never releases the key — the whole point of one — cannot be
+used without a change to `fectp-core`. If key isolation is a requirement, that
+is a gap to know about before building on this.
+
 ## The shortest working pair
 
 Endpoint:

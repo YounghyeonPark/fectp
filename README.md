@@ -560,6 +560,7 @@ records what each one would cost to change.
 | **A resumption ticket is key material** | Store it as carefully as an identity secret. No expiry; 256 per responder, evicted oldest-first. |
 | **No post-quantum option** | X25519 only. A PQC suite would be a new protocol version, not a negotiation. |
 | **Public keys are your problem** | The protocol authenticates a key you already trust. Getting it to you is out of scope. |
+| **The secret must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake does its own Diffie-Hellman, so a secure element or HSM that never releases the key cannot be used without a change to `fectp-core`. |
 
 ### Delivery
 
