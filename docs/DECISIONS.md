@@ -1073,8 +1073,9 @@ on the seed file surviving.
 **What it does not cover**: the state machines. These properties are about
 parsers — one input, one output. The bug that motivated the file was in the
 retransmit queue's *sequence* of operations, which needs a stateful model to
-find, and that is not built. Nor is any of this a security audit; it is the
-part of one that can be automated.
+find. That is [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds).
+Nor is any of this a security audit; it is the part of one that can be
+automated.
 
 ## D31 — The handshake is retransmitted, like everything else
 
@@ -1227,6 +1228,59 @@ pair, so it is a new handshake and costs the four operations. That is bounded
 only by the rate limit of D32. Distinguishing it would need a cookie exchange,
 and a cookie costs the round trip that carrying data in the first packet exists
 to save.
+
+## D34 — The sequence a bug needs is not always one a generator finds
+
+**Problem**: [D30](#d30--every-parser-is-driven-with-input-nobody-wrote) said
+what it did not cover — the state machines — and named the ACK-window bug as
+the thing that got through because of it. This is that gap.
+
+`tests/reliability_model.rs` drives the sender and receiver against each other
+through generated orderings: send, lose selectively, deliver, acknowledge, lose
+the acknowledgement, let time pass. It checks that nothing is delivered twice,
+that nothing is acknowledged that never arrived, and that nothing is discarded
+as a duplicate that was not one.
+
+**The generated sequences do not find the original bug.** That is worth saying
+plainly, because four versions of this file were written on the assumption that
+they would.
+
+- The first modelled loss per *step* — "this round arrives" — which cannot
+  express one message failing while everything around it succeeds, since the
+  moment a round succeeds the stuck message is delivered with the rest. Loss is
+  per message now.
+- The second asserted "every message is delivered or explicitly given up on".
+  Being given up on is the *visible half* of the failure, not an acceptable
+  outcome, so the property tolerated exactly what it was meant to catch. The
+  precise claim is that a message discarded as a duplicate must actually be
+  one.
+- The third had the right property and still passed, so the state was measured
+  rather than reasoned about: the sequences run **32** identifiers past an
+  outstanding message, the slot count, where the failure begins at **64**. A
+  throwaway harness reached it, at two orders of magnitude more steps than a
+  test suite can afford.
+
+**Decision**: keep the properties, and add a directed test beside them.
+Random search is good at states nobody thought of and bad at deep ones. The
+ACK-window failure has a known shape — one message that never arrives while
+ordinary traffic keeps cycling around it — so
+`a_sender_may_not_outrun_what_the_receiver_can_still_name` constructs it. With
+the guard removed it fails, reporting the sender 192 identifiers ahead of a
+message the receiver could reach back only 64 for. With the guard it passes.
+That is the discrimination the properties do not provide.
+
+The diagnostic that measured the reach is checked in, ignored by default. A
+generator that stops short of the state it is aimed at cannot fail however
+correct its properties are, and there is no way to tell by reading it.
+
+**What it costs**: the properties are worth less than they look. They are
+genuine coverage of ordering, duplication and acknowledgement, and they are not
+a substitute for knowing where the hard states are. The honest summary is that
+the directed test is what protects this particular bug and the properties
+protect the ordinary cases around it.
+
+**What it does not cover**: the fragment reassembly and congestion windows have
+their own sequences and no model of either. Nothing here is a security audit.
 
 ## Not carried over
 

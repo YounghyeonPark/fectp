@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-219 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+224 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 
@@ -384,6 +384,7 @@ already failed somewhere.
 | The handshake | [`interop.rs`](crates/fectp-core/tests/interop.rs) runs it against [`snow`](https://docs.rs/snow), an independent Noise implementation, **in both roles** | Any divergence in the key schedule, transcript hash, HMAC or HKDF makes the other side's decryption fail |
 | The specification | [`spec_conformance.rs`](crates/fectp-core/tests/spec_conformance.rs) pins every constant [SPEC.md](docs/SPEC.md) states | A spec that drifts is worse than none — an independent implementation would fail and nothing would catch it |
 | The parsers | [`malformed_input.rs`](crates/fectp-core/tests/malformed_input.rs) puts arbitrary bytes through each decoder, and tampers with or truncates real frames | It found the varint decoder accepting overlong encodings, so a value had two spellings |
+| The reliability layer | [`reliability_model.rs`](crates/fectp-core/tests/reliability_model.rs) drives sender against receiver through generated orderings, plus a directed test for the ACK-window failure | Every operation was individually correct; the bug was in the sequence |
 | The documentation | [`doc_snippets.rs`](crates/fectp/tests/doc_snippets.rs) extracts every Rust block from this file and [USAGE.md](docs/USAGE.md) and compiles it | A hand-written tour is a *copy*: it compiles happily while the original goes stale, which is how six calls kept passing an argument removed three commits earlier |
 
 All of it runs on every push — [`ci.yml`](.github/workflows/ci.yml) — across

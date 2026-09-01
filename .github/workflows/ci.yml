@@ -61,6 +61,8 @@ jobs:
         run: cargo test -p fectp-core --test spec_conformance
       - name: parsers survive generated input
         run: cargo test -p fectp-core --test malformed_input
+      - name: the reliability layer survives generated orderings
+        run: cargo test -p fectp-core --test reliability_model
       - name: every documented flow runs
         run: cargo run -p fectp --example tour --features compress
       - name: documentation links resolve
