@@ -563,7 +563,6 @@ These are unimplemented, not overlooked.
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
 | **Keys must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake performs its own Diffie-Hellman. | A secure element or HSM that never releases the key — the whole point of one — cannot be used without a trait for the DH. Relevant on exactly the microcontrollers this protocol targets. |
-| **A lying length prefix** | A padded frame whose `length` field exceeds its plaintext is refused by `open`, and nothing tests that it is. | Reaching it needs a frame sealed with a false length, which only a peer holding the session key could produce — `seal` writes the true one, and tampering breaks the AEAD first. Testable only from inside the crate. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -1478,12 +1477,49 @@ padding had no model. It has four example tests and the gap was elsewhere —
 worth recording because the wrong summary sends the next person to the wrong
 place.
 
-**What is still open**: a frame whose length prefix lies. SPEC §5.3 requires a
-receiver to reject one whose `length` exceeds the available plaintext, and
-`open` does, but nothing reaches that branch from outside: `seal` writes the
-true length, and altering it afterwards fails the AEAD first. Only a peer
-implementation could produce one, so testing it needs a crate-internal harness
-that encrypts a plaintext of its own choosing.
+**What was still open, and now is not**: a frame whose length prefix lies. That
+needed the crate-internal harness this predicted, and it is
+[D39](#d39--frames-a-peer-could-send-and-this-implementation-never-would).
+
+## D39 — Frames a peer could send, and this implementation never would
+
+**Problem**: `open` has a branch for every way a plaintext can contradict its
+own flags — a padded frame too short to hold its length prefix, a `length` that
+exceeds the plaintext, a `RELIABLE` flag with no room for an identifier. SPEC
+§5.3 makes rejecting them a MUST.
+
+**Not one of those branches was reachable from a test.** `seal_frame` writes the
+truth, and altering a sealed frame afterwards fails the AEAD long before
+anything looks at a length. Only a peer holding the session key can produce one
+— which is exactly the case that matters, because an authenticated peer is
+bounded by *who* it is and not by *what* it sends.
+
+**Decision**: a `#[cfg(test)]` module inside `session.rs`, because reaching
+those branches means encrypting a plaintext of our own choosing with the
+session's own cipher. It repeats `seal_frame` with the part that keeps the
+prefixes honest removed; header, associated data and nonce are what a real frame
+carries, so what the receiver rejects is the contradiction rather than an
+artefact of the harness.
+
+**The control is not optional.** Every other test there asserts that `open`
+*refuses* something, and a harness that produced merely broken frames would
+satisfy all of them while testing none of them. So one test seals two truthful
+frames — one plain, one padded — and requires `open` to accept both.
+
+Fixed-size arrays throughout: the crate allocates nothing, and a test needing a
+`Vec` would be exercising something the target cannot run.
+
+**Verified by removing the checks.** Deleting the lying-length test's guard
+fails it. Deleting the identifier-length guard fails two others, and it does so
+by **panicking**: `len -= MESSAGE_ID_LEN` underflows. In release the subtraction
+wraps to an enormous length and `copy_within` panics a few lines later instead.
+Either way an authenticated peer ends the process, and one loop serves every
+peer, so that is everybody's outage — which is what those three lines of
+bounds-checking are worth.
+
+**What it costs**: tests in the source file rather than beside the others, and
+`session.rs` is longer for it. The alternative is exposing the cipher state to
+make the harness possible from outside, which would be a worse trade.
 
 ## Not carried over
 

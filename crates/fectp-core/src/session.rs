@@ -1057,3 +1057,240 @@ impl ResumeResponder {
         ))
     }
 }
+
+#[cfg(test)]
+mod hostile_peer {
+    //! Frames a peer could send but this implementation never would.
+    //!
+    //! `open` has a branch for each way a plaintext can contradict its own
+    //! flags — a padded frame too short to hold its length prefix, a length
+    //! that exceeds the plaintext, a `RELIABLE` flag with no room for an
+    //! identifier. SPEC §5.3 makes rejecting them a MUST.
+    //!
+    //! None of those branches was reachable from a test. `seal_frame` writes
+    //! the truth, and altering a sealed frame afterwards fails the AEAD long
+    //! before anything looks at the length. Only a peer holding the session key
+    //! can produce one, which is precisely the threat model that matters here:
+    //! an authenticated peer is bounded by who it is, not by what it sends.
+    //!
+    //! So this module is in the source file rather than beside the other tests,
+    //! because reaching those branches means encrypting a plaintext of our own
+    //! choosing with the session's own cipher.
+
+    use super::*;
+    use crate::keys::Keypair;
+    use rand_core::OsRng;
+
+    const SERVER_SECRET: [u8; 32] = [0xA1; 32];
+    const CLIENT_SECRET: [u8; 32] = [0xB2; 32];
+
+    fn connect() -> (Session, Session) {
+        let server_kp = Keypair::from_secret(SERVER_SECRET);
+        let server_public = *server_kp.public();
+        let caps = Capabilities::minimal(4096);
+
+        let mut initiator = Initiator::new(
+            Keypair::from_secret(CLIENT_SECRET),
+            server_public,
+            0x5EED_0001,
+            caps,
+        )
+        .expect("initiator");
+        let mut responder = Responder::new(server_kp, caps);
+
+        let mut wire = [0u8; 4096];
+        let mut scratch = [0u8; 4096];
+        let n = initiator.write_init(&mut OsRng, b"", &mut wire).expect("init");
+        responder.read_init(&wire[..n], &mut scratch).expect("read init");
+        let (server, n) = responder
+            .write_response(&mut OsRng, b"", &mut wire)
+            .expect("response");
+        let (client, _) = initiator
+            .read_response(&wire[..n], &mut scratch)
+            .expect("read response");
+        (client, server)
+    }
+
+    /// Seals `plaintext` verbatim under `flags`, however little sense it makes.
+    ///
+    /// The same steps as `seal_frame` with the part that keeps the prefixes
+    /// honest removed. Everything else — header, associated data, nonce — is
+    /// exactly what a real frame carries, so what the receiver rejects is the
+    /// contradiction and not some artefact of how this was built.
+    fn seal_verbatim(session: &mut Session, flags: u8, plaintext: &[u8], out: &mut [u8]) -> usize {
+        let total = plaintext.len() + DATA_OVERHEAD;
+        assert!(out.len() >= total, "test buffer too small");
+
+        let mut header = Header::new(FrameType::Data, session.session_id);
+        header.flags = flags;
+        header.sequence = session.send_seq;
+        header.encode(out).expect("encode");
+
+        let (hdr, body) = out[..total].split_at_mut(HEADER_LEN);
+        body[..plaintext.len()].copy_from_slice(plaintext);
+        session
+            .send
+            .encrypt_at(hdr, session.send_seq, body, plaintext.len())
+            .expect("encrypt");
+        session.send_seq += 1;
+        total
+    }
+
+    /// The control, and it is not optional.
+    ///
+    /// Every test below asserts that `open` refuses something. If this harness
+    /// produced frames that were merely broken, they would all pass and none of
+    /// them would be about the length checks at all.
+    #[test]
+    fn the_harness_produces_frames_that_open_accepts() {
+        let (mut client, mut server) = connect();
+        let mut frame = [0u8; 512];
+
+        // Unpadded, unreliable: the plaintext is the payload.
+        let n = seal_verbatim(&mut client, 0, b"an honest frame", &mut frame);
+        let opened = server.open(&mut frame[..n]).expect("a truthful frame must open");
+        assert_eq!(opened.len, b"an honest frame".len());
+        assert_eq!(&frame[HEADER_LEN..HEADER_LEN + opened.len], b"an honest frame");
+
+        // Padded, with a length prefix that tells the truth. Fixed arrays
+        // throughout: this crate allocates nothing, and a test that needed a
+        // `Vec` would be testing something the target cannot run.
+        let payload = b"padded honestly";
+        let mut plaintext = [0u8; PAD_BLOCK];
+        plaintext[..LEN_PREFIX].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+        plaintext[LEN_PREFIX..LEN_PREFIX + payload.len()].copy_from_slice(payload);
+        let n = seal_verbatim(&mut client, FLAG_PADDED, &plaintext, &mut frame);
+        let opened = server.open(&mut frame[..n]).expect("a truthful padded frame must open");
+        assert_eq!(opened.len, payload.len());
+        assert_eq!(&frame[HEADER_LEN..HEADER_LEN + opened.len], payload);
+    }
+
+    /// SPEC §5.3: "A receiver MUST reject a padded frame ... whose `length`
+    /// field exceeds the available plaintext."
+    #[test]
+    fn a_length_prefix_that_exceeds_the_plaintext_is_refused() {
+        for claimed in [
+            PAD_BLOCK as u16,        // exactly the plaintext, leaving no room for the prefix
+            PAD_BLOCK as u16 - 1,    // one byte too many
+            u16::MAX,                // as far past as the field can say
+        ] {
+            let (mut client, mut server) = connect();
+            let mut plaintext = [0u8; PAD_BLOCK];
+            plaintext[..LEN_PREFIX].copy_from_slice(&claimed.to_le_bytes());
+
+            let mut frame = [0u8; 512];
+            let n = seal_verbatim(&mut client, FLAG_PADDED, &plaintext, &mut frame);
+            assert!(
+                server.open(&mut frame[..n]).is_err(),
+                "a length of {claimed} in a {PAD_BLOCK}-byte plaintext must be refused"
+            );
+        }
+    }
+
+    /// SPEC §5.3: "A receiver MUST reject a padded frame whose plaintext is
+    /// shorter than 2 bytes."
+    #[test]
+    fn a_padded_frame_with_no_room_for_its_length_is_refused() {
+        for short in [0usize, 1] {
+            let (mut client, mut server) = connect();
+            let mut frame = [0u8; 512];
+            let zeros = [0u8; LEN_PREFIX];
+            let n = seal_verbatim(&mut client, FLAG_PADDED, &zeros[..short], &mut frame);
+            assert!(
+                server.open(&mut frame[..n]).is_err(),
+                "a padded plaintext of {short} bytes cannot hold a length prefix"
+            );
+        }
+    }
+
+    /// A flag claiming a prefix the plaintext is too small to contain.
+    ///
+    /// Each is a subtraction in `open` that would go negative. Removing the
+    /// check panics the debug build on the subtraction itself; in release it
+    /// wraps to an enormous length and panics a few lines later in
+    /// `copy_within` instead. Either way an authenticated peer ends the process
+    /// — and one loop serves every peer, so that is everybody's outage.
+    #[test]
+    fn a_prefix_flag_without_room_for_the_prefix_is_refused() {
+        let cases: &[(u8, usize, &str)] = &[
+            (FLAG_RELIABLE, MESSAGE_ID_LEN - 1, "an identifier"),
+            (FLAG_RELIABLE, 0, "an identifier"),
+            (FLAG_RELIABLE | FLAG_FRAGMENT, MESSAGE_ID_LEN, "a descriptor"),
+            (
+                FLAG_RELIABLE | FLAG_FRAGMENT,
+                MESSAGE_ID_LEN + FRAGMENT_LEN - 1,
+                "a descriptor",
+            ),
+        ];
+
+        for (flags, len, what) in cases {
+            let (mut client, mut server) = connect();
+            let mut frame = [0u8; 512];
+            let zeros = [0u8; MESSAGE_ID_LEN + FRAGMENT_LEN];
+            let n = seal_verbatim(&mut client, *flags, &zeros[..*len], &mut frame);
+            assert!(
+                server.open(&mut frame[..n]).is_err(),
+                "flags {flags:#04x} with {len} bytes of plaintext has no room for {what}"
+            );
+        }
+    }
+
+    /// The prefixes are cumulative, and the padded length has to leave room for
+    /// all of them.
+    ///
+    /// A length that is honest about the plaintext but still too small for what
+    /// the other flags promise: the arithmetic runs out one prefix later than
+    /// the checks above, which is a different branch.
+    #[test]
+    fn a_padded_length_too_small_for_the_other_prefixes_is_refused() {
+        for inner in [0usize, 1, MESSAGE_ID_LEN - 1, MESSAGE_ID_LEN + FRAGMENT_LEN - 1] {
+            let (mut client, mut server) = connect();
+            let mut plaintext = [0u8; PAD_BLOCK];
+            plaintext[..LEN_PREFIX].copy_from_slice(&(inner as u16).to_le_bytes());
+
+            let mut frame = [0u8; 512];
+            let n = seal_verbatim(
+                &mut client,
+                FLAG_PADDED | FLAG_RELIABLE | FLAG_FRAGMENT,
+                &plaintext,
+                &mut frame,
+            );
+            assert!(
+                server.open(&mut frame[..n]).is_err(),
+                "an inner length of {inner} cannot hold an identifier and a descriptor"
+            );
+        }
+    }
+
+    /// A descriptor that decodes but could not be coherent.
+    ///
+    /// `open` decodes rather than trusts, so reassembly never sees an index
+    /// past the end of the message it claims to belong to. Reached here through
+    /// a hand-built plaintext, because `seal_fragment` will encode whatever it
+    /// is given and the check is on the way back in.
+    #[test]
+    fn an_incoherent_descriptor_inside_a_valid_frame_is_refused() {
+        for (index, count) in [(0u16, 0u16), (4, 4), (0, 4097)] {
+            let (mut client, mut server) = connect();
+
+            let mut plaintext = [0u8; MESSAGE_ID_LEN + FRAGMENT_LEN + 4];
+            plaintext[..MESSAGE_ID_LEN].copy_from_slice(&7u32.to_le_bytes());
+            let at = MESSAGE_ID_LEN;
+            plaintext[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+            plaintext[at + 4..at + 6].copy_from_slice(&index.to_le_bytes());
+            plaintext[at + 6..at + 8].copy_from_slice(&count.to_le_bytes());
+
+            let mut frame = [0u8; 512];
+            let n = seal_verbatim(
+                &mut client,
+                FLAG_RELIABLE | FLAG_FRAGMENT,
+                &plaintext,
+                &mut frame,
+            );
+            assert!(
+                server.open(&mut frame[..n]).is_err(),
+                "index {index} of {count} must be refused on the way in"
+            );
+        }
+    }
+}
