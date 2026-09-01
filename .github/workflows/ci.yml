@@ -69,6 +69,8 @@ jobs:
         run: cargo test -p fectp-core --test replay_model
       - name: fragment reassembly survives generated orderings
         run: cargo test -p fectp --lib
+      - name: every combination of plaintext prefixes round-trips
+        run: cargo test -p fectp-core --test prefix_model
       - name: every documented flow runs
         run: cargo run -p fectp --example tour --features compress
       - name: documentation links resolve

@@ -563,7 +563,7 @@ These are unimplemented, not overlooked.
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
 | **Keys must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake performs its own Diffie-Hellman. | A secure element or HSM that never releases the key — the whole point of one — cannot be used without a trait for the DH. Relevant on exactly the microcontrollers this protocol targets. |
-| **No model of padding** | The length-prefixed padded form is a round trip rather than a sequence, and has only example tests. | The replay window and fragment reassembly now have models ([D37](#d37--the-two-layers-that-remember-things)); padding does not, because there is less sequence in it to get wrong. |
+| **A lying length prefix** | A padded frame whose `length` field exceeds its plaintext is refused by `open`, and nothing tests that it is. | Reaching it needs a frame sealed with a false length, which only a peer holding the session key could produce — `seal` writes the true one, and tampering breaks the AEAD first. Testable only from inside the crate. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -1434,9 +1434,56 @@ half-built against a bound of 4".
 beside the other tests. Both follow from `Reassembly` being crate-private, which
 is the right visibility for it.
 
-**What is still open**: padding has no model. It is a round trip rather than a
-sequence — a length prefix, a fill, and the reverse — so there is less order to
-get wrong, and the layouts are already cross-checked by D35.
+**What was still open, and was not what this said**: this claimed padding had
+no model. It has four example tests — same-bucket indistinguishability, block
+boundaries, per-frame toggling, tamper detection — and the gap was somewhere
+else. See [D38](#d38--the-prefixes-are-tested-together-because-they-are-peeled-together).
+
+## D38 — The prefixes are tested together, because they are peeled together
+
+**Problem**: a data frame's plaintext may carry three optional things before the
+payload — a length prefix when `PADDED`, a message identifier when `RELIABLE`,
+a fragment descriptor when `FRAGMENT`. `open` peels them in that order with an
+offset that advances and a length that shrinks, then moves the payload down
+with `copy_within`.
+
+Each was tested alone. None was tested with another, and **`seal_fragment`
+appeared in no test in the repository at all** — the descriptor path had been
+exercised only through the higher-level fragmentation tests, which cannot vary
+the flags independently.
+
+That is the shape an off-by-one lives in, and an off-by-one there does not
+produce an error. It produces a payload delivered with somebody else's bytes on
+the front of it.
+
+**Decision**: `tests/prefix_model.rs` enumerates the combinations — eight, of
+which seven are shapes the protocol has, since a descriptor without an
+identifier is not one — and generates the payload and identifiers inside each.
+Enumerated rather than sampled: there are only eight, and leaving one to chance
+is how this gap survived.
+
+Three properties: the payload comes back byte for byte at the offset callers
+expect; the flags, identifier and descriptor come back as they went; and a
+padded frame reaches a block boundary **with the prefixes included**, because
+the boundary is computed over the whole plaintext and a prefix that pushed a
+payload into the next block would leak the difference padding exists to hide.
+
+**Verified by breaking it**, twice. Subtracting one byte too few for the
+descriptor fails with "padded=false reliable=true fragmented=true: length came
+back wrong". Not skipping the length prefix fails the same test and the
+indistinguishability one.
+
+**What this corrects**: [D37](#d37--the-two-layers-that-remember-things) said
+padding had no model. It has four example tests and the gap was elsewhere —
+worth recording because the wrong summary sends the next person to the wrong
+place.
+
+**What is still open**: a frame whose length prefix lies. SPEC §5.3 requires a
+receiver to reject one whose `length` exceeds the available plaintext, and
+`open` does, but nothing reaches that branch from outside: `seal` writes the
+true length, and altering it afterwards fails the AEAD first. Only a peer
+implementation could produce one, so testing it needs a crate-internal harness
+that encrypts a plaintext of its own choosing.
 
 ## Not carried over
 
