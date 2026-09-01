@@ -65,6 +65,10 @@ jobs:
         run: cargo test -p fectp-core --test malformed_input
       - name: the reliability layer survives generated orderings
         run: cargo test -p fectp-core --test reliability_model
+      - name: the replay window survives generated orderings
+        run: cargo test -p fectp-core --test replay_model
+      - name: fragment reassembly survives generated orderings
+        run: cargo test -p fectp --lib
       - name: every documented flow runs
         run: cargo run -p fectp --example tour --features compress
       - name: documentation links resolve

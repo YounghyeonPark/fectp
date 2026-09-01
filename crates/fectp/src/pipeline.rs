@@ -811,3 +811,237 @@ impl TicketStore {
         self.by_id.len()
     }
 }
+
+#[cfg(test)]
+mod reassembly_tests {
+    //! Fragment reassembly, driven through orderings nobody wrote by hand.
+    //!
+    //! Named as a gap by D34 and again by D35: it is behaviour over time, so
+    //! the layout cross-check does not reach it and the retransmit model does
+    //! not either. It is also where attacker-chosen indices meet buffer
+    //! arithmetic, which is the combination worth being careful about.
+    //!
+    //! In-crate because `Reassembly` is `pub(crate)`: an integration test would
+    //! have to go through a socket and could not choose the arrival order,
+    //! which is the whole subject.
+
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    /// Splits `data` the way a sender must: equal fragments, a possibly shorter
+    /// last one (SPEC §5.6).
+    fn fragment(message: u32, data: &[u8], stride: usize) -> Vec<(Fragment, Vec<u8>)> {
+        let count = data.len().div_ceil(stride).max(1);
+        (0..count)
+            .map(|i| {
+                let at = i * stride;
+                let end = (at + stride).min(data.len());
+                (
+                    Fragment {
+                        message,
+                        index: i as u16,
+                        count: count as u16,
+                    },
+                    data[at..end].to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    /// A shuffle driven by a seed, so a failing case can be replayed.
+    fn shuffle<T>(items: &mut [T], seed: u64) {
+        let mut state = seed | 1;
+        for i in (1..items.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            items.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        /// Order does not matter, and neither does duplication.
+        ///
+        /// Both are ordinary here: datagrams reorder, and every fragment is
+        /// reliable, so a retransmission arrives as a duplicate.
+        #[test]
+        fn a_message_survives_any_order_and_any_duplication(
+            len in 1usize..2000,
+            stride in 1usize..300,
+            seed in any::<u64>(),
+            duplicates in 0usize..4,
+        ) {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+            let mut pieces = fragment(1, &data, stride);
+            shuffle(&mut pieces, seed);
+
+            // Duplicates go *before* the last arrival, never after it. The
+            // layer holds no memory of a message it has finished — see
+            // `a_duplicate_after_completion_starts_the_message_again` — and it
+            // does not need one, because the dedup window runs first and a
+            // repeated fragment never gets this far.
+            let last = pieces.pop().expect("at least one fragment");
+            for n in 0..duplicates {
+                if pieces.is_empty() {
+                    break;
+                }
+                let at = (seed as usize).wrapping_add(n) % pieces.len();
+                let dup = pieces[at].clone();
+                pieces.insert(at, dup);
+            }
+            pieces.push(last);
+
+            let mut reassembly = Reassembly::new();
+            let mut delivered = 0;
+            for (fragment, bytes) in pieces {
+                if let Ok(Some(whole)) = reassembly.accept(fragment, &bytes) {
+                    delivered += 1;
+                    prop_assert_eq!(&whole, &data, "reassembled to the wrong bytes");
+                }
+            }
+            prop_assert_eq!(delivered, 1, "a message must be delivered exactly once");
+            prop_assert_eq!(reassembly.in_progress(), 0, "nothing left half-built");
+        }
+
+        /// Several messages at once, their fragments interleaved.
+        #[test]
+        fn interleaved_messages_do_not_contaminate_each_other(
+            lengths in prop::collection::vec(1usize..600, 1..4),
+            stride in 1usize..200,
+            seed in any::<u64>(),
+        ) {
+            let messages: Vec<Vec<u8>> = lengths
+                .iter()
+                .enumerate()
+                .map(|(m, len)| (0..*len).map(|i| ((i + m * 97) % 251) as u8).collect())
+                .collect();
+
+            let mut all: Vec<(usize, Fragment, Vec<u8>)> = Vec::new();
+            for (m, data) in messages.iter().enumerate() {
+                for (f, bytes) in fragment(m as u32, data, stride) {
+                    all.push((m, f, bytes));
+                }
+            }
+            shuffle(&mut all, seed);
+
+            let mut reassembly = Reassembly::new();
+            let mut seen: HashSet<usize> = HashSet::new();
+            for (m, f, bytes) in all {
+                if let Ok(Some(whole)) = reassembly.accept(f, &bytes) {
+                    prop_assert_eq!(
+                        &whole,
+                        &messages[m],
+                        "message {} came back carrying another message's bytes",
+                        m
+                    );
+                    prop_assert!(seen.insert(m), "message {} was delivered twice", m);
+                }
+            }
+            prop_assert_eq!(seen.len(), messages.len(), "not every message arrived");
+        }
+
+        /// More half-built messages than there is room for.
+        ///
+        /// The bound is what stops a peer parking memory by starting messages
+        /// it never finishes. Exceeding it must cost the oldest, never the
+        /// correctness of what remains.
+        #[test]
+        fn exceeding_the_bound_drops_rather_than_corrupts(
+            extra in 1usize..6,
+            stride in 8usize..64,
+        ) {
+            let mut reassembly = Reassembly::new();
+            let total = MAX_REASSEMBLIES + extra;
+
+            let mut started = Vec::new();
+            for m in 0..total {
+                let bytes: Vec<u8> = (0..stride * 3).map(|i| ((i + m) % 251) as u8).collect();
+                let pieces = fragment(m as u32, &bytes, stride);
+                prop_assert!(pieces.len() > 1, "this needs a genuinely split message");
+                let _ = reassembly.accept(pieces[0].0, &pieces[0].1);
+                started.push((bytes, pieces));
+            }
+            prop_assert!(
+                reassembly.in_progress() <= MAX_REASSEMBLIES,
+                "{} half-built against a bound of {}",
+                reassembly.in_progress(),
+                MAX_REASSEMBLIES
+            );
+
+            // Eviction may lose a message. It may not garble one.
+            let (bytes, pieces) = started.last().expect("at least one");
+            for (f, chunk) in pieces.iter().skip(1) {
+                if let Ok(Some(whole)) = reassembly.accept(*f, chunk) {
+                    prop_assert_eq!(&whole, bytes, "the surviving message was corrupted");
+                }
+            }
+        }
+    }
+
+    /// The layer keeps no memory of a message it has finished.
+    ///
+    /// A fragment of a completed message starts it again, and completing it a
+    /// second time delivers it a second time. That is not a defect here and it
+    /// is not defence in depth either — it is a contract, and it holds because
+    /// `ingest` consults the dedup window *before* reaching reassembly: a
+    /// repeated fragment carries the message identifier it carried the first
+    /// time, is recognised there, and returns `Ingested::Nothing`.
+    ///
+    /// Written down because the first version of the property test above fed
+    /// duplicates straight in, saw a message delivered twice, and looked like a
+    /// bug. Remembering finished messages would mean unbounded state chosen by
+    /// the peer, which is the thing every other bound here exists to avoid.
+    #[test]
+    fn a_duplicate_after_completion_starts_the_message_again() {
+        let mut reassembly = Reassembly::new();
+        let only = Fragment { message: 1, index: 0, count: 1 };
+
+        let first = reassembly.accept(only, b"whole").expect("accept");
+        assert_eq!(first.as_deref(), Some(&b"whole"[..]));
+        assert_eq!(reassembly.in_progress(), 0, "and it is no longer held");
+
+        let again = reassembly.accept(only, b"whole").expect("accept");
+        assert_eq!(
+            again.as_deref(),
+            Some(&b"whole"[..]),
+            "nothing here remembers the message just delivered; the dedup              window is what stops this arriving"
+        );
+    }
+
+    /// A message that claims two shapes is refused, not guessed at.
+    #[test]
+    fn a_count_that_changes_mid_message_is_refused() {
+        let mut reassembly = Reassembly::new();
+        let first = Fragment { message: 9, index: 0, count: 4 };
+        assert!(reassembly.accept(first, &[1, 2, 3, 4]).is_ok());
+
+        let contradiction = Fragment { message: 9, index: 1, count: 7 };
+        assert!(
+            reassembly.accept(contradiction, &[5, 6, 7, 8]).is_err(),
+            "the same message cannot have been cut two ways"
+        );
+        assert_eq!(
+            reassembly.in_progress(),
+            0,
+            "and neither version is kept, because nothing says which is the lie"
+        );
+    }
+
+    /// SPEC §5.6: every fragment but the last is the same length.
+    ///
+    /// Without that a fragment's offset cannot be derived from its index, so an
+    /// odd length is unplaceable rather than merely unusual.
+    #[test]
+    fn unequal_fragments_before_the_last_are_refused() {
+        let mut reassembly = Reassembly::new();
+        let at = |index| Fragment { message: 3, index, count: 3 };
+        assert!(reassembly.accept(at(0), &[0u8; 100]).is_ok());
+        assert!(
+            reassembly.accept(at(1), &[0u8; 60]).is_err(),
+            "a short fragment that is not the last cannot be placed"
+        );
+    }
+}

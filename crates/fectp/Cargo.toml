@@ -12,6 +12,9 @@ fectp-core = { path = "../fectp-core", features = ["std"] }
 rand_core = { workspace = true, features = ["std", "getrandom"] }
 zstd = { version = "0.13", optional = true }
 
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 [features]
 default = []
 compress = ["dep:zstd"]

@@ -43,6 +43,12 @@ The ways they failed, each from this repository:
 If the test still passes with the fix removed, you have not found the bug's
 cause, or the test is not aimed at it. Both are worth knowing before you commit.
 
+**Delete the regression file the induced failure wrote.** A `proptest` failure
+saves its seed under `proptest-regressions/`, and a seed from a break you caused
+yourself records nothing — it is a case that only fails against code that no
+longer exists. Check them in when they come from a real failure, as
+`malformed_input.proptest-regressions` does, and remove them otherwise.
+
 ## 3. Fix it
 
 Prefer the change that makes the failure impossible over the one that makes

@@ -563,7 +563,7 @@ These are unimplemented, not overlooked.
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
 | **Keys must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake performs its own Diffie-Hellman. | A secure element or HSM that never releases the key — the whole point of one — cannot be used without a trait for the DH. Relevant on exactly the microcontrollers this protocol targets. |
-| **No model of the session layer** | Padding, replay windows and fragment reassembly are behaviour over time, and only example tests cover them. | [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds) models the retransmit queue; [D35](#d35--the-specification-is-implemented-twice) cross-checks the layouts. Neither reaches these. |
+| **No model of padding** | The length-prefixed padded form is a round trip rather than a sequence, and has only example tests. | The replay window and fragment reassembly now have models ([D37](#d37--the-two-layers-that-remember-things)); padding does not, because there is less sequence in it to get wrong. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -1384,6 +1384,59 @@ payload one byte past the limit is refused used `vec![0u8; n]`, which codes down
 to nothing under `--features compress` and fitted in the frame it was supposed
 to overflow. It passed without the feature and failed with it. Incompressible
 now.
+
+## D37 — The two layers that remember things
+
+**Problem**: [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds)
+modelled the retransmit queue and named what it left out — the replay window and
+fragment reassembly. [D35](#d35--the-specification-is-implemented-twice) named
+them again, because a cross-implementation of the layouts does not reach
+behaviour over time. Both are places where state accumulates across frames, and
+the one bug that has cost this project most was exactly that shape.
+
+**Decision**: a model for each.
+
+`tests/replay_model.rs` runs the window against a reference that remembers every
+sequence number ever committed, so it can tell "refused as a duplicate" from
+"refused as too old" — a distinction the real window cannot make, because it
+keeps only 64. Three properties: it accepts exactly what the rule says, nothing
+inside the window is accepted twice, and **checking a forged number cannot move
+it**. That last one matters because `check` runs before the AEAD, so anyone who
+can reach the port can call it as often as they like; if it could slide the
+window, an off-path attacker could push a real frame out of range. The test runs
+an attacked window beside an honest one and requires them to answer identically
+about everything afterwards.
+
+The reassembly model lives in `pipeline.rs` rather than a test file, because
+`Reassembly` is `pub(crate)` and an integration test would have to go through a
+socket — where it could not choose the arrival order, which is the entire
+subject. Fragments arrive shuffled and duplicated, several messages interleave,
+and more messages are begun than there is room for.
+
+**What it found**: not a bug, a contract nobody had written down. The first
+version fed duplicates straight in and saw a message delivered twice, which
+looked like a defect. It is not: `Reassembly` keeps no memory of a message it
+has finished, and does not need one, because `ingest` consults the dedup window
+first — a repeated fragment carries the identifier it carried before, is
+recognised there, and never reaches reassembly. Remembering finished messages
+would mean unbounded state chosen by the peer, which is what every other bound
+here exists to avoid.
+
+The test premise was wrong rather than the code, so the duplicates now arrive
+before completion and the contract is pinned by a named test that says why.
+
+**Verified by breaking it**, twice: removing the duplicate-fragment check fails
+the ordering property, and removing the reassembly bound fails with "5
+half-built against a bound of 4".
+
+**What it costs**: `proptest` becomes a dev-dependency of `fectp` as well as
+`fectp-core`, and the reassembly model sits in the source file rather than
+beside the other tests. Both follow from `Reassembly` being crate-private, which
+is the right visibility for it.
+
+**What is still open**: padding has no model. It is a round trip rather than a
+sequence — a length prefix, a fill, and the reverse — so there is less order to
+get wrong, and the layouts are already cross-checked by D35.
 
 ## Not carried over
 
