@@ -21,6 +21,11 @@ fn the_documented_constants_are_the_real_ones() {
     assert_eq!(fectp::MAX_MESSAGE_LEN, 1 << 20, "API.md says 1 MiB");
     assert_eq!(fectp::MAX_FRAGMENTS, 4096, "API.md says 4096");
     assert_eq!(fectp::MAX_QUEUED, 4, "API.md says 4 per peer");
+    assert_eq!(fectp::MAX_PEERS, 1024, "API.md says 1024");
+    assert_eq!(
+        fectp::MAX_HANDSHAKES_PER_SECOND, 64,
+        "API.md says 64 new sessions a second"
+    );
     assert_eq!(fectp::CODEC_OVERHEAD, 4, "API.md says 4 bytes");
     assert_eq!(
         fectp::HANDSHAKE_TIMEOUT,

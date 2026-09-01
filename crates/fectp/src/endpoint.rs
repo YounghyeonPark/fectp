@@ -125,6 +125,34 @@ const HANDSHAKE_RETRY_MS: u64 = 250;
 /// How many times to send an opening frame before giving up.
 const HANDSHAKE_ATTEMPTS: u8 = 4;
 
+/// The most sessions one endpoint will hold at once, unless told otherwise.
+///
+/// Reaching the handshake needs nothing but this endpoint's public key, which
+/// is public by design, so anyone can complete one and be filed. Measured, a
+/// single-threaded attacker on loopback files 34 a second and never sends a
+/// byte — and that is a floor, since it politely waits for each reply.
+///
+/// Without a bound that is unbounded memory, and on the microcontroller this
+/// protocol is for, 294 bytes of session state each fills 32 KiB in about four
+/// seconds. The bound is generous for a real server and still finite.
+///
+/// [`Endpoint::set_max_peers`] overrides it. A microcontroller wants far fewer
+/// than this and a large server may want more, and neither is served by one
+/// number compiled in.
+pub const MAX_PEERS: usize = 1024;
+
+/// New handshakes answered per second before the rest are dropped unanswered.
+///
+/// [`MAX_PEERS`] bounds the memory but not the work: answering costs four
+/// X25519 operations, and evicting to make room would leave an attacker able
+/// to buy that for the price of a datagram, indefinitely. This bounds the work
+/// as well.
+///
+/// It is a ceiling on *new* sessions, not on traffic — established peers are
+/// routed without passing through here, so a flood slows down connection
+/// setup and leaves everything already connected alone.
+pub const MAX_HANDSHAKES_PER_SECOND: u32 = 64;
+
 /// A handshake this endpoint started, waiting for its reply.
 enum Handshake {
     Full(Box<Initiator>),
@@ -176,6 +204,10 @@ pub struct Endpoint {
     /// Queued rather than returned so that a completion raised while queuing a
     /// message, or two completing in the same pass, cannot be dropped.
     events: VecDeque<Event>,
+    /// Budget for answering new handshakes, refilled over time.
+    handshake_budget: f32,
+    handshake_refilled: Instant,
+    max_peers: usize,
     next_id: u64,
 
     rx: Vec<u8>,
@@ -190,6 +222,15 @@ struct PeerEntry {
     addr: SocketAddr,
     session_id: u32,
     datagram_limit: usize,
+    /// When this session was established, which orders eviction.
+    filed: Instant,
+    /// Whether anything has ever arrived from this peer since.
+    ///
+    /// This is what separates a flood from a quiet peer. Completing a
+    /// handshake costs an attacker nothing and proves nothing; sending an
+    /// authenticated frame afterwards is the first thing that does. A session
+    /// that has never done it is the one to drop when room is needed.
+    spoke: bool,
 }
 
 impl Endpoint {
@@ -234,6 +275,9 @@ impl Endpoint {
             peers: HashMap::new(),
             routes: HashMap::new(),
             events: VecDeque::new(),
+            handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
+            handshake_refilled: Instant::now(),
+            max_peers: MAX_PEERS,
             outbound: HashMap::new(),
             next_id: 0,
             rx: vec![0u8; size],
@@ -470,6 +514,18 @@ impl Endpoint {
         // Each mode accepts only its own opening frames. A peer speaking a
         // different mode is simply not understood, which is what makes the
         // choice unnegotiable.
+        // Answering a new handshake is the expensive, unauthenticated path.
+        // Everything below this that establishes a session passes the check;
+        // a reply to a handshake *we* started, and traffic on an established
+        // session, do not — a flood must not stop either.
+        if matches!(
+            header.frame_type,
+            FrameType::HandshakeInit | FrameType::ResumeInit | FrameType::PlainInit
+        ) && !self.may_answer_handshake()
+        {
+            return Ok(None);
+        }
+
         match (header.frame_type, &self.mode) {
             (FrameType::HandshakeInit, Mode::PublicKey(_)) => {
                 self.accept_full(n, from).map(Some).or(Ok(None))
@@ -506,6 +562,11 @@ impl Endpoint {
         let ingested = entry
             .peer
             .ingest(&mut self.rx[..n], now, &mut self.ack, &mut ack_len)?;
+
+        // Getting here means the frame authenticated, which is the first thing
+        // a peer does that an attacker completing handshakes never does. It is
+        // what keeps this session off the eviction list.
+        entry.spoke = true;
 
         if ack_len > 0 {
             self.socket.send_to(&self.ack[..ack_len], from)?;
@@ -687,6 +748,61 @@ impl Endpoint {
         }
     }
 
+    /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
+    ///
+    /// Above the limit, the peer that has been quiet longest is dropped to make
+    /// room — see [`MAX_PEERS`] for why the alternative is unbounded memory.
+    /// Sessions already held are not dropped by lowering it; the new limit
+    /// applies as peers arrive.
+    ///
+    /// A limit of zero is treated as one, because an endpoint that can hold no
+    /// sessions cannot do anything.
+    pub fn set_max_peers(&mut self, limit: usize) {
+        self.max_peers = limit.max(1);
+    }
+
+    /// Whether there is budget to answer one more new handshake.
+    ///
+    /// A token bucket rather than a counter per interval, so a burst is
+    /// absorbed and a sustained flood is not.
+    fn may_answer_handshake(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.handshake_refilled).as_secs_f32();
+        self.handshake_refilled = now;
+        self.handshake_budget = (self.handshake_budget
+            + elapsed * MAX_HANDSHAKES_PER_SECOND as f32)
+            .min(MAX_HANDSHAKES_PER_SECOND as f32);
+
+        if self.handshake_budget < 1.0 {
+            return false;
+        }
+        self.handshake_budget -= 1.0;
+        true
+    }
+
+    /// Makes room for one more session, if there is none.
+    ///
+    /// Drops the oldest peer that has never sent anything, because that is
+    /// what a flood looks like and what an established session does not. Only
+    /// when every peer has spoken does this fall back to the oldest outright —
+    /// at which point the endpoint is genuinely full of real peers and
+    /// something has to give.
+    fn make_room(&mut self) {
+        if self.peers.len() < self.max_peers {
+            return;
+        }
+        let victim = self
+            .peers
+            .iter()
+            .min_by_key(|(_, e)| (e.spoke, e.filed))
+            .map(|(id, _)| *id);
+        if let Some(victim) = victim {
+            if let Some(entry) = self.peers.remove(&victim) {
+                self.routes.remove(&(entry.addr, entry.session_id));
+            }
+        }
+    }
+
     fn file(
         &mut self,
         peer_id: PeerId,
@@ -695,6 +811,8 @@ impl Endpoint {
         session_id: u32,
         datagram_limit: usize,
     ) {
+        self.make_room();
+
         // A reconnect from the same address and session id replaces the old
         // entry rather than shadowing it.
         if let Some(previous) = self.routes.insert((addr, session_id), peer_id) {
@@ -706,6 +824,8 @@ impl Endpoint {
                 peer: Peer::new(link, DEFAULT_MAX_DATAGRAM),
                 addr,
                 session_id,
+                filed: Instant::now(),
+                spoke: false,
                 datagram_limit,
             },
         );

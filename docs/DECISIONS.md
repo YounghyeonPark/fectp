@@ -1115,6 +1115,70 @@ has answered, so a repeated message 1 is answered afresh. That is correct for
 replayed opening frame costs the responder four X25519 operations. Bounding
 that is unsolved and belongs with the rest of the denial-of-service surface.
 
+## D32 — A stranger's handshake is bounded, in memory and in work
+
+**Problem**: reaching the handshake needs nothing but the endpoint's public
+key, which is public by design. Anyone can complete one, and the peer was filed
+before the application heard about it — which is the first point at which it
+could have said no.
+
+`examples/keys.rs` demonstrates the path on purpose: its "stranger" holds a
+perfectly valid key, connects, and is refused *afterwards*. The four X25519
+operations and the table entry are spent either way.
+
+Measured rather than assumed: a single-threaded attacker on loopback files
+**34 sessions a second** and never sends a byte. That is a floor — it politely
+waits for each reply, where a real flood would not. Nothing bounded the table,
+and nothing expired an idle session, so at 294 bytes of state each this fills
+the 32 KiB of the microcontroller this protocol is for in about four seconds.
+
+**Decision**: two bounds, because one is not enough.
+
+[`MAX_PEERS`] caps the table. When it is full the peer dropped is the one that
+has been there longest **and never sent anything** — falling back to plain
+oldest only when every peer has spoken. That distinction is the whole point:
+completing a handshake costs an attacker nothing and proves nothing, while
+sending an authenticated frame afterwards is the first thing that does. Plain
+oldest-first would evict the established session and keep the flood.
+
+[`MAX_HANDSHAKES_PER_SECOND`] caps the work. The table bound alone would leave
+an attacker buying four X25519 operations for the price of a datagram
+indefinitely, since evicting always makes room. The limit is on *new* sessions
+only — established peers are routed without passing through it, so a flood
+slows connection setup and leaves everything already connected alone.
+
+**What it costs**: during a flood, a legitimate new peer competes for the same
+budget and may have to retry. That is unavoidable without a cookie exchange,
+and a cookie costs the round trip that carrying data in the first packet
+exists to save. The trade taken here is that setting up a new connection
+degrades while established ones do not.
+
+`MAX_PEERS` is a default rather than a fixed value — `set_max_peers` overrides
+it. A microcontroller wants far fewer and a large server may want more, and
+neither is served by one number compiled in.
+
+**How the tests were wrong first**, twice, because it is the same mistake both
+times. The first version asserted only that an established peer still worked
+after a flood — true before any of this existed. The second stopped the flood
+on reaching the limit and then asserted the limit had not been exceeded, which
+is true by construction. The third counted how often the honest peer was
+served, which a peer evicted one second in still satisfies from before it
+happened. Only the fourth — does the honest peer survive to the *end* — fails
+against plain oldest-first eviction, which is the thing it is meant to
+discriminate.
+
+And then the fourth was flaky, about one run in six, for a reason that had
+nothing to do with the code under test: the honest peer sits in `recv` while
+the loop that answers it has already stopped, times out, and reports being
+evicted when it was only abandoned. The loop now drains before joining. A test
+that fails at random is worse than no test, because what it teaches is to
+ignore a red run.
+
+**What is not fixed**: a responder still answers a repeated opening frame
+afresh, so a replayed handshake costs the four operations again. Bounding that
+needs the responder to remember what it has answered, which is state an
+attacker also chooses. It is the remaining piece of this surface.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

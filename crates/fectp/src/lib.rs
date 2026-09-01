@@ -83,7 +83,7 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::MAX_TICKETS;
-pub use endpoint::{Endpoint, Event, PeerId};
+pub use endpoint::{Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_PEERS};
 pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 /// How long a handshake waits for the peer's reply before giving up.
