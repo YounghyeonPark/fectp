@@ -1282,6 +1282,61 @@ protect the ordinary cases around it.
 **What it does not cover**: the fragment reassembly and congestion windows have
 their own sequences and no model of either. Nothing here is a security audit.
 
+## D35 — The specification is implemented twice
+
+**Problem**: `interop.rs` cross-validates the handshake against `snow`, and that
+was the only part of this protocol checked against anything but itself.
+Everything SPEC.md describes in most detail — the frame header, the
+acknowledgement block, fragment descriptors, the codec header, the transforms —
+had been verified only by the implementation that produced it.
+`spec_conformance.rs` pins the constants the document quotes, which catches a
+value drifting but not a sentence that never said enough.
+
+A specification only its own author can implement is not doing its job, and
+nothing here was testing whether this one does.
+
+**Decision**: `tests/spec_independent.rs` contains a second implementation of
+every layout and transform, written from the document, citing the section each
+function follows and sharing no code with the crate. Both directions are
+checked: bytes this crate produces must parse with the document's reader, and
+bytes the document's writer produces must parse with this crate's. One direction
+alone would pass if both sides shared a misreading.
+
+**What it found immediately**: the two disagree about identifiers at the wrap.
+
+§5.7 says bit `i` of an acknowledgement means `highest - 1 - i`. On a `u32`
+that is wrapping arithmetic, so a `highest` of 0 with bit 0 set names
+`u32::MAX`. The implementation compared numerically — `id > self.highest`, then
+`self.highest - id` — and answered no.
+
+The sender had used wrapping arithmetic all along: `register` bounds
+`next_id.wrapping_sub(oldest)` and `next_id` wraps. Only the receiving side
+compared as plain integers, in `Ack::covers` and `DedupWindow::accept`. The
+consequence is not subtle: past the 2^32nd reliable message in one direction,
+every new identifier looks four billion old, is refused as already delivered,
+and the session stops delivering reliable messages permanently. Roughly five
+days of continuous traffic at ten thousand messages a second — impossible for a
+sensor, reachable for a long-lived server session.
+
+**And the document was silent.** §5.5 said "a `u32` assigned by the sender,
+starting at 0 and increasing by one" and stopped there. An independent
+implementer would have had nothing to go on at the boundary, and reading §5.7
+would most naturally have produced the wrapping behaviour — a peer that
+disagreed with this one. §5.5 now states it normatively and
+`spec_conformance.rs` pins it.
+
+**The honest limit**: this second implementation was written by someone who has
+read the first, so it cannot prove the document is *sufficient* for a stranger.
+It proves the two agree on every case it covers, and it makes an ambiguity
+visible the moment the document is edited without the code. That is less than
+an independent implementer and a great deal more than nothing.
+
+**What it does not cover**: the handshake, which `interop.rs` already checks
+against `snow`; the entropy stage, which is Zstandard and specified by
+reference; and the session-layer rules — padding, replay windows, fragment
+reassembly — which are behaviour over time rather than layouts, and would need
+the same treatment as [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds).
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

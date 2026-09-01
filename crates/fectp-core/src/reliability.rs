@@ -100,17 +100,30 @@ impl Ack {
         if id == self.highest {
             return true;
         }
-        if id > self.highest {
-            return false;
-        }
-        let distance = self.highest - id;
+        // Distance the way round the circle that identifiers actually travel.
+        // Comparing numerically was wrong at exactly one point — a `highest`
+        // that had just wrapped made every new identifier look ancient — and
+        // the sender had used wrapping arithmetic all along.
+        let distance = self.highest.wrapping_sub(id);
         if distance > ACK_WINDOW {
-            // Too old to be reported; treated as unacknowledged rather than
-            // assumed delivered.
+            // Too old to be reported, or ahead of the highest and not yet
+            // seen. Either way unacknowledged rather than assumed delivered.
             return false;
         }
         self.bitmap & (1u64 << (distance - 1)) != 0
     }
+}
+
+/// Whether `id` is later than `than`, given that identifiers wrap.
+///
+/// Serial-number comparison: the shorter way round the circle wins, so an
+/// identifier just past the end of the space is newer than one just before it
+/// rather than four billion older. The sender has always measured distance
+/// this way — `register` bounds `next_id.wrapping_sub(oldest)` — and the
+/// receiver used to compare numerically, which disagreed at the wrap and
+/// nowhere else.
+fn is_newer(id: MessageId, than: MessageId) -> bool {
+    id != than && id.wrapping_sub(than) < 0x8000_0000
 }
 
 /// Tracks which message identifiers have already been delivered.
@@ -145,8 +158,8 @@ impl DedupWindow {
             self.highest = id;
             return true;
         }
-        if id > self.highest {
-            let shift = id - self.highest;
+        if is_newer(id, self.highest) {
+            let shift = id.wrapping_sub(self.highest);
             // As the window slides, the previous highest becomes a set bit at
             // distance `shift`, which is bit `shift - 1`.
             self.bitmap = if shift > ACK_WINDOW {
@@ -165,7 +178,7 @@ impl DedupWindow {
         if id == self.highest {
             return false;
         }
-        let distance = self.highest - id;
+        let distance = self.highest.wrapping_sub(id);
         if distance > ACK_WINDOW {
             // Older than the window. Assume already delivered rather than risk
             // handing the application a duplicate.

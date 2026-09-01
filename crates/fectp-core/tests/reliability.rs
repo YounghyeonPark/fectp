@@ -394,3 +394,61 @@ fn next_deadline_bounds_how_long_a_caller_may_block() {
         "a caller waiting on a socket must wake for the earliest deadline"
     );
 }
+
+/// Identifiers wrap, and both sides of the reliability layer have to agree that
+/// they do.
+///
+/// The sender already did: `register` bounds its distance with `wrapping_sub`,
+/// and `next_id` wraps. The receiver compared numerically, so at the boundary a
+/// brand-new identifier looked older than everything and was refused as already
+/// delivered — which stops a session delivering reliable messages at all,
+/// permanently, after 2^32 of them in one direction.
+///
+/// Found by writing the acknowledgement rule out of SPEC.md §5.7 and comparing:
+/// "bit `i` set means `highest - 1 - i`" is wrapping arithmetic on a u32, so
+/// the document and the code disagreed at exactly one point.
+#[test]
+fn identifiers_are_compared_the_way_they_wrap() {
+    // An acknowledgement whose highest has just wrapped past the end.
+    let ack = Ack {
+        highest: 0,
+        bitmap: 0b1,
+    };
+    assert!(
+        ack.covers(u32::MAX),
+        "bit 0 means `highest - 1`, which wraps to u32::MAX"
+    );
+    assert!(ack.covers(0), "the highest is always covered");
+    assert!(!ack.covers(u32::MAX - 1), "bit 1 is clear");
+
+    let ack = Ack {
+        highest: 2,
+        bitmap: 0b111,
+    };
+    for id in [2u32, 1, 0, u32::MAX] {
+        assert!(ack.covers(id), "{id} is within three of a highest of 2");
+    }
+    assert!(!ack.covers(u32::MAX - 1), "four below, and only three bits are set");
+
+    // And the receive window, which decides what reaches the application.
+    let mut window = DedupWindow::new();
+    assert!(window.accept(u32::MAX - 2), "first message, whatever its value");
+    assert!(window.accept(u32::MAX - 1));
+    assert!(window.accept(u32::MAX));
+    assert!(
+        window.accept(0),
+        "the identifier after u32::MAX is new, not ancient"
+    );
+    assert!(window.accept(1));
+    assert!(!window.accept(0), "and it is a duplicate the second time");
+    assert!(
+        !window.accept(u32::MAX),
+        "so is one from before the wrap, still inside the window"
+    );
+
+    // The acknowledgement it produces has to name what it accepted.
+    let ack = window.to_ack();
+    for id in [1u32, 0, u32::MAX, u32::MAX - 1, u32::MAX - 2] {
+        assert!(ack.covers(id), "accepted {id} but the acknowledgement omits it");
+    }
+}

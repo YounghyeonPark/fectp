@@ -503,3 +503,26 @@ fn leb128_has_exactly_one_encoding_per_value() {
         "a fifth byte carrying more than the four bits u32 has left"
     );
 }
+
+/// §5.5 — identifiers wrap, and comparisons are modulo 2^32.
+///
+/// The document did not say this until an implementation written from it
+/// disagreed with the one that produced it. Pinned here so the sentence and the
+/// behaviour cannot drift apart again.
+#[test]
+fn message_identifiers_wrap() {
+    use fectp_core::reliability::{Ack, DedupWindow};
+
+    // "the one a shorter distance ahead is the later one"
+    let mut window = DedupWindow::new();
+    assert!(window.accept(u32::MAX));
+    assert!(window.accept(0), "SPEC.md §5.5: the identifier after u32::MAX is later");
+    assert!(!window.accept(u32::MAX), "and the one before it is now a duplicate");
+
+    // §5.7 — "bit `i` set means `highest - 1 - i`, with the subtraction wrapping"
+    let ack = Ack {
+        highest: 0,
+        bitmap: 0b1,
+    };
+    assert!(ack.covers(u32::MAX), "SPEC.md §5.7: bit 0 of a highest of 0 names u32::MAX");
+}

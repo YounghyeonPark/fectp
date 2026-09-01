@@ -59,6 +59,8 @@ jobs:
         run: cargo test -p fectp --test api_reference --features compress
       - name: SPEC.md constants match the code
         run: cargo test -p fectp-core --test spec_conformance
+      - name: a second implementation, written from SPEC.md, agrees
+        run: cargo test -p fectp-core --test spec_independent
       - name: parsers survive generated input
         run: cargo test -p fectp-core --test malformed_input
       - name: the reliability layer survives generated orderings

@@ -606,6 +606,14 @@ When `RELIABLE` is set, the plaintext carries a `message_id`: a `u32` assigned
 by the sender, starting at 0 and increasing by one per reliable message, per
 direction.
 
+**Identifiers wrap**, and every comparison between two of them is modulo 2^32:
+the one a shorter distance ahead is the later one. A session therefore does not
+end at the 2^32nd reliable message. An implementation that compares them as
+plain integers agrees with this everywhere except at the wrap, where it decides
+that every new identifier is four billion old — and refuses all of them, for the
+rest of the session. Version 1 of this document did not say so, and the
+implementation that wrote it had the bug.
+
 Reliability is **per message and optional**. A sender MAY mix reliable and
 unreliable frames freely on one session.
 
@@ -724,8 +732,9 @@ An `Ack` frame's body is a 12-byte block:
 | 0 | 4 | `highest`, u32 — highest `message_id` received |
 | 4 | 8 | `bitmap`, u64 |
 
-Bit `i` of `bitmap` set means `highest - 1 - i` was also received. An
-acknowledgement therefore reports `highest` plus the 64 identifiers below it.
+Bit `i` of `bitmap` set means `highest - 1 - i` was also received, with the
+subtraction wrapping as §5.5 requires. An acknowledgement therefore reports
+`highest` plus the 64 identifiers below it.
 
 The report is **selective, not cumulative**: one gap does not withhold
 acknowledgement of everything behind it, so only genuinely missing messages are
