@@ -68,41 +68,14 @@ fn measure_what_a_flood_costs() {
     println!("  none of them ever sent a byte.\n");
 }
 
-/// The property that matters: a flood must not stop the peers that belong here.
-///
-/// An unbounded table is not only memory. It is the established sessions that
-/// go with it when the process runs out.
-#[test]
-fn a_flood_does_not_evict_an_established_peer() {
-    let echo = Echo::start();
-
-    // A legitimate client, connected and working before the flood starts.
-    let good = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-        .expect("connect");
-    good.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
-    good.send(b"before", PayloadType::Opaque).expect("send");
-    let mut buf = vec![0u8; 1024];
-    let n = good.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"before");
-
-    // Two hundred strangers, none of which ever sends anything.
-    let mut strangers = Vec::new();
-    for _ in 0..200 {
-        if let Ok(conn) = Connection::connect(echo.addr(), &echo.public(), &Identity::generate()) {
-            strangers.push(conn);
-        }
-    }
-    assert!(!strangers.is_empty(), "the flood has to actually connect");
-
-    // The peer that was here first must still work.
-    good.send(b"after", PayloadType::Opaque).expect("send after flood");
-    let n = good.recv(&mut buf).expect("recv after flood");
-    assert_eq!(
-        &buf[..n],
-        b"after",
-        "an established session was lost to peers that never sent anything"
-    );
-}
+// A test named `a_flood_does_not_evict_an_established_peer` used to sit here. It
+// connected two hundred strangers and checked that an established peer still
+// worked, which it did — and did equally well with the eviction removed, because
+// two hundred is under the default `MAX_PEERS` of 1024 and nothing was ever
+// evicted at all. It asserted something already true.
+//
+// `the_peer_table_is_bounded_and_evicts_the_silent_first` below tests the same
+// property and fails without the fix, which is the difference.
 
 /// Garbage costs less than a real opening frame, and should.
 ///
