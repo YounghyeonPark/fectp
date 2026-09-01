@@ -156,9 +156,23 @@ const HANDSHAKE_REPLIES: u8 = 8;
 /// as well.
 ///
 /// It is a ceiling on *new* sessions, not on traffic — established peers are
-/// routed without passing through here, so a flood slows down connection
-/// setup and leaves everything already connected alone.
-pub const MAX_HANDSHAKES_PER_SECOND: u32 = 64;
+/// routed without passing through here, so a flood slows connection setup and
+/// leaves everything already connected alone.
+///
+/// The number comes from what a handshake costs rather than from taste. A full
+/// one is a 0.66 ms round trip in release (BENCHMARKS.md §1), of which the
+/// responder's share is roughly half, so a core manages a few thousand a
+/// second; this spends well under a fifth of one on strangers. It was 64 to
+/// begin with, which was a guess, and a bad one — it would have throttled a
+/// fleet of devices that wake, report and sleep, which is the traffic this
+/// protocol is written for, long before it inconvenienced anybody hostile.
+///
+/// Resumption and pre-shared-key handshakes are a quarter of the work and are
+/// charged the same, so the ceiling is more conservative for them than for the
+/// case it was sized against.
+///
+/// [`Endpoint::set_max_handshakes_per_second`] overrides it.
+pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 
 /// A handshake this endpoint started, waiting for its reply.
 enum Handshake {
@@ -214,6 +228,7 @@ pub struct Endpoint {
     /// Budget for answering new handshakes, refilled over time.
     handshake_budget: f32,
     handshake_refilled: Instant,
+    handshake_rate: u32,
     max_peers: usize,
     next_id: u64,
 
@@ -297,6 +312,7 @@ impl Endpoint {
             events: VecDeque::new(),
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
+            handshake_rate: MAX_HANDSHAKES_PER_SECOND,
             max_peers: MAX_PEERS,
             outbound: HashMap::new(),
             next_id: 0,
@@ -846,6 +862,20 @@ impl Endpoint {
         Ok(true)
     }
 
+    /// Sets how many new handshakes a second this endpoint will answer,
+    /// replacing [`MAX_HANDSHAKES_PER_SECOND`].
+    ///
+    /// Raise it on a server that genuinely sees more than the default and can
+    /// afford the work; lower it to spend less on strangers. It bounds new
+    /// sessions only — traffic on established ones never passes through it.
+    ///
+    /// Zero is treated as one: an endpoint that answers no handshakes can
+    /// never acquire a peer.
+    pub fn set_max_handshakes_per_second(&mut self, per_second: u32) {
+        self.handshake_rate = per_second.max(1);
+        self.handshake_budget = self.handshake_budget.min(self.handshake_rate as f32);
+    }
+
     /// Whether there is budget to answer one more new handshake.
     ///
     /// A token bucket rather than a counter per interval, so a burst is
@@ -854,9 +884,8 @@ impl Endpoint {
         let now = Instant::now();
         let elapsed = now.duration_since(self.handshake_refilled).as_secs_f32();
         self.handshake_refilled = now;
-        self.handshake_budget = (self.handshake_budget
-            + elapsed * MAX_HANDSHAKES_PER_SECOND as f32)
-            .min(MAX_HANDSHAKES_PER_SECOND as f32);
+        self.handshake_budget = (self.handshake_budget + elapsed * self.handshake_rate as f32)
+            .min(self.handshake_rate as f32);
 
         if self.handshake_budget < 1.0 {
             return false;

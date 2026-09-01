@@ -253,7 +253,7 @@ processes so the key genuinely has to be copied between them.
 | `CODEC_OVERHEAD` | 4 | Bytes a coded payload adds. |
 | `HANDSHAKE_TIMEOUT` | 5 s | How long any way of connecting waits for a reply, resending meanwhile. |
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
-| `MAX_HANDSHAKES_PER_SECOND` | 64 | New sessions answered per second. Established peers are not affected. |
+| `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |
 
 ---
 

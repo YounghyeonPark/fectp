@@ -28,16 +28,28 @@ fn measure_what_a_flood_costs() {
     let mut server = Endpoint::bind("127.0.0.1:0", identity).expect("bind");
     let addr = server.local_addr().expect("addr");
 
+    // Several clients, because one blocking `connect` at a time measures the
+    // client's round trip rather than what the server can be made to do.
+    let total = Arc::new(AtomicUsize::new(0));
+    let attackers: Vec<_> = (0..8)
+        .map(|_| {
+            let count = Arc::clone(&total);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(2) {
+                    if Connection::connect(addr, &public, &Identity::generate()).is_ok() {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
     let attacker = std::thread::spawn(move || {
         let started = Instant::now();
-        let mut made = 0;
-        // Each is a fresh identity: a distinct peer as far as the server knows.
-        while started.elapsed() < Duration::from_secs(2) {
-            if Connection::connect(addr, &public, &Identity::generate()).is_ok() {
-                made += 1;
-            }
+        for a in attackers {
+            let _ = a.join();
         }
-        (made, started.elapsed())
+        (total.load(Ordering::Relaxed), started.elapsed())
     });
 
     let started = Instant::now();
@@ -393,4 +405,66 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
 
     stop.store(true, Ordering::Relaxed);
     let _ = pump.join();
+}
+
+/// The rate limit is enforced, and is the operator's to set.
+///
+/// Without a test the limit is a number in a file. The default is deliberately
+/// far above anything a test could drive, so this sets a small one — which also
+/// exercises the setter, since a bound nobody can adjust is the reason the
+/// first value shipped too low.
+#[test]
+fn new_handshakes_are_rate_limited() {
+    let identity = Identity::generate();
+    let public = *identity.public();
+    let mut server = Endpoint::bind("127.0.0.1:0", identity).expect("bind");
+    let addr = server.local_addr().expect("addr");
+
+    const PER_SECOND: u32 = 8;
+    server.set_max_handshakes_per_second(PER_SECOND);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&attempts);
+    let flood: Vec<_> = (0..4)
+        .map(|_| {
+            let flag = Arc::clone(&flag);
+            let counted = Arc::clone(&counted);
+            thread::spawn(move || {
+                let mut held = Vec::new();
+                while !flag.load(Ordering::Relaxed) {
+                    if let Ok(conn) = Connection::connect(addr, &public, &Identity::generate()) {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                        held.push(conn);
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let started = Instant::now();
+    let window = Duration::from_secs(3);
+    while started.elapsed() < window {
+        let _ = server.poll(Some(Duration::from_millis(5)));
+    }
+    stop.store(true, Ordering::Relaxed);
+    for t in flood {
+        let _ = t.join();
+    }
+
+    // The bucket starts full, so the ceiling over the window is one burst plus
+    // the refill. Generous slop on top: this is checking that a limit exists at
+    // all, not measuring it to the packet.
+    let accepted = server.peer_count();
+    let ceiling = (PER_SECOND as f64 * (1.0 + window.as_secs_f64()) * 2.0) as usize;
+    assert!(
+        accepted <= ceiling,
+        "{accepted} handshakes answered at a limit of {PER_SECOND}/s over {window:?}; \
+         expected no more than about {ceiling}"
+    );
+    assert!(
+        attempts.load(Ordering::Relaxed) > 0,
+        "nothing connected at all, so the limit was never the thing being tested"
+    );
 }

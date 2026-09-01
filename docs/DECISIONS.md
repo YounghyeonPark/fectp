@@ -1141,7 +1141,12 @@ completing a handshake costs an attacker nothing and proves nothing, while
 sending an authenticated frame afterwards is the first thing that does. Plain
 oldest-first would evict the established session and keep the flood.
 
-[`MAX_HANDSHAKES_PER_SECOND`] caps the work. The table bound alone would leave
+[`MAX_HANDSHAKES_PER_SECOND`] caps the work — at 512 a second, which is not
+the number this shipped with. It was 64, chosen by feel rather than from the
+0.66 ms a handshake actually costs, and 64 would have throttled a fleet of
+devices that wake, report and sleep to a small fraction of what one core can
+serve. That is this protocol's own traffic, refused to protect it. Both bounds
+are settable now, for the same reason `MAX_PEERS` was. The table bound alone would leave
 an attacker buying four X25519 operations for the price of a datagram
 indefinitely, since evicting always makes room. The limit is on *new* sessions
 only — established peers are routed without passing through it, so a flood
