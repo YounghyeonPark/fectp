@@ -1,5 +1,7 @@
 # FECTP — Fast Encrypted Compressed Transport Protocol
 
+[![CI](https://github.com/YounghyeonPark/fectp/actions/workflows/ci.yml/badge.svg)](https://github.com/YounghyeonPark/fectp/actions/workflows/ci.yml)
+
 **Three things, in one pass over your data: it goes out encrypted, compressed
 for what it actually is, and with as little delay as possible.** Small enough
 for a microcontroller, identical code on a server.
@@ -365,7 +367,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-208 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+212 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 
@@ -382,6 +384,12 @@ already failed somewhere.
 | The specification | [`spec_conformance.rs`](crates/fectp-core/tests/spec_conformance.rs) pins every constant [SPEC.md](docs/SPEC.md) states | A spec that drifts is worse than none — an independent implementation would fail and nothing would catch it |
 | The parsers | [`malformed_input.rs`](crates/fectp-core/tests/malformed_input.rs) puts arbitrary bytes through each decoder, and tampers with or truncates real frames | It found the varint decoder accepting overlong encodings, so a value had two spellings |
 | The documentation | [`doc_snippets.rs`](crates/fectp/tests/doc_snippets.rs) extracts every Rust block from this file and [USAGE.md](docs/USAGE.md) and compiles it | A hand-written tour is a *copy*: it compiles happily while the original goes stale, which is how six calls kept passing an argument removed three commits earlier |
+
+All of it runs on every push — [`ci.yml`](.github/workflows/ci.yml) — across
+Linux, macOS and Windows, and in each feature configuration separately. That
+last part is not fussiness: `cargo test --workspace` unifies features across the
+graph, and the bench crate turning on `compress` was hiding a suite that failed
+without it.
 
 An independent implementation needs an off-the-shelf Noise library — both
 patterns used exist for C, Go, Python, Java and JavaScript — plus the framing:

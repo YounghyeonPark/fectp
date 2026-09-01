@@ -3,7 +3,10 @@ name = "fectp-bench"
 description = "Measured comparison of FECTP against other transports"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Not the workspace value: rcgen, used to make certificates for the
+# TLS comparison, pulls in `time`, which needs 1.88. The published
+# crates still build on 1.85; this harness is a development tool.
+rust-version = "1.88"
 license.workspace = true
 publish = false
 

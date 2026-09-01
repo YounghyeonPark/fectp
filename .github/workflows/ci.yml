@@ -1,0 +1,116 @@
+name: CI
+
+# The guards in this repository only work if something runs them. This session
+# alone found documentation that had drifted for three commits, a test that
+# passed for the wrong reason, and a suite that failed under `-p fectp` while
+# `--workspace` was green. Every job below exists because of a specific thing
+# that got through.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # `cargo test --workspace` unifies features across the graph, and the bench
+  # crate enables `fectp/compress`. That masked a real failure: the fragmentation
+  # test filled its payload with one repeated byte, which coded down to a single
+  # frame with compression on and genuinely fragmented without it — where the
+  # echo helper could not reply. Each configuration therefore runs on its own.
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "linux, workspace",       os: ubuntu-latest,  args: "--workspace" }
+          - { name: "linux, core alone",      os: ubuntu-latest,  args: "-p fectp-core" }
+          - { name: "linux, no features",     os: ubuntu-latest,  args: "-p fectp" }
+          - { name: "linux, compress",        os: ubuntu-latest,  args: "-p fectp --features compress" }
+          # The development machine is Windows, so the `cfg(unix)` paths in the
+          # key example are never compiled there. This is the only place they run.
+          - { name: "macos, workspace",       os: macos-latest,   args: "--workspace" }
+          - { name: "windows, workspace",     os: windows-latest, args: "--workspace" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test ${{ matrix.args }}
+
+  # The documented snippets, the API reference, the wire specification and the
+  # parsers all have guards. They are worth nothing unless they run, and they
+  # are cheapest to run where the compress feature is on, which is the
+  # configuration the guides describe.
+  guards:
+    name: drift guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: README and USAGE snippets compile
+        run: cargo test -p fectp --test doc_snippets --features compress
+      - name: API.md matches the API
+        run: cargo test -p fectp --test api_reference --features compress
+      - name: SPEC.md constants match the code
+        run: cargo test -p fectp-core --test spec_conformance
+      - name: parsers survive generated input
+        run: cargo test -p fectp-core --test malformed_input
+      - name: every documented flow runs
+        run: cargo run -p fectp --example tour --features compress
+      - name: documentation links resolve
+        run: python3 .github/check-links.py
+
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Denied here rather than through a global RUSTFLAGS: a new toolchain
+      # adding a lint should fail the lint job, not every test job on an
+      # unrelated change.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
+
+  # `crates/footprint` is deliberately outside the workspace, so nothing above
+  # builds it. It is also the only evidence for the 22 KiB the README claims.
+  footprint:
+    name: microcontroller image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: build for thumbv7em-none-eabihf
+        working-directory: crates/footprint
+        run: cargo build --release --target thumbv7em-none-eabihf
+      - name: measure it
+        working-directory: crates/footprint
+        run: python3 size.py
+
+  # The crates declare rust-version = 1.85. A declared minimum nobody builds is
+  # a guess — this one was already wrong across the whole workspace, because the
+  # bench harness pulls in rcgen and therefore `time`, which needs 1.88. The
+  # claim that matters is about the crates someone would depend on, so those are
+  # what this checks.
+  msrv:
+    name: minimum supported Rust (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p fectp-core --all-targets
+      - run: cargo check -p fectp --all-targets
+      - run: cargo check -p fectp --all-targets --features compress

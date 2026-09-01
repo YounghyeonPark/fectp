@@ -481,7 +481,7 @@ impl ReorderingRelay {
                 *learn.lock().expect("lock") = Some(from);
                 seen += 1;
 
-                if seen > 1 && seen % every == 0 {
+                if seen > 1 && seen.is_multiple_of(every) {
                     held.push_back((buf[..n].to_vec(), Instant::now()));
                     continue;
                 }

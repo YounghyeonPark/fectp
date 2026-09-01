@@ -1076,6 +1076,45 @@ retransmit queue's *sequence* of operations, which needs a stateful model to
 find, and that is not built. Nor is any of this a security audit; it is the
 part of one that can be automated.
 
+## D31 — The handshake is retransmitted, like everything else
+
+**Problem**: `Connection` sent its opening frame once. If that datagram or its
+reply went missing, `connect` waited the full `HANDSHAKE_TIMEOUT` and failed.
+
+The protocol has retransmitted data frames since [D12](#d12--reliability-is-per-message-and-unordered),
+and `Endpoint` resent the handshakes *it* started — four attempts, 250 ms
+linear backoff — from the moment outbound dialling was built. Only the blocking
+client did not, which left the simpler of the two APIs the less robust one, and
+that is the wrong way round: `Connection` is what a first program uses.
+
+The consequence was not subtle. One lost packet in either direction meant a
+five-second stall and a failed connection, on a protocol whose stated purpose
+is a device that wakes, sends one reading, and sleeps. A 1% loss path fails
+about 2% of connections outright.
+
+**How it surfaced**: as a flaky test. The `modes` suite failed roughly one run
+in six, on a different test each time, always with a handshake timeout.
+Diagnosing it as "the test machine is loaded" would have been true and useless:
+Windows loopback UDP does drop datagrams under load, and the protocol had no
+answer for that anywhere a handshake was involved.
+
+**Decision**: `Connection` retransmits on the schedule `Endpoint` already used,
+bounded by the same `HANDSHAKE_TIMEOUT`, so a peer that is genuinely absent is
+still reported in five seconds — it now costs about six datagrams to establish
+that rather than one.
+
+`tests/handshake_loss.rs` puts a relay in the path and drops specific frames:
+the opening one, the reply, and three in a row. All three fail without the
+retransmission and pass with it, which is the only thing that makes them worth
+having. A fourth test pins the other direction — that retrying has not turned
+"nobody is there" into an unbounded wait.
+
+**What it does not fix**: the responder still keeps no state for a handshake it
+has answered, so a repeated message 1 is answered afresh. That is correct for
+`IK` — the reply is deterministic given the same message — but it does mean a
+replayed opening frame costs the responder four X25519 operations. Bounding
+that is unsolved and belongs with the rest of the denial-of-service surface.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies

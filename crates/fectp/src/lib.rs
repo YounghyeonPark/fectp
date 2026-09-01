@@ -118,6 +118,59 @@ pub(crate) fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
+
+/// How long to wait for a handshake reply before sending the opening frame again.
+///
+/// The same schedule [`Endpoint`] already used for the connections it starts.
+const HANDSHAKE_RETRY_MS: u64 = 250;
+
+/// Sends the opening frame and waits for the reply, sending it again if either
+/// goes missing.
+///
+/// A handshake frame is one datagram and carries no acknowledgement of its own,
+/// so without this a single lost packet meant the full
+/// [`HANDSHAKE_TIMEOUT`] of silence and then a failed connect — no retry, on a
+/// protocol whose data path has retransmitted since the beginning. `Endpoint`
+/// resent its opening frames all along; the blocking client did not, which left
+/// the simpler of the two APIs the less robust one.
+///
+/// Backoff is linear from [`HANDSHAKE_RETRY_MS`] and the whole thing is bounded
+/// by [`HANDSHAKE_TIMEOUT`], so a peer that is genuinely absent is still
+/// reported in five seconds rather than waited on — it just costs a handful of
+/// datagrams to establish that instead of one.
+fn exchange_handshake(
+    transport: &mut UdpTransport,
+    frame: &[u8],
+    rx: &mut [u8],
+) -> Result<usize> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+
+    for attempt in 1u64.. {
+        transport.send(frame)?;
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait = Duration::from_millis(HANDSHAKE_RETRY_MS * attempt).min(remaining);
+        transport.set_read_timeout(Some(wait))?;
+
+        match transport.recv(rx) {
+            Ok(n) => return Ok(n),
+            // Nothing came back in time: assume the frame was lost and repeat
+            // it. A responder that simply refused us is silent in exactly the
+            // same way, which is why this is bounded rather than persistent.
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(Error::Io(e)),
+        }
+    }
+
+    Err(Error::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "no handshake reply within the handshake timeout",
+    )))
+}
+
 /// Resolves the first address `addr` names.
 fn resolve(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
     addr.to_socket_addrs()?
@@ -427,9 +480,7 @@ impl Core {
         )?;
 
         let n = initiator.write_init(&mut OsRng, zero_rtt, &mut tx)?;
-        transport.send(&tx[..n])?;
-
-        let n = transport.recv(&mut rx)?;
+        let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
@@ -486,9 +537,7 @@ impl Core {
             local_capabilities(),
         )?;
         let n = initiator.write_init(&mut OsRng, zero_rtt, &mut tx)?;
-        transport.send(&tx[..n])?;
-
-        let n = transport.recv(&mut rx)?;
+        let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
@@ -526,9 +575,7 @@ impl Core {
         // they do when encrypted.
         let mut initiator = PlainInitiator::new(OsRng.next_u32(), local_capabilities());
         let n = initiator.write_init(payload, &mut tx)?;
-        transport.send(&tx[..n])?;
-
-        let n = transport.recv(&mut rx)?;
+        let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
@@ -569,9 +616,7 @@ impl Core {
         )?;
 
         let n = initiator.write_init(&mut OsRng, zero_rtt, &mut tx)?;
-        transport.send(&tx[..n])?;
-
-        let n = transport.recv(&mut rx)?;
+        let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
