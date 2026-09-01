@@ -1,0 +1,39 @@
+name: Advisories
+
+# Separate from ci.yml because this one has to run on a clock as well as on a
+# push. The advisory database changes daily, so the same commit passes today
+# and fails tomorrow — that is the point, and it means waiting for the next
+# push is waiting too long. Keeping it here rather than adding a schedule to
+# ci.yml avoids re-running the whole test matrix every week to ask one
+# question.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+  schedule:
+    # Monday morning. An advisory that lands on Tuesday is known about within a
+    # week rather than whenever someone next touches a dependency.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # This is a cryptographic transport whose entire security rests on six
+      # dependencies it did not write — x25519-dalek, chacha20poly1305, blake2,
+      # zeroize, subtle, rand_core. An advisory against any of them is an
+      # advisory against this.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
