@@ -10,7 +10,7 @@
 
 mod common;
 
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -305,4 +305,92 @@ fn a_flood_does_not_slow_an_established_peer() {
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = flood.join();
+}
+
+/// A captured opening frame, sent again.
+///
+/// This is not the same as the flood above. A replay carries a *specific*
+/// peer's session identifier, and the responder files sessions by address and
+/// identifier — so answering it afresh replaces the session that pair already
+/// had. That turns a captured packet into a way to cut one chosen peer off,
+/// which is a good deal more pointed than making a server do arithmetic.
+///
+/// It is also the ordinary case now that the client retransmits its handshake:
+/// a reply lost on the way back means the responder sees message 1 twice.
+#[test]
+fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
+    let echo = Echo::start();
+
+    // A relay that keeps the first datagram it forwards — the opening frame —
+    // and can send it again from the same address it originally came from,
+    // which is what makes the responder file it against the same pair.
+    let relay = UdpSocket::bind("127.0.0.1:0").expect("relay bind");
+    relay.set_read_timeout(Some(Duration::from_millis(25))).expect("timeout");
+    let relay_addr = relay.local_addr().expect("addr");
+    let server = echo.addr();
+
+    let replay_now = Arc::new(AtomicBool::new(false));
+    let replayed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let trigger = Arc::clone(&replay_now);
+    let count = Arc::clone(&replayed);
+    let flag = Arc::clone(&stop);
+    let pump = thread::spawn(move || {
+        let mut buf = vec![0u8; 4096];
+        let mut client: Option<SocketAddr> = None;
+        let mut opening: Option<Vec<u8>> = None;
+        while !flag.load(Ordering::Relaxed) {
+            if trigger.swap(false, Ordering::Relaxed) {
+                if let Some(frame) = &opening {
+                    let _ = relay.send_to(frame, server);
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let (n, from) = match relay.recv_from(&mut buf) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if from == server {
+                if let Some(client) = client {
+                    let _ = relay.send_to(&buf[..n], client);
+                }
+            } else {
+                client = Some(from);
+                if opening.is_none() {
+                    opening = Some(buf[..n].to_vec());
+                }
+                let _ = relay.send_to(&buf[..n], server);
+            }
+        }
+    });
+
+    let conn = Connection::connect(relay_addr, &echo.public(), &Identity::generate())
+        .expect("connect");
+    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+
+    let mut buf = vec![0u8; 1024];
+    conn.send(b"before the replay", PayloadType::Opaque).expect("send");
+    let n = conn.recv(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], b"before the replay");
+
+    // Send the captured opening frame again, from the same address.
+    replay_now.store(true, Ordering::Relaxed);
+    let waited = Instant::now();
+    while replayed.load(Ordering::Relaxed) == 0 && waited.elapsed() < Duration::from_secs(2) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(replayed.load(Ordering::Relaxed), 1, "the replay must have gone out");
+    thread::sleep(Duration::from_millis(200));
+
+    // The session the frame named must still be the one that works.
+    conn.send(b"after the replay", PayloadType::Opaque)
+        .expect("send after replay");
+    let n = conn
+        .recv(&mut buf)
+        .expect("a replayed opening frame cut off the session it named");
+    assert_eq!(&buf[..n], b"after the replay");
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = pump.join();
 }

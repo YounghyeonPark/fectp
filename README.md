@@ -324,7 +324,7 @@ records what each one would cost to change.
 | **A pre-shared key is symmetric** | Every holder can impersonate every other. One administrative domain only. |
 | **Plaintext mode is genuinely plaintext** | Read, forged and altered at will by anyone on the path. |
 | **A resumption ticket is key material** | Store it as carefully as an identity secret. No expiry; 256 per responder, evicted oldest-first. |
-| **A stranger can still cost you a handshake** | Anyone holding the public key can complete one — four X25519 operations. The peer table and the rate of new handshakes are both bounded, so a flood degrades connection setup rather than the process, but the work is not free. |
+| **A stranger can still cost you a handshake** | Anyone holding the public key can complete one — four X25519 operations. The peer table and the rate of new handshakes are both bounded, so a flood degrades connection setup rather than the process, but the work is not free. A replay from a new source address is a new handshake; only a cookie exchange would tell them apart, and that costs the round trip 0-RTT exists to save. |
 | **No post-quantum option** | X25519 only. A PQC suite would be a new protocol version, not a negotiation. |
 | **Public keys are your problem** | The protocol authenticates a key you already trust. Getting it to you is out of scope. |
 | **The secret must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake does its own Diffie-Hellman, so a secure element or HSM that never releases the key cannot be used without a change to `fectp-core`. |
@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-216 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+218 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 

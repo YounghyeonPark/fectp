@@ -187,3 +187,26 @@ fn a_silent_peer_is_still_given_up_on() {
         fectp::HANDSHAKE_TIMEOUT
     );
 }
+
+/// Several lost replies in a row, which is what exercises the responder's
+/// cached answer rather than the client's resending.
+///
+/// Each loss makes the client send message 1 again, and the responder answers
+/// from what it kept rather than handshaking afresh. There is a bound on how
+/// often it will do that; this stays inside it, as an honest client does.
+#[test]
+fn repeatedly_lost_replies_are_answered_from_what_was_kept() {
+    let echo = Echo::start();
+    let relay = Relay::start(echo.addr(), 0, 3);
+
+    let conn = Connection::connect(relay.addr(), &echo.public(), &Identity::generate())
+        .expect("three lost replies are still recoverable");
+    assert_eq!(relay.dropped(), 3);
+
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    conn.send(b"after three", PayloadType::Opaque).expect("send");
+    let mut buf = vec![0u8; 1024];
+    let n = conn.recv(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], b"after three");
+}

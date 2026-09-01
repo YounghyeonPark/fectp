@@ -1174,10 +1174,54 @@ evicted when it was only abandoned. The loop now drains before joining. A test
 that fails at random is worse than no test, because what it teaches is to
 ignore a red run.
 
-**What is not fixed**: a responder still answers a repeated opening frame
-afresh, so a replayed handshake costs the four operations again. Bounding that
-needs the responder to remember what it has answered, which is state an
-attacker also chooses. It is the remaining piece of this surface.
+**What was left, and is now done**: see [D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept).
+The responder answered a repeated opening frame afresh, which turned out to be
+worse than the wasted arithmetic it looked like.
+
+## D33 — A repeated opening frame is answered from what was kept
+
+**Problem**: the responder handshaked again every time it saw message 1.
+[D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work) recorded
+this as the arithmetic being paid twice. It is worse than that.
+
+Sessions are filed by address and identifier (D14), and filing a new one
+**replaces** what that pair already had. A replayed opening frame carries a
+specific peer's identifier, so answering it afresh destroys the session it
+names. One captured packet, sent again, cuts off one chosen peer — a good deal
+more pointed than making a server do arithmetic, and it was reachable by anyone
+who could capture a datagram.
+
+Measured by doing it: a relay keeps the first frame it forwards and sends it
+again later. Before the change the client's next message went unanswered and
+`recv` timed out; the test that does this is `handshake_flood.rs`.
+
+The same path is now ordinary rather than hostile, which is what brought it to
+attention. Since [D31](#d31--the-handshake-is-retransmitted-like-everything-else)
+the client resends its opening frame whenever a reply goes missing, so a
+responder sees message 1 twice as a matter of course.
+
+**Decision**: never handshake twice for the same pair. The response is kept
+with the session and sent again if the frame repeats; once the peer sends an
+authenticated frame it has evidently received the response, so the copy is
+dropped and any further repeat is ignored.
+
+Resending is safe in a way that answering afresh is not: the bytes are ones the
+attacker already has, so nothing is disclosed, and no session is created or
+replaced.
+
+**What it costs**: the response is held per session until the peer speaks —
+about a hundred bytes each, and only for peers that have not yet said anything.
+Resends are capped per session, because a cheap answer to a cheap frame is a
+reflector otherwise: an attacker spoofing an address it does not control could
+have one datagram sent for each one it sends. A client resends its opening
+frame a handful of times at most within the handshake timeout, so a small
+allowance covers every honest case and nothing else.
+
+**What is still open**: a replay from a *different* source address is a new
+pair, so it is a new handshake and costs the four operations. That is bounded
+only by the rate limit of D32. Distinguishing it would need a cookie exchange,
+and a cookie costs the round trip that carrying data in the first packet exists
+to save.
 
 ## Not carried over
 

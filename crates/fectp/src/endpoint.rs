@@ -141,6 +141,13 @@ const HANDSHAKE_ATTEMPTS: u8 = 4;
 /// number compiled in.
 pub const MAX_PEERS: usize = 1024;
 
+/// How many times one session's handshake response may be sent again.
+///
+/// A client resends its opening frame a handful of times at most, inside
+/// [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT); anything past that is not
+/// an honest client waiting.
+const HANDSHAKE_REPLIES: u8 = 8;
+
 /// New handshakes answered per second before the rest are dropped unanswered.
 ///
 /// [`MAX_PEERS`] bounds the memory but not the work: answering costs four
@@ -224,6 +231,19 @@ struct PeerEntry {
     datagram_limit: usize,
     /// When this session was established, which orders eviction.
     filed: Instant,
+    /// The response sent for this session's handshake, and how many more times
+    /// it may be sent again.
+    ///
+    /// Kept so that seeing message 1 again resends the same bytes instead of
+    /// performing the handshake a second time. Dropped once the peer speaks,
+    /// which proves it received the response and will not ask again.
+    ///
+    /// The count bounds it as a reflector: resending is cheap enough that an
+    /// attacker could otherwise get one datagram sent for each one it sends,
+    /// to an address it does not control. A client retransmits its opening
+    /// frame at most a handful of times inside the handshake timeout, so a
+    /// small allowance covers every honest case.
+    handshake_reply: Option<(Vec<u8>, u8)>,
     /// Whether anything has ever arrived from this peer since.
     ///
     /// This is what separates a flood from a quiet peer. Completing a
@@ -514,6 +534,14 @@ impl Endpoint {
         // Each mode accepts only its own opening frames. A peer speaking a
         // different mode is simply not understood, which is what makes the
         // choice unnegotiable.
+        if matches!(
+            header.frame_type,
+            FrameType::HandshakeInit | FrameType::ResumeInit | FrameType::PlainInit
+        ) && self.repeat_handshake(from, header.session_id)?
+        {
+            return Ok(None);
+        }
+
         // Answering a new handshake is the expensive, unauthenticated path.
         // Everything below this that establishes a session passes the check;
         // a reply to a handshake *we* started, and traffic on an established
@@ -567,6 +595,8 @@ impl Endpoint {
         // a peer does that an attacker completing handshakes never does. It is
         // what keeps this session off the eviction list.
         entry.spoke = true;
+        // It answered, so it has the handshake response and will not ask again.
+        entry.handshake_reply = None;
 
         if ack_len > 0 {
             self.socket.send_to(&self.ack[..ack_len], from)?;
@@ -652,7 +682,10 @@ impl Endpoint {
 
         let (session, sent) = responder.write_response(&mut OsRng, &[], &mut self.tx)?;
         self.socket.send_to(&self.tx[..sent], from)?;
-        Ok(self.register(Link::Encrypted(session), from, zero_rtt, false))
+        let reply = self.tx[..sent].to_vec();
+        let event = self.register(Link::Encrypted(session), from, zero_rtt, false);
+        self.remember_reply(&event, reply);
+        Ok(event)
     }
 
     fn accept_resumed(&mut self, n: usize, from: SocketAddr) -> Result<Event> {
@@ -677,7 +710,10 @@ impl Endpoint {
 
         let (session, sent) = responder.write_response(&mut OsRng, &[], &mut self.tx)?;
         self.socket.send_to(&self.tx[..sent], from)?;
-        Ok(self.register(Link::Encrypted(session), from, zero_rtt, true))
+        let reply = self.tx[..sent].to_vec();
+        let event = self.register(Link::Encrypted(session), from, zero_rtt, true);
+        self.remember_reply(&event, reply);
+        Ok(event)
     }
 
     fn accept_plain(&mut self, n: usize, from: SocketAddr) -> Result<Event> {
@@ -688,7 +724,10 @@ impl Endpoint {
 
         let (session, sent) = responder.write_response(&[], &mut self.tx)?;
         self.socket.send_to(&self.tx[..sent], from)?;
-        Ok(self.register(Link::Plain(session), from, payload, false))
+        let reply = self.tx[..sent].to_vec();
+        let event = self.register(Link::Plain(session), from, payload, false);
+        self.remember_reply(&event, reply);
+        Ok(event)
     }
 
     /// Files a freshly established session and issues its next ticket.
@@ -761,6 +800,52 @@ impl Endpoint {
         self.max_peers = limit.max(1);
     }
 
+    /// Files the response just sent against the session it established.
+    fn remember_reply(&mut self, event: &Event, reply: Vec<u8>) {
+        let Event::Connected { peer, .. } = event else {
+            return;
+        };
+        if let Some(entry) = self.peers.get_mut(peer) {
+            entry.handshake_reply = Some((reply, HANDSHAKE_REPLIES));
+        }
+    }
+
+    /// Answers a repeated opening frame without performing the handshake again.
+    ///
+    /// Returns whether the frame was one, in which case nothing further should
+    /// be done with it.
+    ///
+    /// Two things arrive here. The ordinary one is a client whose reply was
+    /// lost and has resent message 1 — it needs the same answer, and building
+    /// a fresh one would establish a second session while the client is still
+    /// expecting the first. The other is a replay of a captured frame, which
+    /// names a session identifier that already exists, and answering *that*
+    /// afresh replaces the session the frame names. One captured packet would
+    /// then cut off one chosen peer.
+    ///
+    /// Both are handled by never handshaking twice for the same pair. If the
+    /// response is still held it goes out again — the same bytes an attacker
+    /// already has, so nothing is given away. If it is not, the peer has
+    /// already spoken and therefore already has it, and the frame is ignored.
+    fn repeat_handshake(&mut self, from: SocketAddr, session_id: u32) -> Result<bool> {
+        let Some(&peer_id) = self.routes.get(&(from, session_id)) else {
+            return Ok(false);
+        };
+        let Some(entry) = self.peers.get(&peer_id) else {
+            return Ok(false);
+        };
+        let Some((reply, left)) = entry.handshake_reply.clone() else {
+            // Already spoken for, or resent as often as an honest client could
+            // need. Either way this is not a handshake to answer.
+            return Ok(true);
+        };
+        self.socket.send_to(&reply, from)?;
+        if let Some(entry) = self.peers.get_mut(&peer_id) {
+            entry.handshake_reply = left.checked_sub(1).map(|left| (reply, left));
+        }
+        Ok(true)
+    }
+
     /// Whether there is budget to answer one more new handshake.
     ///
     /// A token bucket rather than a counter per interval, so a burst is
@@ -825,6 +910,7 @@ impl Endpoint {
                 addr,
                 session_id,
                 filed: Instant::now(),
+                handshake_reply: None,
                 spoke: false,
                 datagram_limit,
             },
