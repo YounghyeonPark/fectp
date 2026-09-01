@@ -344,7 +344,7 @@ records what each one would cost to change.
 |---|---|
 | **Not for browsers** | Nothing here speaks HTTP or WebRTC. Both ends must be software you control. |
 | **Not a P2P stack** | One socket serves both directions, which is the *precondition* for hole punching — but there is no peer discovery, address reflection or traversal coordination. |
-| **UDP only** | A QUIC or TCP backend would slot into the `Transport` trait; neither is written. |
+| **UDP only** | A QUIC backend would slot into the `Transport` trait, which is defined over datagrams; it is not written. **TCP would not** — it is a stream, so it needs a length prefix read before authentication, which is the one thing the header design avoids, and it reinstates the head-of-line blocking this exists to escape ([D40](docs/DECISIONS.md#d40--tcp-is-not-a-backend-it-is-a-different-protocol)). |
 
 ---
 

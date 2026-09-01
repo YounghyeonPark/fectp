@@ -558,7 +558,7 @@ These are unimplemented, not overlooked.
 | **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
-| **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam. |
+| **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Block-wise bit-packing would make the ratio track the signal smoothly instead of stepping. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
@@ -1520,6 +1520,49 @@ bounds-checking are worth.
 **What it costs**: tests in the source file rather than beside the others, and
 `session.rs` is longer for it. The alternative is exposing the cipher state to
 make the harness possible from outside, which would be a worse trade.
+
+## D40 — TCP is not a backend, it is a different protocol
+
+**Problem**: the limitations table said a QUIC *or TCP* backend "would slot into
+the `Transport` trait". That is true of QUIC and false of TCP, and reading it
+the wrong way costs somebody an afternoon before they find out why.
+
+`Transport` is defined over datagrams and says so: *"Implementations must
+preserve datagram boundaries."* TCP is a byte stream and preserves nothing of
+the kind. A TCP implementation of the trait does not plug in — it needs a
+framing layer above the socket to recover message boundaries.
+
+**And that framing is the thing this protocol's header design exists to avoid.**
+SPEC §3: the header is fixed-size and carries no length fields, so parsing an
+attacker-supplied frame involves no length arithmetic before authentication.
+Framing over TCP means reading an attacker-supplied length *first*, on targets
+with no ASLR, no NX bit and no MMU to contain a mistake there. Getting one
+backend would mean giving up the property the other backends were designed
+around.
+
+Three more objections, any one of which is enough:
+
+- **Reliability twice.** TCP already retransmits and orders. The ARQ,
+  congestion control, deduplication and reassembly of §5 become dead weight,
+  and two layers of retransmission add latency rather than removing it.
+- **Head-of-line blocking, restored.** Unordered per-message delivery is the
+  point ([D12](#d12--reliability-is-per-message-and-unordered)): a message that
+  arrives is delivered rather than held for an earlier one. TCP holds it, by
+  definition. Running this over TCP reinstates precisely the cost it exists to
+  escape.
+- **Nagle.** The trait requires that a datagram is handed to the device without
+  being coalesced with later ones, because batching adds milliseconds. That is
+  TCP's default behaviour, switched off only by remembering to.
+
+**Decision**: TCP is not a planned backend and the documentation says so rather
+than listing it as merely unwritten. Something that needed FECTP's coding and
+authentication over a stream would be a different protocol with a different
+frame header — worth building, perhaps, and not this one wearing a different
+socket.
+
+**What this does not say**: that TCP is worse. It is the right answer for
+ordered bulk transfer, which is why `BENCHMARKS.md` measures against it rather
+than dismissing it. The two are for different things.
 
 ## Not carried over
 
