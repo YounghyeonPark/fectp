@@ -430,6 +430,7 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 | [DECISIONS.md](docs/DECISIONS.md) | Why it is built this way, including what was measured and got changed. |
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Full comparison, with the methodology and the mistakes. |
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data shape. |
+| [FIXING-A-BUG.md](docs/FIXING-A-BUG.md) | How a fix is verified here, and the ways tests have passed without testing anything. |
 | [footprint/README.md](crates/footprint/README.md) | What it costs on a microcontroller, measured on a linked image. |
 
 ---
