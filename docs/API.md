@@ -239,6 +239,29 @@ processes so the key genuinely has to be copied between them.
 
 ---
 
+## Frame size
+
+| | |
+|---|---|
+| `max_datagram()` | The largest datagram this process will send or advertise. |
+| `set_max_datagram(n)` | Raises or lowers it. Clamped to `MIN_MAX_DATAGRAM..=65535`. |
+
+`DEFAULT_MAX_DATAGRAM` is 1200, which any internet path carries without
+fragmenting. On ethernet that leaves 272 bytes of every frame unused — 1472 is
+what 1500 carries after IP and UDP — and until there was a way to raise it, a
+peer's advertised limit could only ever lower it.
+
+**Process-wide, and set before anything connects.** The path MTU belongs to the
+network this process sits on rather than to a connection, and the value travels
+to the peer inside the handshake: one already told 1200 keeps sending 1200.
+
+**Nothing discovers the MTU.** There is no probe and no blackhole detection, so
+a value the path cannot carry means datagrams that disappear with no error. Set
+it where the path is known — a LAN, a tunnel of known overhead — and leave it
+alone otherwise.
+
+---
+
 ## Constants worth knowing
 
 | | | |
@@ -251,6 +274,8 @@ processes so the key genuinely has to be copied between them.
 | `MAX_FRAGMENTS` | 4096 | Pieces one message may be cut into. |
 | `MAX_QUEUED` | 4 | Split messages queued per peer. |
 | `CODEC_OVERHEAD` | 4 | Bytes a coded payload adds. |
+| `DEFAULT_MAX_DATAGRAM` | 1200 | The frame ceiling, before `set_max_datagram`. |
+| `MIN_MAX_DATAGRAM` | 128 | Below this a handshake does not fit. |
 | `HANDSHAKE_TIMEOUT` | 5 s | How long any way of connecting waits for a reply, resending meanwhile. |
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |

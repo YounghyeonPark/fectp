@@ -63,7 +63,7 @@ use rand_core::{OsRng, RngCore};
 use crate::link::Link;
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::{
-    is_timeout, local_capabilities, Error, Identity, PayloadType, Result, DEFAULT_MAX_DATAGRAM,
+    is_timeout, local_capabilities, max_datagram, Error, Identity, PayloadType, Result,
 };
 
 /// A stable handle to one connected peer.
@@ -302,7 +302,7 @@ impl Endpoint {
 
     fn with_mode(addr: impl ToSocketAddrs, mode: Mode) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
-        let size = DEFAULT_MAX_DATAGRAM + Initiator::OVERHEAD;
+        let size = max_datagram() + Initiator::OVERHEAD;
         Ok(Self {
             socket,
             mode,
@@ -403,7 +403,7 @@ impl Endpoint {
         let addr = crate::resolve(addr)?;
         let session_id = OsRng.next_u32();
         let caps = local_capabilities();
-        let mut frame = vec![0u8; DEFAULT_MAX_DATAGRAM + Initiator::OVERHEAD];
+        let mut frame = vec![0u8; max_datagram() + Initiator::OVERHEAD];
 
         let (handshake, len) = match &self.mode {
             Mode::PublicKey(identity) => {
@@ -762,7 +762,7 @@ impl Endpoint {
 
         let session_id = link.session_id();
         let datagram_limit =
-            (link.peer_capabilities().max_frame_size as usize).min(DEFAULT_MAX_DATAGRAM);
+            (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
 
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
@@ -792,7 +792,7 @@ impl Endpoint {
         }
         let session_id = link.session_id();
         let datagram_limit =
-            (link.peer_capabilities().max_frame_size as usize).min(DEFAULT_MAX_DATAGRAM);
+            (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
         self.file(peer_id, link, addr, session_id, datagram_limit);
 
         Event::Connected {
@@ -935,7 +935,7 @@ impl Endpoint {
         self.peers.insert(
             peer_id,
             PeerEntry {
-                peer: Peer::new(link, DEFAULT_MAX_DATAGRAM),
+                peer: Peer::new(link, max_datagram()),
                 addr,
                 session_id,
                 filed: Instant::now(),

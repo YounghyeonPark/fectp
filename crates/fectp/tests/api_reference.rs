@@ -156,3 +156,15 @@ fn one_receive_method_covers_every_kind_of_message() {
     assert_eq!(n, big.len(), "fragmented messages arrive whole");
     assert_eq!(&buf[..n], &big[..], "and unchanged");
 }
+
+/// API.md — "Frame size": a settable ceiling, clamped where it says.
+#[test]
+fn the_frame_ceiling_is_what_the_reference_claims() {
+    assert_eq!(fectp::DEFAULT_MAX_DATAGRAM, 1200, "API.md says 1200");
+    assert_eq!(fectp::MIN_MAX_DATAGRAM, 128, "API.md says 128");
+    assert_eq!(
+        fectp::max_datagram(),
+        fectp::DEFAULT_MAX_DATAGRAM,
+        "nothing in this file may leave the ceiling raised"
+    );
+}

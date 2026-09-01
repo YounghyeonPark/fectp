@@ -335,7 +335,7 @@ records what each one would cost to change.
 |---|---|
 | **No ordered delivery** | A message that arrives is delivered at once rather than held back for an earlier one — holding it back is head-of-line blocking, the exact cost this exists to avoid. Put a sequence number in your own payload if you need order. |
 | **A session is bound to its peer's address** | A peer reappearing on a new source port is a stranger, and the session ends. Measured: a NAT rebind kills the session. |
-| **No path MTU discovery** | Frames are 1200 bytes, or whatever the peer advertised. Safe on the internet, and smaller than a LAN could carry. |
+| **No path MTU discovery** | Nothing probes the path. The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame; `set_max_datagram` reclaims it where the path is known, and silently loses datagrams where it is not. |
 | **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median is unchanged and p95 grows about fivefold. |
 
 ### Scope
@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-236 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+238 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 

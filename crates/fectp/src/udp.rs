@@ -6,6 +6,7 @@
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fectp_core::Transport;
 
@@ -15,6 +16,48 @@ use fectp_core::Transport;
 /// headers are accounted for, so frames are not fragmented. Fragmentation
 /// would multiply the loss probability of a single frame.
 pub const DEFAULT_MAX_DATAGRAM: usize = 1200;
+
+/// The smallest ceiling that still carries a handshake.
+///
+/// Message 1 is a 14-byte header, a 32-byte ephemeral, a 48-byte encrypted
+/// static key and an encrypted 8-byte capability block: 118 bytes before any
+/// payload. Below this nothing can connect at all.
+pub const MIN_MAX_DATAGRAM: usize = 128;
+
+/// The ceiling in force, shared by every connection in this process.
+static MAX_DATAGRAM: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DATAGRAM);
+
+/// The largest datagram this process will send, or tell a peer it can receive.
+pub fn max_datagram() -> usize {
+    MAX_DATAGRAM.load(Ordering::Relaxed)
+}
+
+/// Raises or lowers that ceiling.
+///
+/// 1200 by default, because that is what an arbitrary internet path carries
+/// without fragmenting. It is deliberately conservative and it costs: on
+/// ethernet, 1500 less 20 bytes of IP and 8 of UDP leaves 1472, so a frame is
+/// giving up 272 bytes — a fifth of every datagram — that the wire would have
+/// taken. There has never been a way to reclaim it, because the peer's
+/// advertised limit could only ever lower this, never raise it.
+///
+/// **This is a property of the network, not of a connection**, which is why it
+/// lives here rather than on `Connection` or `Endpoint`. It is also why it has
+/// to be set before anything connects: the value is sent to the peer inside the
+/// handshake, as the largest frame this side can receive, and a peer that has
+/// already been told 1200 will keep sending 1200.
+///
+/// **Raise it only where the path is known.** Nothing here discovers the MTU —
+/// there is no probe and no blackhole detection — so a value the path cannot
+/// carry means datagrams that vanish with no error anywhere. A LAN, a tunnel of
+/// known overhead, or a link you configured yourself: those are the cases. The
+/// open internet is not one.
+///
+/// Clamped to [`MIN_MAX_DATAGRAM`] and to 65535, which is what the capability
+/// field can express.
+pub fn set_max_datagram(size: usize) {
+    MAX_DATAGRAM.store(size.clamp(MIN_MAX_DATAGRAM, u16::MAX as usize), Ordering::Relaxed);
+}
 
 /// A UDP socket carrying one peer's datagrams.
 ///
@@ -35,7 +78,7 @@ impl UdpTransport {
         Self {
             socket,
             peer: None,
-            max_datagram: DEFAULT_MAX_DATAGRAM,
+            max_datagram: max_datagram(),
         }
     }
 
@@ -49,7 +92,7 @@ impl UdpTransport {
         Self {
             socket,
             peer: Some(peer),
-            max_datagram: DEFAULT_MAX_DATAGRAM,
+            max_datagram: max_datagram(),
         }
     }
 

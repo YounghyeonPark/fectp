@@ -109,7 +109,9 @@ pub use fectp_core::reliability::{
 };
 pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_RELIABLE, CAP_ZSTD};
 pub use fectp_core::{Capabilities, PublicKey as PeerKey};
-pub use udp::{UdpTransport, DEFAULT_MAX_DATAGRAM};
+pub use udp::{
+    max_datagram, set_max_datagram, UdpTransport, DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
+};
 
 /// Whether an I/O error is a receive timeout rather than a real failure.
 ///
@@ -328,7 +330,7 @@ pub(crate) fn local_capabilities() -> Capabilities {
     let has_zstd = cfg!(feature = "compress");
     Capabilities {
         flags: CAP_RELIABLE | if has_zstd { CAP_ZSTD } else { 0 },
-        max_frame_size: DEFAULT_MAX_DATAGRAM as u16,
+        max_frame_size: udp::max_datagram() as u16,
         codecs: CODECS_CORE | if has_zstd { CODEC_ZSTD } else { 0 },
     }
 }

@@ -1337,6 +1337,51 @@ reference; and the session-layer rules — padding, replay windows, fragment
 reassembly — which are behaviour over time rather than layouts, and would need
 the same treatment as [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds).
 
+## D36 — The frame ceiling is a setting, not a constant
+
+**Problem**: frames were capped at 1200 bytes and there was no way to raise it.
+
+The capability block already carries `max_frame_size`, which each peer uses to
+say what it can receive. The implementation applied it as
+`peer.max_frame_size.min(DEFAULT_MAX_DATAGRAM)` with the default compiled in,
+so the field could only ever lower the ceiling. A peer on a LAN advertising
+1472 was answered with 1200 regardless, and `local_capabilities` advertised
+1200 back, so neither side could ever learn the other had room.
+
+What it costs: ethernet's 1500 less 20 bytes of IPv4 and 8 of UDP is 1472, and
+FECTP's own overhead is 30, so the application payload per frame is 1170 where
+it could be 1442. **A fifth of every datagram, given away** — on a protocol
+whose stated priority is transfer speed.
+
+**Decision**: `set_max_datagram` raises or lowers it, defaulting to
+`DEFAULT_MAX_DATAGRAM`. It governs both halves — what this side advertises as
+its receive capacity and the ceiling on what it will send — because raising one
+without the other achieves nothing.
+
+**Process-wide**, which is unusual enough to justify. The path MTU is a property
+of the network the process sits on, not of any one connection, and the value has
+to be known *before* a handshake because it is sent inside one. `Connection`'s
+constructors run the handshake, so there is no per-connection moment to set it
+in, and adding one to seven constructors to carry a network property would be
+the wrong shape.
+
+**What it costs**: it is not path MTU discovery. Nothing probes, nothing detects
+a blackhole, and a value the path cannot carry means datagrams that vanish with
+no error at either end — the failure this default exists to avoid. The
+documentation says so in every place the setting appears. Discovery is the
+larger job and remains unbuilt.
+
+Buffers scale with it, so raising it costs memory per connection and per
+endpoint. `fectp-core` is untouched: a microcontroller sets its own
+`Capabilities` and never sees this.
+
+**How the test was wrong first**, and it is the first entry in
+[FIXING-A-BUG.md](FIXING-A-BUG.md), written the same day. The check that a
+payload one byte past the limit is refused used `vec![0u8; n]`, which codes down
+to nothing under `--features compress` and fitted in the frame it was supposed
+to overflow. It passed without the feature and failed with it. Incompressible
+now.
+
 ## Not carried over
 
 **Thread pinning to performance cores.** The original document specifies
