@@ -432,6 +432,7 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data shape. |
 | [FIXING-A-BUG.md](docs/FIXING-A-BUG.md) | How a fix is verified here, and the ways tests have passed without testing anything. |
 | [footprint/README.md](crates/footprint/README.md) | What it costs on a microcontroller, measured on a linked image. |
+| [project_description.md](project_description.md) | The original brief. Kept unedited, with a map of where the implementation departed from it and why. |
 
 ---
 

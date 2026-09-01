@@ -1,3 +1,23 @@
+> **This is the original brief, kept as written. It is not a description of
+> what was built.**
+>
+> Several of its technical choices were changed during implementation, most of
+> them after being measured. The document is left unedited because
+> [DECISIONS.md](docs/DECISIONS.md) is a record of departures *from* it, and
+> rewriting the thing departed from would make that record meaningless.
+>
+> For what FECTP actually is: [README.md](README.md). For the wire format:
+> [SPEC.md](docs/SPEC.md).
+>
+> | This document says | What was built | Why |
+> |---|---|---|
+> | Zstandard at `--fast=4`, and `--fast=5` for audio | One level, and it is **1** | `--fast=4` expanded incompressible input by ten bytes and lost on any link below about 437 Mbit/s. One level rather than a table because the payload's *shape* turned out to matter far more than its MIME type ([D17](docs/DECISIONS.md#d17--the-compression-level-was-raised-after-measuring-it), [D3](docs/DECISIONS.md#d3--compression-bypass-is-size-aware-not-just-type-aware)) |
+> | `Noise_IK_25519_ChaChaPoly_BLAKE2b` | **BLAKE2s** | BLAKE2b's 64-bit words cost a large constant factor on 32-bit microcontrollers, which are the target ([D1](docs/DECISIONS.md#d1--blake2b-replaced-by-blake2s)) |
+> | Zstandard as a pipeline stage | A **negotiated capability** | A peer with no room for a decoder must still be able to talk ([D2](docs/DECISIONS.md#d2--zstandard-is-a-negotiated-capability-not-a-mandatory-stage)) |
+> | QUIC (RFC 9000) as the transfer stage | UDP is the base; QUIC is an **optional backend** | A QUIC stack does not fit the smallest supported targets, and QUIC performs its own handshake and AEAD — layering this over it pays for both twice ([D4](docs/DECISIONS.md#d4--quic-is-an-optional-backend-not-the-base-layer)) |
+> | Worker threads pinned to performance cores | **Nothing** | There is no thread pool to pin: the implementation is single-threaded and per-frame crypto is microseconds (DECISIONS.md, "Not carried over") |
+> | 64-byte padding "to mitigate the CRIME and BREACH vulnerabilities" | Padding, but **not for that** | Padding narrows length leakage to 64 bytes and does not defeat those attacks. The defence is coding every payload independently, with no shared compression context — [SPEC §6.5](docs/SPEC.md#65-compression-and-confidentiality). This is the one divergence worth reading twice, because it is a security claim and acting on it would be a mistake |
+
 FECTP Standard Technical Specification & Open Source Roadmap
 1. Protocol Definition, Vision, and Evolutionary Roadmap
 In the transition toward a decentralized digital economy, the strategic necessity for a unified, high-performance peer-to-peer (P2P) transport protocol is critical. Legacy transport layers often force an unacceptable compromise between throughput, security, and computational overhead. The Fast Encrypted Compressed Transport Protocol (FECTP) is established as an open, royalty-free standard to resolve these architectural tensions, providing a high-performance foundation for decentralized networking.
