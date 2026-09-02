@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-266 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+271 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 

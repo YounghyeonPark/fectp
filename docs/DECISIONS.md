@@ -1606,10 +1606,58 @@ no duplicate-acknowledgement path to react to more gently.
 three tests with "a timeout widened the window from 4 to 5", and removing the
 floor fails three with "window fell to 1 against a floor of 2".
 
-**What it does not cover**: the round-trip estimator that decides *when* a
-timeout fires. Karn's algorithm and the RFC 6298 arithmetic have example tests
-and no model, and a wrong RTO is a slow connection rather than an incorrect one
-— which is why it is last rather than never.
+**What it did not cover**: the round-trip estimator that decides *when* a
+timeout fires. It was last because a wrong RTO is a slow connection rather than
+an incorrect one — [D42](#d42--the-estimator-that-overflowed), where that
+turned out to be true of the estimate and not of the arithmetic.
+
+## D42 — The estimator that overflowed
+
+**Problem**: `Rto` was the last state-keeping layer without a model, left until
+last on the reasoning that a wrong timeout costs throughput rather than
+correctness. That reasoning held for the estimate. It did not hold for the
+arithmetic underneath it.
+
+`current()` computes `srtt + 4 * variation`. The addition saturated and **the
+multiplication did not**. `sample()` had two more: `variation * 3 + delta` and
+`srtt * 7 + rtt`.
+
+A large enough measurement overflows all three. In debug that is a panic, in
+the loop that serves every peer; in release it wraps, and the timeout that
+comes out is arithmetic on a wrapped value rather than a measurement.
+
+**How large, and how reachable**: `on_ack` computes the round trip as
+`now_ms.saturating_sub(sent_at_ms)` and hands it over clamped to `u32::MAX`
+rather than discarded. So any clock that steps forward far enough produces one:
+NTP correcting, a device resuming from suspend, or a caller passing wall-clock
+milliseconds where a monotonic counter was assumed. None of those is exotic,
+and nothing in the protocol bounds what the caller's clock does.
+
+Found by writing the model, on the second property it checked.
+
+**Decision**: the two averages compute in 64 bits and narrow back. Both are
+weighted averages of values that fit a `u32`, so the result does too and the
+narrowing loses nothing — which is why this rather than saturating arithmetic,
+where the saturation would distort an estimate that is still meaningful.
+`current()`'s multiplication saturates, since its result is clamped to
+`MAX_RTO_MS` immediately afterwards.
+
+**What the model checks besides**: that any sequence of measurements leaves a
+timeout inside `MIN_RTO_MS..=MAX_RTO_MS`; that backing off only ever lengthens
+and stops at the ceiling; that repeated identical measurements pull the estimate
+towards them; and Karn's algorithm — that the acknowledgement of a retransmitted
+message is not sampled, because it is ambiguous which transmission it answers
+and guessing wrong biases the estimate downwards, which produces more spurious
+retransmissions, which produce more bad samples.
+
+**What is left**: nothing in this class. Every layer that keeps state now has a
+model — the retransmit queue ([D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds)),
+the replay window and reassembly ([D37](#d37--the-two-layers-that-remember-things)),
+the prefix arithmetic ([D38](#d38--the-prefixes-are-tested-together-because-they-are-peeled-together)),
+the frames only a peer can send ([D39](#d39--frames-a-peer-could-send-and-this-implementation-never-would)),
+the congestion window ([D41](#d41--the-congestion-window-moves-one-way-per-signal)),
+and this. That is not the same as being correct, and the two worst bugs here
+were found by doing something new rather than by extending a list.
 
 ## Not carried over
 

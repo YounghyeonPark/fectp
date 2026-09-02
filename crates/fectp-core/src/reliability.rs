@@ -238,7 +238,7 @@ impl Rto {
         match self.smoothed_ms {
             None => INITIAL_RTO_MS,
             Some(srtt) => srtt
-                .saturating_add(4 * self.variation_ms)
+                .saturating_add(self.variation_ms.saturating_mul(4))
                 .clamp(MIN_RTO_MS, MAX_RTO_MS),
         }
     }
@@ -259,8 +259,17 @@ impl Rto {
                 let delta = srtt.abs_diff(rtt_ms);
                 // RFC 6298: rttvar = 3/4 rttvar + 1/4 delta,
                 //           srtt   = 7/8 srtt   + 1/8 sample
-                self.variation_ms = (self.variation_ms * 3 + delta) / 4;
-                self.smoothed_ms = Some((srtt * 7 + rtt_ms) / 8);
+                //
+                // In 64 bits, because `3 * variation` and `7 * srtt` overflow a
+                // u32 for measurements this is handed in practice — `on_ack`
+                // clamps a clock difference to `u32::MAX` rather than
+                // discarding it, so a clock that steps produces one. Both
+                // results are weighted averages of values that fit a u32, so
+                // they fit one too, and the narrowing loses nothing.
+                let variation = (u64::from(self.variation_ms) * 3 + u64::from(delta)) / 4;
+                let smoothed = (u64::from(srtt) * 7 + u64::from(rtt_ms)) / 8;
+                self.variation_ms = variation as u32;
+                self.smoothed_ms = Some(smoothed as u32);
             }
         }
     }

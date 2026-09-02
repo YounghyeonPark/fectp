@@ -69,6 +69,8 @@ jobs:
         run: cargo test -p fectp-core --test replay_model
       - name: the congestion window moves the way it should
         run: cargo test -p fectp-core --test congestion_model
+      - name: the round-trip estimator survives any measurement
+        run: cargo test -p fectp-core --test rto_model
       - name: fragment reassembly survives generated orderings
         run: cargo test -p fectp --lib
       - name: every combination of plaintext prefixes round-trips
