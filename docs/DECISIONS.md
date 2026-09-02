@@ -1281,8 +1281,12 @@ a substitute for knowing where the hard states are. The honest summary is that
 the directed test is what protects this particular bug and the properties
 protect the ordinary cases around it.
 
-**What it does not cover**: the fragment reassembly and congestion windows have
-their own sequences and no model of either. Nothing here is a security audit.
+**What it does not cover**: the congestion window. Its own sequence — grow on
+an acknowledgement, halve on a loss, never below `MIN_CWND` — is exercised here
+only as whatever `register` happens to refuse, and none of those three
+behaviours is asserted anywhere. Fragment reassembly was named here too and now
+has one ([D37](#d37--the-two-layers-that-remember-things)). Nothing here is a
+security audit.
 
 ## D35 — The specification is implemented twice
 
@@ -1334,10 +1338,14 @@ visible the moment the document is edited without the code. That is less than
 an independent implementer and a great deal more than nothing.
 
 **What it does not cover**: the handshake, which `interop.rs` already checks
-against `snow`; the entropy stage, which is Zstandard and specified by
-reference; and the session-layer rules — padding, replay windows, fragment
-reassembly — which are behaviour over time rather than layouts, and would need
-the same treatment as [D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds).
+against `snow`, and the entropy stage, which is Zstandard and specified by
+reference. The session-layer rules were named here as needing the treatment of
+[D34](#d34--the-sequence-a-bug-needs-is-not-always-one-a-generator-finds), and
+they got it: replay windows and reassembly in
+[D37](#d37--the-two-layers-that-remember-things), the padded and prefixed
+layouts in [D38](#d38--the-prefixes-are-tested-together-because-they-are-peeled-together),
+and the contradictory frames only a peer can send in
+[D39](#d39--frames-a-peer-could-send-and-this-implementation-never-would).
 
 ## D36 — The frame ceiling is a setting, not a constant
 
