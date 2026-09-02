@@ -76,7 +76,7 @@ fn every_send_has_the_shape_the_reference_claims() {
     }
 }
 
-/// API.md — "Opening one": four modes, none taking a timeout.
+/// API.md — "Opening one": two modes, none taking a timeout.
 #[test]
 fn no_way_of_connecting_takes_a_timeout() {
     use std::net::UdpSocket;
@@ -110,9 +110,6 @@ fn no_way_of_connecting_takes_a_timeout() {
         }),
         std::thread::spawn(move || {
             let _ = Connection::connect_psk_and_send(addr, b"secret", b"hello");
-        }),
-        std::thread::spawn(move || {
-            let _ = Connection::connect_plain(addr);
         }),
     ];
 

@@ -58,9 +58,7 @@
 #![warn(missing_docs)]
 
 pub mod compress;
-mod link;
 mod pipeline;
-use link::Link;
 use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
 mod endpoint;
 pub mod udp;
@@ -74,10 +72,8 @@ use std::time::{Duration, Instant};
 use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
 use fectp_core::frame::HEADER_LEN;
 use fectp_core::reliability::MessageId;
-use fectp_core::plain::PlainInitiator;
 use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumptionTicket,
-};
+    preshared_key, Initiator, ResumeInitiator, ResumptionTicket, Session};
 use fectp_core::{Keypair, PublicKey, Transport};
 use rand_core::{OsRng, RngCore};
 
@@ -353,7 +349,7 @@ struct Core {
 }
 
 impl Core {
-    fn new(transport: UdpTransport, link: Link) -> Self {
+    fn new(transport: UdpTransport, link: Session) -> Self {
         let size = transport.max_datagram_size();
         Self {
             transport,
@@ -417,19 +413,8 @@ impl Core {
     ///
     /// Tickets are single use. Each resumption yields a fresh one, which must
     /// replace the stored value or the next attempt will be refused.
-    /// Returns `None` for a plaintext session: there is no key schedule to
-    /// carry forward, and the handshake it would skip costs nothing anyway.
-    pub fn resumption_ticket(&self) -> Option<ResumptionTicket> {
+    pub fn resumption_ticket(&self) -> ResumptionTicket {
         self.peer.session.resumption_ticket()
-    }
-
-    /// Whether this connection is encrypted.
-    ///
-    /// Worth checking before trusting [`peer_public_key`](Self::peer_public_key):
-    /// a plaintext peer has no identity, and the all-zero key reported for one
-    /// is a placeholder, not a name.
-    pub fn is_encrypted(&self) -> bool {
-        self.peer.session.is_encrypted()
     }
 
     /// Reconnects using a ticket from an earlier session.
@@ -486,7 +471,7 @@ impl Core {
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
-        let mut conn = Self::new(transport, Link::Encrypted(session));
+        let mut conn = Self::new(transport, session);
         conn.set_read_timeout(None)?;
         conn.transport.set_read_timeout(None)?;
         conn.queue_first(reply);
@@ -534,7 +519,7 @@ impl Core {
 
         let mut initiator = ResumeInitiator::new(
             ticket,
-            fectp_core::plain::ANONYMOUS,
+            fectp_core::ANONYMOUS,
             OsRng.next_u32(),
             local_capabilities(),
         )?;
@@ -543,49 +528,12 @@ impl Core {
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
-        let mut conn = Self::new(transport, Link::Encrypted(session));
+        let mut conn = Self::new(transport, session);
         conn.transport.set_read_timeout(None)?;
         conn.queue_first(reply);
         Ok(conn)
     }
 
-    /// Connects without encryption.
-    ///
-    /// Only two situations justify this: a physically trusted link — an
-    /// instrument wired to its host — and development, where readable packet
-    /// captures are worth more than confidentiality.
-    ///
-    /// It is **not** the answer to awkward key distribution. Encrypting a
-    /// frame costs about a microsecond; distributing keys is what costs
-    /// anything, and [`connect_psk`](Self::connect_psk) removes that without
-    /// giving up encryption.
-    ///
-    /// Nothing here is authenticated, so anyone on the path can read, forge,
-    /// or alter every byte.
-    pub fn connect_plain(addr: impl ToSocketAddrs) -> Result<Self> {
-        let payload: &[u8] = &[];
-        let mut transport = UdpTransport::connect(resolve(addr)?)?;
-        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-
-        let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size + PlainInitiator::OVERHEAD];
-        let mut rx = vec![0u8; size];
-        let mut scratch = vec![0u8; size];
-
-        // There are no keys to agree; this exchange exists only to swap
-        // capability blocks, which keeps codecs and reliability working as
-        // they do when encrypted.
-        let mut initiator = PlainInitiator::new(OsRng.next_u32(), local_capabilities());
-        let n = initiator.write_init(payload, &mut tx)?;
-        let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
-        let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
-        let reply = scratch[..len].to_vec();
-
-        let mut conn = Self::new(transport, Link::Plain(session));
-        conn.transport.set_read_timeout(None)?;
-        conn.queue_first(reply);
-        Ok(conn)
-    }
 
     /// Puts whatever the peer sent alongside its handshake reply where
     /// `recv` will find it.
@@ -622,7 +570,7 @@ impl Core {
         let (session, len) = initiator.read_response(&rx[..n], &mut scratch)?;
         let reply = scratch[..len].to_vec();
 
-        let mut conn = Self::new(transport, Link::Encrypted(session));
+        let mut conn = Self::new(transport, session);
         conn.queue_first(reply);
         Ok(conn)
     }
@@ -890,22 +838,16 @@ impl Connection {
         Self::wrap(Core::connect_psk_and_send(addr, secret, zero_rtt)?)
     }
 
-    /// Connects in plaintext mode. Nothing is encrypted or authenticated.
-    pub fn connect_plain(addr: impl ToSocketAddrs) -> Result<Self> {
-        Self::wrap(Core::connect_plain(addr)?)
-    }
-
 
     // ── asking about the connection ───────────────────────────────────────
 
-    /// A single-use ticket for resuming this session later, if it is encrypted.
+    /// A single-use ticket for resuming this session later.
+    ///
+    /// `None` only if the connection is already closed. It used to be `None`
+    /// for a plaintext session too, which had no key schedule to carry
+    /// forward; there is no such session any more.
     pub fn resumption_ticket(&self) -> Option<ResumptionTicket> {
-        self.core().ok()?.resumption_ticket()
-    }
-
-    /// Whether this session encrypts.
-    pub fn is_encrypted(&self) -> bool {
-        self.core().map(|c| c.is_encrypted()).unwrap_or(false)
+        Some(self.core().ok()?.resumption_ticket())
     }
 
     /// The peer's authenticated static public key.

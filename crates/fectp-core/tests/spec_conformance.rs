@@ -15,9 +15,6 @@ use fectp_core::frame::{
     FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN, VERSION,
 };
 use fectp_core::keys::DHLEN;
-use fectp_core::plain::{
-    PlainInitiator, PlainResponder, PLAIN_DATA_OVERHEAD, PLAIN_HANDSHAKE_OVERHEAD,
-};
 use fectp_core::reliability::{Ack, ACK_BLOCK_LEN, ACK_WINDOW, MESSAGE_ID_LEN};
 use fectp_core::noise::{
     HASHLEN, KEYLEN, MSG1_OVERHEAD, MSG2_OVERHEAD, PROTOCOL_NAME, PSK_LEN,
@@ -87,10 +84,6 @@ fn frame_type_ids() {
         (FrameType::Ack, 5),
         (FrameType::ResumeInit, 6),
         (FrameType::ResumeResponse, 7),
-        (FrameType::PlainInit, 10),
-        (FrameType::PlainResponse, 11),
-        (FrameType::PlainData, 12),
-        (FrameType::PlainAck, 13),
     ] {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(frame_type, 0).encode(&mut buf).expect("encode");
@@ -104,7 +97,7 @@ fn frame_type_ids() {
     // Every id the specification does not define must be rejected. Checking
     // the whole 4-bit space rather than a sample means a new frame type cannot
     // be added without this test — and therefore the specification — noticing.
-    const DEFINED: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13];
+    const DEFINED: &[u8] = &[1, 2, 3, 4, 5, 6, 7];
     for id in 0..16u8 {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(FrameType::Data, 0).encode(&mut buf).expect("encode");
@@ -317,44 +310,32 @@ fn ticket_ids_are_derived_from_their_keys() {
     );
 }
 
-/// SPEC §1.2 — plaintext framing carries no tag, and reuses nothing.
+/// SPEC §5, §8 — a data frame costs the header and the tag, and nothing else.
+///
+/// This used to be checked only as the difference against the plaintext
+/// framing. That mode is gone, so the constant is pinned directly rather than
+/// left to drift once its only witness was deleted.
 #[test]
-fn plaintext_framing_constants() {
-    assert_eq!(PLAIN_DATA_OVERHEAD, HEADER_LEN, "no authentication tag");
-    assert_eq!(
-        DATA_OVERHEAD - PLAIN_DATA_OVERHEAD,
-        TAGLEN,
-        "the whole difference is the Poly1305 tag"
-    );
-    assert_eq!(PLAIN_HANDSHAKE_OVERHEAD, HEADER_LEN + CAPS_LEN);
-    assert_eq!(PlainInitiator::OVERHEAD, 22, "14 header + 8 caps");
-    assert_eq!(PlainResponder::OVERHEAD, 22);
+fn data_frame_overhead() {
+    assert_eq!(DATA_OVERHEAD, HEADER_LEN + TAGLEN);
+    assert_eq!(DATA_OVERHEAD, 30, "SPEC §8 constants table");
 }
 
-/// SPEC §1.2 — encrypted and plaintext frame types are disjoint.
+/// SPEC §3.1 — the type ids 10 to 13 are reserved, not merely unused.
+///
+/// They belonged to the plaintext mode, which is gone. A receiver must refuse
+/// them rather than treat them as something else: reserving a number is what
+/// lets a later version define it without two implementations disagreeing
+/// about an old frame.
 #[test]
-fn the_two_framings_share_no_type_ids() {
-    // This is what makes the mode unnegotiable: neither framing can be
-    // mistaken for the other, so there is no downgrade to attempt.
-    let encrypted: &[FrameType] = &[
-        FrameType::HandshakeInit,
-        FrameType::HandshakeResponse,
-        FrameType::Data,
-        FrameType::Close,
-        FrameType::Ack,
-        FrameType::ResumeInit,
-        FrameType::ResumeResponse,
-    ];
-    let plain: &[FrameType] = &[
-        FrameType::PlainInit,
-        FrameType::PlainResponse,
-        FrameType::PlainData,
-        FrameType::PlainAck,
-    ];
-    for a in encrypted {
-        for b in plain {
-            assert_ne!(a, b);
-        }
+fn the_retired_plaintext_type_ids_are_refused() {
+    for id in 8u8..16 {
+        let mut frame = [0u8; HEADER_LEN];
+        frame[0] = (VERSION << 4) | id;
+        assert!(
+            Header::decode(&frame).is_err(),
+            "type id {id} is reserved and must be refused"
+        );
     }
 }
 

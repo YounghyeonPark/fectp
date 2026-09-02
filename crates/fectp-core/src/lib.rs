@@ -23,15 +23,13 @@ pub mod fragment;
 pub mod frame;
 pub mod keys;
 pub mod noise;
-pub mod plain;
 pub mod reliability;
 pub mod session;
 pub mod transport;
 
 pub use codec::{CodecHeader, Entropy, Transform};
 pub use error::{Error, Result};
-pub use keys::{Keypair, PublicKey, DHLEN};
-pub use plain::{PlainInitiator, PlainResponder, PlainSession};
+pub use keys::{Keypair, PublicKey, ANONYMOUS, DHLEN};
 pub use reliability::{Ack, DedupWindow, Due, MessageId, RetransmitQueue};
 pub use session::{
     preshared_key, Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder,

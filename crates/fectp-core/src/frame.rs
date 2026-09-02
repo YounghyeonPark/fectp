@@ -75,14 +75,6 @@ pub enum FrameType {
     ResumeInit,
     /// Resumption message 2.
     ResumeResponse,
-    /// Plaintext session opening. Carries a capability block, no keys.
-    PlainInit,
-    /// Plaintext session response.
-    PlainResponse,
-    /// Plaintext application data.
-    PlainData,
-    /// Plaintext acknowledgement.
-    PlainAck,
 }
 
 impl FrameType {
@@ -95,10 +87,6 @@ impl FrameType {
             FrameType::Ack => 5,
             FrameType::ResumeInit => 6,
             FrameType::ResumeResponse => 7,
-            FrameType::PlainInit => 10,
-            FrameType::PlainResponse => 11,
-            FrameType::PlainData => 12,
-            FrameType::PlainAck => 13,
         }
     }
 
@@ -111,10 +99,6 @@ impl FrameType {
             5 => Ok(FrameType::Ack),
             6 => Ok(FrameType::ResumeInit),
             7 => Ok(FrameType::ResumeResponse),
-            10 => Ok(FrameType::PlainInit),
-            11 => Ok(FrameType::PlainResponse),
-            12 => Ok(FrameType::PlainData),
-            13 => Ok(FrameType::PlainAck),
             _ => Err(Error::BadHeader),
         }
     }

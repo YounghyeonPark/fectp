@@ -86,11 +86,6 @@ fn connection_setup() {
     });
     drop(psk);
 
-    let plain = FectpEcho::plain();
-    let plain_stats = measure(10, 100, || {
-        Connection::connect_plain(plain.addr).expect("connect");
-    });
-    drop(plain);
 
     let tls_setup = TlsSetup::new();
     let tls = TlsEcho::spawn(std::sync::Arc::clone(&tls_setup.server));
@@ -117,12 +112,6 @@ fn connection_setup() {
         &ms(psk_stats.median_ms()),
         &ms(psk_stats.p95.as_secs_f64() * 1000.0),
         "1",
-    ]);
-    row(&[
-        "FECTP, plaintext",
-        &ms(plain_stats.median_ms()),
-        &ms(plain_stats.p95.as_secs_f64() * 1000.0),
-        "0",
     ]);
     row(&[
         "TCP + TLS 1.3 (rustls)",
@@ -167,14 +156,6 @@ fn round_trip_latency() {
     drop(conn);
     drop(pk);
 
-    let plain = FectpEcho::plain();
-    let mut pconn = Connection::connect_plain(plain.addr).expect("connect");
-    pconn.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
-    let fectp_plain = measure(WARMUP, SAMPLES, || {
-        transports::fectp_round_trip(&mut pconn, &payload, &mut buf);
-    });
-    drop(pconn);
-    drop(plain);
 
     let tls_setup = TlsSetup::new();
     let tls = TlsEcho::spawn(std::sync::Arc::clone(&tls_setup.server));
@@ -203,12 +184,6 @@ fn round_trip_latency() {
     row_header(&["", "median", "p95", "vs raw UDP"]);
     let base = udp_stats.median_us();
     row(&["raw UDP (no encryption)", &us(udp_stats.median_us()), &us(udp_stats.p95.as_secs_f64()*1e6), "—"]);
-    row(&[
-        "FECTP, plaintext",
-        &us(fectp_plain.median_us()),
-        &us(fectp_plain.p95.as_secs_f64()*1e6),
-        &format!("{:+.0}%", (fectp_plain.median_us() / base - 1.0) * 100.0),
-    ]);
     row(&[
         "FECTP, encrypted",
         &us(fectp_stats.median_us()),
@@ -299,7 +274,6 @@ fn per_message_overhead() {
 
     row_header(&["", "protocol", "IP + transport", "total"]);
     row(&["raw UDP", "0", "28", "28"]);
-    row(&["FECTP, plaintext", "14", "28", "42"]);
     row(&["FECTP, encrypted", "30", "28", "58"]);
     row(&[
         "TCP + TLS 1.3",
@@ -334,13 +308,6 @@ fn crypto_cost() {
     });
     drop(sink);
 
-    let plain = FectpEcho::plain_drain();
-    let pconn = Connection::connect_plain(plain.addr).expect("connect");
-    let plain_send = measure_batched(WARMUP, 40, 500, || {
-        pconn.send(&payload, PayloadType::Opaque).expect("send");
-    });
-    drop(pconn);
-    drop(plain);
 
     let pk = FectpEcho::public_key_drain();
     let conn =
@@ -361,24 +328,16 @@ fn crypto_cost() {
         &format!("{:.0} MiB/s", throughput_mib(1024, raw.median)),
     ]);
     row(&[
-        "FECTP plaintext: + framing",
-        &us(plain_send.median_us()),
-        &us(plain_send.median_us() - base),
-        &format!("{:.0} MiB/s", throughput_mib(1024, plain_send.median)),
-    ]);
-    row(&[
-        "FECTP encrypted: + framing + AEAD",
+        "FECTP: + framing + AEAD",
         &us(sealed.median_us()),
         &us(sealed.median_us() - base),
         &format!("{:.0} MiB/s", throughput_mib(1024, sealed.median)),
     ]);
     println!();
-    note(&format!(
-        "Encrypting costs {} on top of framing. The throughput column is",
-        us(sealed.median_us() - plain_send.median_us())
-    ));
-    note("bounded by the syscall, which is the largest single item here — but not");
-    note("by as much as it looks: the two protocol rows together cost more than it.");
+    note("Framing and encryption are one row now. Separating them needed the");
+    note("plaintext mode, which was removed — an earlier run put encryption at");
+    note("about 2 us of the total, and that figure is history rather than a");
+    note("measurement this build can repeat.");
 }
 
 // ─────────────────────────────────────────────────── 6. compression ───────

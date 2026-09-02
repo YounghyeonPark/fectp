@@ -10,6 +10,13 @@ pub const DHLEN: usize = 32;
 /// An X25519 public key.
 pub type PublicKey = [u8; DHLEN];
 
+/// A public key stand-in for peers that present no identity.
+///
+/// A pre-shared-key session authenticates by the secret rather than by a static
+/// key, so there is no public key to report for its peer. This is what
+/// `remote_static` answers, so callers do not have to special-case the mode.
+pub const ANONYMOUS: PublicKey = [0u8; DHLEN];
+
 /// An X25519 keypair.
 ///
 /// Used for both static and ephemeral keys. Ephemeral keys are held rather

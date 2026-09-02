@@ -38,7 +38,6 @@ expected is not measuring anything.
 | FECTP, public key | 0.66 ms | 0.80 ms | 4 |
 | FECTP, resumed | 0.36 ms | 0.45 ms | 1 |
 | FECTP, pre-shared key | 0.34 ms | 0.46 ms | 1 |
-| FECTP, plaintext | 0.18 ms | 0.25 ms | 0 |
 | TCP + TLS 1.3 (rustls) | 1.53 ms | 1.72 ms | 1 + certificate chain |
 
 TLS is doing more work than FECTP here: it verifies a certificate chain, and
@@ -51,19 +50,20 @@ One 256-byte message out, the same back.
 | | median | p95 | vs raw UDP |
 |---|---|---|---|
 | raw UDP (no encryption) | 31.6 µs | 54.0 µs | — |
-| FECTP, plaintext | 31.3 µs | 49.9 µs | −1% |
-| FECTP, encrypted | 35.8 µs | 57.4 µs | +13% |
+| FECTP | 35.8 µs | 57.4 µs | +13% |
 | TCP + TLS 1.3 | 64.4 µs | 103.9 µs | +104% |
 | **raw UDP again (control)** | **30.6 µs** | **49.5 µs** | **−3%** |
 
 The last row is the first row's measurement repeated at the end of the run,
 with nothing changed. It moved 3%, which is this host's noise floor on this
 run — on a busier run it has been 8%. **Treat any difference smaller than the
-control as noise.** That covers the plaintext row entirely.
+control as noise.**
 
-An earlier draft reported FECTP plaintext as 11–15% *faster* than raw UDP,
-which is impossible — it is raw UDP plus a 14-byte header. The control row
-exists so that kind of artifact stays visible instead of quotable.
+The control row is here because of a specific escape. An earlier draft carried
+a fourth row, an unencrypted mode, and reported it as 11–15% *faster* than raw
+UDP — impossible, since it was raw UDP plus a 14-byte header. The row is gone
+with the mode, but the control that exposed it stays: it is what keeps that
+kind of artifact visible instead of quotable.
 
 ## 3. Round trips before a request is answered
 
@@ -114,8 +114,7 @@ secrecy.
 | | protocol | IP + transport | total |
 |---|---|---|---|
 | raw UDP | 0 | 28 | 28 |
-| FECTP, plaintext | 14 | 28 | 42 |
-| FECTP, encrypted | 30 | 28 | 58 |
+| FECTP | 30 | 28 | 58 |
 | TCP + TLS 1.3 | 48 | 40 | 88 |
 
 TLS was measured at the socket; FECTP's is fixed by its frame format. The
@@ -130,8 +129,12 @@ against UDP's 28, before any retransmission.
 | | per send | over raw sendto | throughput |
 |---|---|---|---|
 | raw UDP sendto (no protocol) | 7.6 µs | — | 128 MiB/s |
-| FECTP plaintext: + framing | 6.9 µs | −0.7 µs | 141 MiB/s |
-| FECTP encrypted: + framing + AEAD | 8.8 µs | +1.2 µs | 111 MiB/s |
+| FECTP: + framing + AEAD | 8.8 µs | +1.2 µs | 111 MiB/s |
+
+Framing and encryption used to be separate rows, because the unencrypted mode
+let one be measured without the other; it put encryption at roughly 2 µs of the
+total. That mode is gone, so the split is history rather than something this
+build can reproduce — what remains measurable is the pair together.
 
 Every send seals under a lock, since `Connection` is usable from two threads
 (D22). Idle, that lock is inside the noise here — which says it is free when
@@ -178,8 +181,8 @@ architectural.
 ### What FECTP does differently
 
 **No cipher negotiation.** The suite is fixed by the frame type. There is no
-negotiation to downgrade, and the three security modes use disjoint frame types
-so an attacker cannot talk a peer down from encrypted to plaintext. The cost is
+negotiation to downgrade, and no unencrypted mode to be talked down to — the
+two remaining modes use disjoint frame types and both encrypt. The cost is
 that there is no in-band migration path if ChaCha20-Poly1305 is ever broken —
 that would need a new protocol version.
 
@@ -212,9 +215,6 @@ including recorded past ones for that mode's handshake. It exists because
 distributing one secret to a fleet of microcontrollers is operationally far
 easier than per-device keypairs, and that convenience is the whole of its
 security cost. Public-key mode is the default for a reason.
-
-Plaintext mode has no security whatsoever; it is for loopback and trusted
-links, and it is a separate frame type so it can never be reached by accident.
 
 ### What has not been done
 
@@ -348,8 +348,11 @@ each:
 
 | | before | after |
 |---|---|---|
-| `Connection::send`, plaintext | 9.41 µs | **7.45 µs** (−21%) |
+| `Connection::send`, unencrypted mode | 9.41 µs | **7.45 µs** (−21%) |
 | `Connection::send`, encrypted | 10.83 µs | **9.21 µs** (−15%) |
+
+The first row measured a mode that has since been removed; it is kept because
+it is what the change was measured against at the time.
 
 Compressible payloads are unaffected: the counter never advances, so coding is
 attempted every time exactly as before.

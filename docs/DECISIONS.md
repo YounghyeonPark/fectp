@@ -451,6 +451,10 @@ encryption. Encrypting a 1200-byte frame takes about a microsecond, against
 human effort to get a key to a field site. Turning encryption off would save
 the microsecond and leave the actual problem untouched.
 
+> **Superseded in part by [D46](#d46--the-mode-that-was-not-encrypted-is-gone).**
+> Plaintext mode was removed. Everything below about the two encrypted modes
+> and about modes not being negotiable still holds; the third row does not.
+
 **Decision**: three modes, differing in what must be shared beforehand.
 
 | | pre-shared | encrypted | handshake |
@@ -551,7 +555,7 @@ These are unimplemented, not overlooked.
 |---|---|---|
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
-| **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
+| **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
@@ -1797,3 +1801,56 @@ pool to pin: the current implementation is single-threaded and synchronous, and
 per-frame crypto is microseconds. This becomes relevant only if a multiplexed,
 multi-threaded server backend is built, and it should be measured before being
 assumed.
+
+## D46 — The mode that was not encrypted is gone
+
+**Question asked**: is there any reason to keep a mode that does not encrypt?
+
+**The case for keeping it** was the one written into SPEC §1.2.2: a physically
+trusted link, and development, where a readable packet capture is worth more
+than confidentiality. Both are real. Neither survived being priced.
+
+**What it cost.** 377 lines of `plain.rs`, four frame types, a third variant in
+every mode-shaped `match` — about forty branches — and a `Link` abstraction
+that existed only so the layers above could ignore which of the two framings
+sat beneath them. Every one of those branches was a place a change had to be
+made twice and a place the two paths could drift apart.
+
+**What it bought.** A readable capture, and roughly 2 µs per send
+(BENCHMARKS.md §5, before removal). The 2 µs is the weaker half: encryption
+was never what made a frame expensive here — the syscall is larger than the
+whole protocol.
+
+**Why the readable capture did not save it.** It is a development convenience
+paid for with a production hazard. Nothing in the protocol distinguishes a
+developer's loopback socket from a device shipped with the wrong constructor,
+and `bind_plain` was one identifier away from `bind_psk`. A capture can also be
+had without the mode: a peer that holds the key can decrypt its own traffic,
+which is how every other encrypted protocol is debugged.
+
+**Decision**: remove it. `plain.rs`, `Mode::Plain`, `bind_plain`,
+`connect_plain`, `accept_plain`, `Handshake::Plain`, `Link`, and frame types
+10–13 are gone. Every session encrypts; what a session still chooses is who is
+authenticated.
+
+**Frame type ids 10–13 stay retired rather than reused.** An implementation
+built against the older draft would otherwise have its unauthenticated frames
+accepted under a meaning nobody checked. `spec_conformance.rs` asserts they are
+refused, alongside the rest of the reserved space.
+
+**What was lost, stated plainly.** The benchmark could separate framing cost
+from encryption cost because a mode existed with framing and no encryption.
+It cannot any more. BENCHMARKS.md §5 now carries one row for the pair and says
+so, rather than quoting a split it can no longer reproduce.
+
+**What the removal turned up.** `tests/peer_to_peer.rs` had a test asserting
+`!is_encrypted()` on what had become a pre-shared-key pair, with payloads
+reading `b"in the clear"` — a plaintext test that had been renamed rather than
+reconsidered. It did not fail, because the file no longer compiled at all after
+a careless rename, and a target that does not build reports nothing. Two
+lessons, both already in FIXING-A-BUG.md and both worth the reminder: run
+`--all-targets`, and a rename is not a review.
+
+`is_encrypted()` went with it. It could only return `true`, so a caller
+branching on it writes dead code and a test asserting it proves nothing —
+exactly the shape this project keeps having to delete.

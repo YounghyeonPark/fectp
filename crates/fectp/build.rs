@@ -34,9 +34,9 @@ const PRELUDE: &str = r#"
     let more: Vec<u8> = Vec::new();
     let data: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 2048];
-    let conn = Connection::connect_plain(addr)?;
-    let mut server = Endpoint::bind_plain(addr)?;
-    let mut node = Endpoint::bind_plain(addr)?;
+    let conn = Connection::connect_psk(addr, b"scaffolding")?;
+    let mut server = Endpoint::bind_psk(addr, b"scaffolding")?;
+    let mut node = Endpoint::bind_psk(addr, b"scaffolding")?;
     let peer = server.connect(addr, None)?;
     let allow_list: Vec<[u8; 32]> = Vec::new();
 "#;

@@ -15,11 +15,10 @@ use fectp_core::frame::{FrameType, FLAG_COMPRESSED, HEADER_LEN};
 use fectp_core::reliability::{
     Ack, DedupWindow, Due, MessageId, RetransmitQueue, MAX_IN_FLIGHT, MESSAGE_ID_LEN,
 };
-use fectp_core::session::{Opened, ResumptionTicket, TICKET_ID_LEN};
+use fectp_core::session::{DATA_OVERHEAD, Opened, ResumptionTicket, TICKET_ID_LEN, Session};
 use fectp_core::PublicKey;
 
 use crate::compress::{self, PayloadType};
-use crate::link::Link;
 use crate::{Error, Result};
 
 
@@ -251,7 +250,7 @@ pub(crate) enum Ingested {
 
 /// One peer's protocol state, independent of how bytes reach it.
 pub(crate) struct Peer {
-    pub session: Link,
+    pub session: Session,
 
     /// Sender side of the reliability layer.
     pub retransmit: RetransmitQueue,
@@ -295,7 +294,7 @@ const CODING_MISS_LIMIT: u8 = 4;
 const CODING_PROBE_INTERVAL: u8 = 32;
 
 impl Peer {
-    pub fn new(session: Link, buffer_hint: usize) -> Self {
+    pub fn new(session: Session, buffer_hint: usize) -> Self {
         Self {
             session,
             retransmit: RetransmitQueue::new(),
@@ -350,7 +349,7 @@ impl Peer {
     pub fn max_payload(&self, datagram_limit: usize) -> usize {
         self.session
             .max_payload()
-            .min(datagram_limit.saturating_sub(self.session.data_overhead()))
+            .min(datagram_limit.saturating_sub(DATA_OVERHEAD))
     }
 
     /// Largest payload that fits once the optional plaintext parts are paid
@@ -629,10 +628,7 @@ impl Peer {
             Err(_) => return Ok(Ingested::Nothing),
         };
 
-        if matches!(
-            opened.header.frame_type,
-            FrameType::Ack | FrameType::PlainAck
-        ) {
+        if opened.header.frame_type == FrameType::Ack {
             if let Ok(parsed) = Ack::decode(&frame[HEADER_LEN..HEADER_LEN + opened.len]) {
                 self.apply_ack(&parsed, now_ms);
             }

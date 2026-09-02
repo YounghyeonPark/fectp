@@ -73,16 +73,8 @@ impl FectpEcho {
         Self::drain(Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind"))
     }
 
-    pub fn plain_drain() -> Self {
-        Self::drain(Endpoint::bind_plain("127.0.0.1:0").expect("bind"))
-    }
-
     pub fn psk(secret: &[u8]) -> Self {
         Self::spawn(Endpoint::bind_psk("127.0.0.1:0", secret).expect("bind"))
-    }
-
-    pub fn plain() -> Self {
-        Self::spawn(Endpoint::bind_plain("127.0.0.1:0").expect("bind"))
     }
 }
 

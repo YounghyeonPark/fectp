@@ -199,25 +199,29 @@ still round-trips, it just compresses badly.
 
 ## Security
 
-Three modes. They differ in **what has to be shared beforehand**, not in how you
+Two modes. They differ in **what has to be shared beforehand**, not in how you
 use them — everything after the constructor is identical.
 
-| Mode | You must share | Encrypted | Authenticated | Handshake |
-|---|---|---|---|---|
-| **Public key** | the peer's public key | yes | both sides, individually | 4 × X25519 |
-| **Pre-shared key** | one secret | yes | as *a* holder of the secret | 1 × X25519 |
-| **Plaintext** | nothing | **no** | **no** | none |
+| Mode | You must share | Authenticated as | Handshake |
+|---|---|---|---|
+| **Public key** | the peer's public key | both sides, individually | 4 × X25519 |
+| **Pre-shared key** | one secret | *a* holder of the secret | 1 × X25519 |
 
 ```rust
 let conn = Connection::connect(addr, &server_public, &identity)?;   // public key
 let conn = Connection::connect_psk(addr, b"lab-instrument-7")?;     // one secret
-let conn = Connection::connect_plain(addr)?;                        // no crypto
 ```
+
+**There is no unencrypted mode**, and there was. It existed for physically
+trusted links and for readable packet captures while developing, and it was
+removed: a protocol with "Encrypted" in its name should not ship a way to turn
+that off, and pre-shared-key mode already answers the only argument anyone had
+for it — key distribution — for one X25519 operation.
 
 `X25519` · `ChaCha20-Poly1305` · `BLAKE2s-256`, in the
 [Noise](https://noiseprotocol.org/) framework, validated against an independent
 implementation in both roles. Overhead is **30 bytes** per frame — a 14-byte
-authenticated header and a 16-byte tag — or 14 in plaintext mode.
+authenticated header and a 16-byte tag.
 
 Three things that catch people out:
 
@@ -322,7 +326,6 @@ records what each one would cost to change.
 | **Not audited** | See [Status](#status). This is the one that matters most. |
 | **0-RTT data is replayable** | And has no forward secrecy. Idempotent payloads only — see [USAGE.md](docs/USAGE.md#sending-with-the-handshake). |
 | **A pre-shared key is symmetric** | Every holder can impersonate every other. One administrative domain only. |
-| **Plaintext mode is genuinely plaintext** | Read, forged and altered at will by anyone on the path. |
 | **A resumption ticket is key material** | Store it as carefully as an identity secret. It expires after an hour and there are 256 per responder, evicted oldest-first — but within that window it is enough on its own to impersonate you. |
 | **A stranger can still cost you a handshake** | Anyone holding the public key can complete one — four X25519 operations. The peer table and the rate of new handshakes are both bounded, so a flood degrades connection setup rather than the process, but the work is not free. A replay from a new source address is a new handshake; only a cookie exchange would tell them apart, and that costs the round trip 0-RTT exists to save. |
 | **No post-quantum option** | X25519 only. A PQC suite would be a new protocol version, not a negotiation. |

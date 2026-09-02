@@ -40,14 +40,6 @@ impl Pair {
         }
     }
 
-    fn plain() -> Self {
-        Self {
-            a: Endpoint::bind_plain("127.0.0.1:0").expect("bind"),
-            b: Endpoint::bind_plain("127.0.0.1:0").expect("bind"),
-            a_public: None,
-            b_public: None,
-        }
-    }
 }
 
 /// Polls both endpoints until each reports a `Connected`, returning the handles.
@@ -280,38 +272,20 @@ fn a_psk_mesh_needs_no_keys_at_all() {
 }
 
 #[test]
-fn plaintext_nodes_pair_up_too() {
-    let mut pair = Pair::plain();
-    let b_addr = pair.b.local_addr().expect("addr");
-    pair.a.connect(b_addr, None).expect("dial");
-
-    let (a_to_b, b_from_a) = settle(&mut pair);
-    assert!(!pair.a.is_encrypted());
-    assert_eq!(
-        deliver(&mut pair.a, a_to_b, &mut pair.b, b"in the clear"),
-        b"in the clear"
-    );
-    assert_eq!(
-        deliver(&mut pair.b, b_from_a, &mut pair.a, b"still clear"),
-        b"still clear"
-    );
-}
-
-#[test]
 fn dialling_a_node_in_another_mode_fails() {
     // Modes do not interoperate in either direction.
     let mut encrypted = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
-    let mut plain = Endpoint::bind_plain("127.0.0.1:0").expect("bind");
-    let plain_addr = plain.local_addr().expect("addr");
+    let mut node = Endpoint::bind_psk("127.0.0.1:0", b"mesh").expect("bind");
+    let node_addr = node.local_addr().expect("addr");
 
     let peer = encrypted
-        .connect(plain_addr, Some(&[0x22; 32]))
+        .connect(node_addr, Some(&[0x22; 32]))
         .expect("dial");
 
     let deadline = Instant::now() + TIMEOUT;
     let mut failed = false;
     while !failed && Instant::now() < deadline {
-        let _ = plain.poll(Some(Duration::from_millis(20)));
+        let _ = node.poll(Some(Duration::from_millis(20)));
         if let Ok(Event::ConnectFailed { peer: got }) =
             encrypted.poll(Some(Duration::from_millis(20)))
         {
@@ -319,8 +293,8 @@ fn dialling_a_node_in_another_mode_fails() {
             failed = true;
         }
     }
-    assert!(failed, "a plaintext node must not answer an encrypted dial");
-    assert_eq!(plain.peer_count(), 0, "and must not record a session");
+    assert!(failed, "a pre-shared-key node must not answer an encrypted dial");
+    assert_eq!(node.peer_count(), 0, "and must not record a session");
 }
 
 #[test]

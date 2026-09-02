@@ -29,7 +29,6 @@ this is a one-line decision, not a different way of working.
 |---|---|---|---|---|
 | Public key | server's public key | yes | 4 DH | the internet, several organisations |
 | Pre-shared key | one secret | yes | **1 DH** | one closed system, a lab network |
-| Plaintext | nothing | no | none | a physically trusted link, development |
 
 ```rust
 // Public key
@@ -39,10 +38,6 @@ let server = Endpoint::bind("0.0.0.0:4433", Identity::generate())?;
 // Pre-shared key
 let conn = Connection::connect_psk(addr, b"lab-instrument-7")?;
 let server = Endpoint::bind_psk("0.0.0.0:4433", b"lab-instrument-7")?;
-
-// Plaintext
-let conn = Connection::connect_plain(addr)?;
-let server = Endpoint::bind_plain("0.0.0.0:4433")?;
 ```
 
 **Encryption is not what costs you anything.** Encrypting a frame takes about a
@@ -53,10 +48,11 @@ configure, no public keys to ship — rather than turning encryption off.
 **A pre-shared key is symmetric.** Everyone holding it can impersonate everyone
 else holding it. Right for one closed system, wrong across organisations.
 
-**Plaintext authenticates nothing.** Anyone on the path can read, forge, or
-alter every byte. Two situations justify it: a link that is already physically
-trusted, and development, where a readable packet capture is worth more than
-confidentiality.
+**There is no unencrypted mode.** There was one, for physically trusted links
+and for readable packet captures during development. It was removed: a protocol
+named for encryption should not ship a way to turn it off, and the only real
+argument for it — avoiding key distribution — is what pre-shared-key mode is
+for, at one X25519 operation.
 
 **Modes never mix.** A peer in one mode cannot talk to a peer in another — the
 frame types are disjoint, so there is nothing to negotiate and nothing to
@@ -488,7 +484,6 @@ one.
 
 ```rust
 // After any connection, take the ticket and persist the 32-byte key.
-// `None` in plaintext mode, which has nothing to resume.
 let key: [u8; 32] = *conn.resumption_ticket().expect("encrypted").key();
 save_to_flash(&key);
 
@@ -557,7 +552,7 @@ In public-key mode `connect` needs the peer's key; in the other two it does not:
 
 ```rust
 node.connect(addr, Some(&their_public))?;   // public-key mode
-node.connect(addr, None)?;                  // pre-shared key, or plaintext
+node.connect(addr, None)?;                  // pre-shared key: no peer key needed
 ```
 
 `Connection` remains the simpler blocking client for code that only ever dials
@@ -708,7 +703,7 @@ Cortex-M4 with 256 KiB of flash that is 9% of it.
 | `send` after `connect` fails | An `Endpoint` dial is not finished until `Event::Connected` arrives; poll first. |
 | `send_reliable` fails early on a new connection | The congestion window opens at 4, not at the 32-message memory bound. Call `flush` and retry. |
 | A large `send_reliable` never finishes | Nothing is calling `recv` or `flush`, so the queued fragments are never fed out. |
-| `resumption_ticket()` is `None` | Plaintext sessions have nothing to resume. |
+| `resumption_ticket()` is `None` | The connection is already closed. |
 
 ## The whole list
 

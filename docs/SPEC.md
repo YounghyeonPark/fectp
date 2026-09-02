@@ -36,23 +36,25 @@ entirely.
 
 ### 1.2 Security modes
 
-A session runs in exactly one of three modes. **The mode is fixed when the
-session is built and never appears on the wire as something to agree on.**
+**Every session is encrypted.** There is no mode that is not, and no way for a
+caller to ask for one. What a session chooses is who is authenticated, not
+whether the bytes are protected.
 
-| mode | pre-shared | encrypted | handshake |
+| mode | pre-shared | authenticates | handshake |
 |---|---|---|---|
-| Public key | the responder's public key | yes | `IK`, four DH each (§4.4) |
-| Pre-shared key | one secret, both sides | yes | `NNpsk0`, one DH each (§4.7) |
-| Plaintext | nothing | **no** | capability exchange only (§1.2.2) |
+| Public key | the responder's public key | each peer separately | `IK`, four DH each (§4.4) |
+| Pre-shared key | one secret, both sides | membership of the group holding it | `NNpsk0`, one DH each (§4.7) |
 
-A peer MUST implement exactly one mode per session and MUST NOT offer a choice
-between them. A protocol that negotiates its own security level is a protocol
-an attacker can talk down to the weakest option; there is deliberately no field
-here to rewrite.
+**The mode is fixed when the session is built and never appears on the wire as
+something to agree on.** A peer MUST implement exactly one mode per session and
+MUST NOT offer a choice between them. A protocol that negotiates its own
+security level is a protocol an attacker can talk down to the weakest option;
+there is deliberately no field here to rewrite.
 
-The modes are kept apart by their frame types, which are disjoint: an encrypted
-peer receiving `PlainInit` sees a type it does not accept, and a plaintext peer
-receiving `HandshakeInit` likewise. Neither has to *decide* anything.
+The two modes are kept apart by their frame types, which are disjoint: a
+pre-shared-key responder receiving `HandshakeInit` sees a type it does not
+accept, and a public-key responder receiving `ResumeInit` has no ticket to
+match it against. Neither has to *decide* anything.
 
 #### 1.2.1 Pre-shared-key mode
 
@@ -74,44 +76,6 @@ that spent it would refuse the peer's next connection.
 A pre-shared key is symmetric: every holder can impersonate every other holder.
 It is appropriate within one administrative domain and inappropriate across
 several, where public-key mode gives each peer a distinct identity.
-
-#### 1.2.2 Plaintext mode
-
-No encryption, no authentication, no identities. Anyone on the path can read,
-forge, or alter every byte. It exists for links that are physically trusted and
-for development, where a readable packet capture is worth more than
-confidentiality.
-
-It is **not** the remedy for awkward key distribution. Encrypting a frame costs
-on the order of a microsecond; distribution is what costs anything, and
-pre-shared-key mode removes that without giving up encryption.
-
-The exchange:
-
-```
--> PlainInit     : header(14) || capability_block(8) || payload
-<- PlainResponse : header(14) || capability_block(8) || payload
-```
-
-There are no keys to agree; the exchange exists so that capabilities (§4.3) are
-still negotiated and everything above the session layer — codecs, reliability,
-sequencing — behaves exactly as it does when encrypted.
-
-Data frames:
-
-```
-PlainData : header(14) || [message_id(4)]? || payload
-PlainAck  : header(14) || acknowledgement_block(12)
-```
-
-Per-frame overhead is 14 bytes rather than 30: there is no authentication tag,
-because there is nothing to authenticate. `FLAG_RELIABLE` applies as in §5.4.
-`FLAG_PADDED` MUST NOT be set — padding hides a length from someone who can see
-the ciphertext but not the plaintext, and here there is no ciphertext.
-
-A receiver MAY apply the replay window of §5.1 so that reordering and duplicate
-behaviour matches the encrypted path. It is not a security mechanism in this
-mode: nothing is authenticated, so an attacker can forge any sequence number.
 
 ## 2. Cryptographic suite
 
@@ -202,12 +166,14 @@ value.
 | 5 | `Ack` — acknowledges received reliable messages (§5.7) |
 | 6 | `ResumeInit` — resumption message 1 (§4.7) |
 | 7 | `ResumeResponse` — resumption message 2 (§4.8) |
-| 10 | `PlainInit` — plaintext session opening (§1.2) |
-| 11 | `PlainResponse` — plaintext session response (§1.2) |
-| 12 | `PlainData` — plaintext application data (§1.2) |
-| 13 | `PlainAck` — plaintext acknowledgement (§1.2) |
 
 All other values are reserved. A receiver MUST reject them.
+
+Ids 10–13 carried an unencrypted mode in an earlier draft of this document.
+They stay retired rather than being handed to something new: an implementation
+built against that draft would otherwise find its unauthenticated frames
+accepted under a meaning nobody checked. A receiver MUST reject them like any
+other reserved value.
 
 ### 3.2 Flags
 
@@ -942,6 +908,7 @@ A conforming implementation SHOULD:
 | `TAGLEN` | 16 |
 | BLAKE2s block length | 64 |
 | `CAPS_LEN` | 8 |
+| Data-frame overhead (header + tag) | 30 |
 | `CODEC_HEADER_LEN` | 4 |
 | `PAD_BLOCK` | 64 |
 | `REPLAY_WINDOW` | 64 (minimum) |
@@ -958,8 +925,6 @@ A conforming implementation SHOULD:
 | Resumption Noise overhead (each message) | 48 |
 | Minimum valid `ResumeInit` frame | 78 |
 | Minimum valid `ResumeResponse` frame | 70 |
-| Plaintext data-frame overhead | 14 |
-| Minimum valid `PlainInit` / `PlainResponse` frame | 22 |
 
 ## 9. Interoperability
 

@@ -28,10 +28,9 @@ timeout: they all use `HANDSHAKE_TIMEOUT`, and all return `Result<Self>`.
 | `resume_and_send(addr, ticket, peer_public, first)` | The same, sending `first` with the handshake. |
 | `connect_psk(addr, secret)` | Pre-shared-key mode. No public keys involved. |
 | `connect_psk_and_send(addr, secret, first)` | The same, sending `first` with the handshake. |
-| `connect_plain(addr)` | **No encryption.** Loopback and trusted links only. |
 
-Plaintext has no `_and_send`: it is for loopback and trusted links, where
-saving a round trip is not worth a way of connecting.
+There is no way to connect without encryption. Every constructor above
+encrypts; they differ in who gets authenticated.
 
 > Data sent with the handshake is encrypted but **replayable** — an attacker
 > who captures the packet can send it again — and has no forward secrecy. Send
@@ -105,8 +104,7 @@ its retries, or if the timeout expires.
 |---|---|
 | `peer_public_key()` | The peer's authenticated static key. |
 | `peer_addr()` | Where it is. |
-| `is_encrypted()` | False in plaintext mode. |
-| `resumption_ticket()` | A single-use ticket for resuming later, if encrypted. |
+| `resumption_ticket()` | A single-use ticket for resuming later. `None` once closed. |
 | `max_payload()` | Largest `send`. |
 | `max_reliable_payload()` | Largest `send_reliable` — smaller, by the message identifier. |
 | `max_fragment_payload()` | What one frame of a split message carries. |
@@ -134,7 +132,6 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 |---|---|
 | `bind(addr, identity)` | Public-key mode. |
 | `bind_psk(addr, secret)` | Pre-shared-key mode. |
-| `bind_plain(addr)` | **No encryption.** |
 
 ### The loop
 
@@ -186,7 +183,6 @@ there is nothing here to block on. Progress happens inside `poll`.
 |---|---|
 | `local_addr()` | Where this endpoint is bound. |
 | `public_key()` | This endpoint's static key, in public-key mode. |
-| `is_encrypted()` | False in plaintext mode. |
 | `peers()` / `peer_count()` | Who is connected. |
 | `peer_public_key(peer)` / `peer_addr(peer)` | About one of them. |
 | `unacknowledged(peer)` | Reliable messages still in flight to one peer. |

@@ -53,14 +53,11 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
-use fectp_core::plain::{PlainInitiator, PlainResponder};
 use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
-};
+    preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket, Session};
 use fectp_core::PublicKey;
 use rand_core::{OsRng, RngCore};
 
-use crate::link::Link;
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::{
     is_timeout, local_capabilities, max_datagram, Error, Identity, PayloadType, Result,
@@ -178,7 +175,6 @@ pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 enum Handshake {
     Full(Box<Initiator>),
     Psk(Box<ResumeInitiator>),
-    Plain(Box<PlainInitiator>),
 }
 
 struct Outbound {
@@ -203,8 +199,6 @@ enum Mode {
     /// Pre-shared key: peers must hold the same secret. Encrypted, but with
     /// nothing to distribute except that secret.
     Psk(ResumptionTicket),
-    /// No encryption. See [`fectp_core::plain`].
-    Plain,
 }
 
 /// Serves many FECTP peers from one UDP socket.
@@ -292,16 +286,6 @@ impl Endpoint {
         Self::with_mode(addr, Mode::Psk(preshared_key(secret)))
     }
 
-    /// Binds without encryption.
-    ///
-    /// For physically trusted links and development only — nothing here is
-    /// authenticated, so anyone on the path can read, forge, or alter every
-    /// byte. If the appeal is avoiding key distribution rather than avoiding
-    /// encryption, [`bind_psk`](Self::bind_psk) is the answer instead.
-    pub fn bind_plain(addr: impl ToSocketAddrs) -> Result<Self> {
-        Self::with_mode(addr, Mode::Plain)
-    }
-
     fn with_mode(addr: impl ToSocketAddrs, mode: Mode) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
         let size = max_datagram() + Initiator::OVERHEAD;
@@ -334,23 +318,18 @@ impl Endpoint {
 
     /// The public key clients must know in order to connect.
     ///
-    /// `None` in pre-shared-key and plaintext modes, which have no server
-    /// identity to present.
+    /// `None` in pre-shared-key mode, which authenticates both sides with a
+    /// secret they already share and so presents no identity of its own.
     pub fn public_key(&self) -> Option<&PublicKey> {
         match &self.mode {
             Mode::PublicKey(identity) => Some(identity.public()),
-            _ => None,
+            Mode::Psk(_) => None,
         }
     }
 
     /// How many resumption tickets are currently outstanding.
     pub fn outstanding_tickets(&self) -> usize {
         self.tickets.len()
-    }
-
-    /// Whether this server encrypts.
-    pub fn is_encrypted(&self) -> bool {
-        !matches!(self.mode, Mode::Plain)
     }
 
     /// How many peers are currently connected.
@@ -419,17 +398,12 @@ impl Endpoint {
             Mode::Psk(psk) => {
                 let mut initiator = ResumeInitiator::new(
                     *psk,
-                    fectp_core::plain::ANONYMOUS,
+                    fectp_core::ANONYMOUS,
                     session_id,
                     caps,
                 )?;
                 let len = initiator.write_init(&mut OsRng, zero_rtt, &mut frame)?;
                 (Handshake::Psk(Box::new(initiator)), len)
-            }
-            Mode::Plain => {
-                let mut initiator = PlainInitiator::new(session_id, caps);
-                let len = initiator.write_init(zero_rtt, &mut frame)?;
-                (Handshake::Plain(Box::new(initiator)), len)
             }
         };
         frame.truncate(len);
@@ -555,7 +529,7 @@ impl Endpoint {
         // choice unnegotiable.
         if matches!(
             header.frame_type,
-            FrameType::HandshakeInit | FrameType::ResumeInit | FrameType::PlainInit
+            FrameType::HandshakeInit | FrameType::ResumeInit
         ) && self.repeat_handshake(from, header.session_id)?
         {
             return Ok(None);
@@ -567,7 +541,7 @@ impl Endpoint {
         // session, do not — a flood must not stop either.
         if matches!(
             header.frame_type,
-            FrameType::HandshakeInit | FrameType::ResumeInit | FrameType::PlainInit
+            FrameType::HandshakeInit | FrameType::ResumeInit
         ) && !self.may_answer_handshake()
         {
             return Ok(None);
@@ -580,14 +554,12 @@ impl Endpoint {
             (FrameType::ResumeInit, Mode::PublicKey(_) | Mode::Psk(_)) => {
                 self.accept_resumed(n, from).map(Some).or(Ok(None))
             }
-            (FrameType::PlainInit, Mode::Plain) => {
-                self.accept_plain(n, from).map(Some).or(Ok(None))
-            }
-            (FrameType::HandshakeInit | FrameType::ResumeInit | FrameType::PlainInit, _) => {
-                Ok(None)
-            }
+            // A full handshake aimed at a pre-shared-key server. The modes do
+            // not interoperate, and this is where that is enforced: not by
+            // deciding, but by having no arm that accepts it.
+            (FrameType::HandshakeInit, _) => Ok(None),
             (
-                FrameType::HandshakeResponse | FrameType::ResumeResponse | FrameType::PlainResponse,
+                FrameType::HandshakeResponse | FrameType::ResumeResponse,
                 _,
             ) => self.complete_outbound(n, from, header.session_id),
             _ => self.route(n, from, header.session_id),
@@ -666,13 +638,10 @@ impl Endpoint {
         let completed = match outbound.handshake {
             Handshake::Full(initiator) => initiator
                 .read_response(&self.rx[..n], &mut staging)
-                .map(|(session, len)| (Link::Encrypted(session), len, false)),
+                .map(|(session, len)| (session, len, false)),
             Handshake::Psk(initiator) => initiator
                 .read_response(&self.rx[..n], &mut staging)
-                .map(|(session, len)| (Link::Encrypted(session), len, true)),
-            Handshake::Plain(initiator) => initiator
-                .read_response(&self.rx[..n], &mut staging)
-                .map(|(session, len)| (Link::Plain(session), len, false)),
+                .map(|(session, len)| (session, len, true)),
         };
 
         let Ok((link, len, resumed)) = completed else {
@@ -705,7 +674,7 @@ impl Endpoint {
         let (session, sent) = written?;
         self.socket.send_to(&self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
-        let event = self.register(Link::Encrypted(session), from, zero_rtt, false);
+        let event = self.register(session, from, zero_rtt, false);
         self.remember_reply(&event, reply);
         Ok(event)
     }
@@ -717,7 +686,7 @@ impl Endpoint {
         // resumption ticket is spent when redeemed, so that a captured
         // resumption request cannot be replayed.
         let configured = match &self.mode {
-            Mode::Psk(psk) if psk.id() == &id => Some((*psk, fectp_core::plain::ANONYMOUS)),
+            Mode::Psk(psk) if psk.id() == &id => Some((*psk, fectp_core::ANONYMOUS)),
             _ => None,
         };
         let (ticket, remote_static) = match configured {
@@ -736,24 +705,7 @@ impl Endpoint {
         let (session, sent) = written?;
         self.socket.send_to(&self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
-        let event = self.register(Link::Encrypted(session), from, zero_rtt, true);
-        self.remember_reply(&event, reply);
-        Ok(event)
-    }
-
-    fn accept_plain(&mut self, n: usize, from: SocketAddr) -> Result<Event> {
-        let mut responder = PlainResponder::new(local_capabilities());
-        let mut staging = vec![0u8; self.rx.len()];
-        let len = responder.read_init(&self.rx[..n], &mut staging)?;
-        let payload = staging[..len].to_vec();
-
-        let reply = core::mem::take(&mut self.handshake_reply);
-        let written = responder.write_response(&reply, &mut self.tx);
-        self.handshake_reply = reply;
-        let (session, sent) = written?;
-        self.socket.send_to(&self.tx[..sent], from)?;
-        let reply = self.tx[..sent].to_vec();
-        let event = self.register(Link::Plain(session), from, payload, false);
+        let event = self.register(session, from, zero_rtt, true);
         self.remember_reply(&event, reply);
         Ok(event)
     }
@@ -761,16 +713,14 @@ impl Endpoint {
     /// Files a freshly established session and issues its next ticket.
     fn register(
         &mut self,
-        link: Link,
+        link: Session,
         addr: SocketAddr,
         zero_rtt: Vec<u8>,
         resumed: bool,
     ) -> Event {
-        // Every encrypted handshake issues the ticket for the next one. A
-        // plaintext session has none, and needs none.
-        if let Some(ticket) = link.resumption_ticket() {
-            self.tickets.insert(ticket, *link.remote_static());
-        }
+        // Every handshake issues the ticket for the next one.
+        self.tickets
+            .insert(link.resumption_ticket(), *link.remote_static());
 
         let session_id = link.session_id();
         let datagram_limit =
@@ -793,15 +743,14 @@ impl Endpoint {
     fn register_as(
         &mut self,
         peer_id: PeerId,
-        link: Link,
+        link: Session,
         addr: SocketAddr,
         zero_rtt: Vec<u8>,
         resumed: bool,
         initiated: bool,
     ) -> Event {
-        if let Some(ticket) = link.resumption_ticket() {
-            self.tickets.insert(ticket, *link.remote_static());
-        }
+        self.tickets
+            .insert(link.resumption_ticket(), *link.remote_static());
         let session_id = link.session_id();
         let datagram_limit =
             (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
@@ -899,7 +848,7 @@ impl Endpoint {
     pub fn set_handshake_reply(&mut self, payload: &[u8]) -> Result<()> {
         let overhead = Responder::OVERHEAD
             .max(ResumeResponder::OVERHEAD)
-            .max(PlainResponder::OVERHEAD);
+;
         if payload.len() + overhead > max_datagram() {
             return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
         }
@@ -977,7 +926,7 @@ impl Endpoint {
     fn file(
         &mut self,
         peer_id: PeerId,
-        link: Link,
+        link: Session,
         addr: SocketAddr,
         session_id: u32,
         datagram_limit: usize,

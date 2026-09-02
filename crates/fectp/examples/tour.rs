@@ -113,7 +113,6 @@ fn modes() -> fectp::Result<()> {
     // Pre-shared key: encrypted, but nothing to distribute except the secret.
     let psk = with_server_mode(Endpoint::bind_psk("127.0.0.1:0", SECRET)?, |addr, _| {
         let conn = Connection::connect_psk(addr, SECRET)?;
-        assert!(conn.is_encrypted());
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.send(b"psk", PayloadType::Opaque)?;
         let mut buf = vec![0u8; 2048];
@@ -122,28 +121,16 @@ fn modes() -> fectp::Result<()> {
         Ok(conn.max_payload())
     })?;
 
-    // Plaintext: framing and codecs, no crypto.
-    let plain = with_server_mode(Endpoint::bind_plain("127.0.0.1:0")?, |addr, _| {
-        let conn = Connection::connect_plain(addr)?;
-        assert!(!conn.is_encrypted());
-        assert!(conn.resumption_ticket().is_none());
-        conn.set_read_timeout(Some(Duration::from_secs(5)))?;
-        conn.send(b"plain", PayloadType::Opaque)?;
-        let mut buf = vec![0u8; 2048];
-        let n = conn.recv(&mut buf)?;
-        assert_eq!(&buf[..n], b"plain");
-        Ok(conn.max_payload())
-    })?;
-
     // Modes do not interoperate: nothing to negotiate, nothing to downgrade.
+    // A full handshake aimed at a pre-shared-key server carries a frame type
+    // that server has no arm for, so it is not answered.
     let refused = with_server_mode(Endpoint::bind_psk("127.0.0.1:0", SECRET)?, |addr, _| {
-        Ok(Connection::connect_plain(addr).is_err())
+        let key = *Identity::generate().public();
+        Ok(Connection::connect(addr, &key, &Identity::generate()).is_err())
     })?;
-    assert!(refused, "a plaintext client must not reach an encrypted server");
+    assert!(refused, "a public-key client must not reach a pre-shared-key server");
 
-    println!(
-        "modes: psk payload {psk}, plaintext payload {plain} (no tag), mismatched modes refused"
-    );
+    println!("modes: psk payload {psk}, mismatched modes refused");
     Ok(())
 }
 
