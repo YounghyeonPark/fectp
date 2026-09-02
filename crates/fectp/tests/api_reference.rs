@@ -89,11 +89,42 @@ fn no_way_of_connecting_takes_a_timeout() {
     let id = Identity::generate();
 
     // All fail — nothing is listening — but the shape is what is being pinned.
-    let _ = Connection::connect(addr, &key, &id);
-    let _ = Connection::connect_and_send(addr, &key, &id, b"hello");
-    let _ = Connection::connect_psk(addr, b"secret");
-    let _ = Connection::connect_psk_and_send(addr, b"secret", b"hello");
-    let _ = Connection::connect_plain(addr);
+    //
+    // In parallel, because each waits out `HANDSHAKE_TIMEOUT` against a socket
+    // that will never answer and the five have nothing to do with each other.
+    // Run in sequence they were twenty-five seconds, which was most of this
+    // crate's test time and enough extra load to make a timing-sensitive test
+    // elsewhere fail about one run in three.
+    let secret = *id.secret();
+    let attempts: Vec<std::thread::JoinHandle<()>> = vec![
+        std::thread::spawn(move || {
+            let id = Identity::from_secret(secret);
+            let _ = Connection::connect(addr, &key, &id);
+        }),
+        std::thread::spawn(move || {
+            let id = Identity::from_secret(secret);
+            let _ = Connection::connect_and_send(addr, &key, &id, b"hello");
+        }),
+        std::thread::spawn(move || {
+            let _ = Connection::connect_psk(addr, b"secret");
+        }),
+        std::thread::spawn(move || {
+            let _ = Connection::connect_psk_and_send(addr, b"secret", b"hello");
+        }),
+        std::thread::spawn(move || {
+            let _ = Connection::connect_plain(addr);
+        }),
+    ];
+
+    let started = std::time::Instant::now();
+    for attempt in attempts {
+        attempt.join().expect("attempt");
+    }
+    assert!(
+        started.elapsed() < fectp::HANDSHAKE_TIMEOUT * 3,
+        "the five ran in sequence rather than together: {:?}",
+        started.elapsed()
+    );
 }
 
 /// API.md — "Asking": the payload limits, in the order the reference claims.

@@ -17,6 +17,32 @@ use fectp::{Connection, Identity, PayloadType};
 const TIMEOUT: Duration = Duration::from_secs(5);
 const FLUSH: Duration = Duration::from_secs(3);
 
+/// Flushes until the sender reaches a terminal state, or `budget` runs out.
+///
+/// A single `flush(FLUSH)` assumes how long the outcome takes to arrive, and
+/// for a message being abandoned that is five retransmissions with exponential
+/// backoff — under a quarter of a second on an idle loopback and several times
+/// `FLUSH` once the round-trip samples grow, which they do when the rest of
+/// this suite is running. Waiting for the state rather than budgeting for it
+/// removes the guess.
+fn flush_until_settled(conn: &Connection, budget: Duration) -> fectp::Result<()> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match conn.flush(FLUSH) {
+            Ok(()) => return Ok(()),
+            // Terminal: the sender has given up and said so.
+            Err(e @ fectp::Error::Unacknowledged { .. }) => return Err(e),
+            // Not yet. Anything else is "still outstanding" until the budget
+            // says otherwise.
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
 /// A UDP relay that forwards between one client and one server, dropping
 /// datagrams at chosen positions in each direction.
 ///
@@ -300,12 +326,13 @@ fn a_fragmented_message_whose_fragment_never_arrives_is_reported() {
 
     // The caller has to be told. Silently returning success on a message the
     // peer will never be able to assemble is the worst available outcome.
+    client
+        .send_reliable(&payload, PayloadType::Opaque)
+        .expect("queueing it is fine; it is the delivery that cannot happen");
+    let outcome = flush_until_settled(&client, Duration::from_secs(30));
     assert!(
-        matches!(
-            client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(FLUSH)),
-            Err(fectp::Error::Unacknowledged { .. })
-        ),
-        "a message that cannot be delivered must not report success"
+        matches!(outcome, Err(fectp::Error::Unacknowledged { .. })),
+        "a message that cannot be delivered must not report success, got {outcome:?}"
     );
 }
 
@@ -335,7 +362,8 @@ fn an_early_loss_is_recovered_in_a_stream_far_longer_than_the_ack_window() {
 
     client
         .send_reliable(&payload, PayloadType::Opaque)
-        .and_then(|()| client.flush(FLUSH))
+        .expect("queueing a large message");
+    flush_until_settled(&client, Duration::from_secs(30))
         .expect("a single early loss must not lose the message");
 
     let received = echo.messages(1, TIMEOUT);

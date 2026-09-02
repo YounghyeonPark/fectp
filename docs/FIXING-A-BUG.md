@@ -39,6 +39,8 @@ The ways they failed, each from this repository:
 | **Asserting what was already true** | "An established peer still works after a flood" held before the bound existed. `a_flood_does_not_evict_an_established_peer` was deleted for this: 200 connections never reached the default `MAX_PEERS` of 1024, so nothing was ever evicted. |
 | **A generator that never arrives** | A property test whose inputs stop short of the interesting region cannot fail. Measure the reach — `report_how_far_the_generator_reaches` exists for exactly this. |
 | **Racing the harness** | A peer waiting in `recv` while the loop that answers it has stopped times out and looks evicted. Drain before joining. |
+| **Budgeting for an outcome instead of waiting for it** | `flush(3s)` assumed how long a message takes to be abandoned — five retransmissions with exponential backoff, a quarter of a second on an idle loopback and several times that once the round-trip samples grow. Wait for the terminal state; a timeout is "not yet", not a result. |
+| **A wall-clock read of a busy system** | Under load the single poll loop is late, and a peer that is merely waiting looks like a peer that was evicted. Judge once the load has stopped, where the two differ absolutely rather than by degree. |
 
 If the test still passes with the fix removed, you have not found the bug's
 cause, or the test is not aimed at it. Both are worth knowing before you commit.
