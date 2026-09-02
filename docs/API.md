@@ -278,6 +278,7 @@ alone otherwise.
 | `MIN_MAX_DATAGRAM` | 128 | Below this a handshake does not fit. |
 | `HANDSHAKE_TIMEOUT` | 5 s | How long any way of connecting waits for a reply, resending meanwhile. |
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
+| `TICKET_LIFETIME` | 1 hour | How long a resumption ticket stays redeemable. `set_ticket_lifetime` overrides it. |
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |
 
 ---

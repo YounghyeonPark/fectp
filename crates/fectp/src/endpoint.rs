@@ -862,6 +862,18 @@ impl Endpoint {
         Ok(true)
     }
 
+    /// Sets how long a resumption ticket this endpoint issued stays redeemable,
+    /// replacing [`TICKET_LIFETIME`](crate::TICKET_LIFETIME).
+    ///
+    /// A ticket is single use, but until it is used it is enough on its own to
+    /// impersonate the peer it was issued to, so the lifetime bounds what a
+    /// captured one is worth. Shorten it where that matters more than the
+    /// hundred milliseconds a full handshake costs; lengthen it for a device
+    /// that sleeps between reports and would otherwise always pay for one.
+    pub fn set_ticket_lifetime(&mut self, lifetime: Duration) {
+        self.tickets.set_lifetime(lifetime);
+    }
+
     /// Sets how many new handshakes a second this endpoint will answer,
     /// replacing [`MAX_HANDSHAKES_PER_SECOND`].
     ///

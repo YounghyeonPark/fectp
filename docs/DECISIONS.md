@@ -550,7 +550,7 @@ These are unimplemented, not overlooked.
 | Gap | Consequence | Notes |
 |---|---|---|
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
-| **Ticket expiry** | Tickets are bounded in number but have no lifetime. | A responder evicts oldest-first at 256; time-based expiry is unspecified. |
+| **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
@@ -1658,6 +1658,47 @@ the frames only a peer can send ([D39](#d39--frames-a-peer-could-send-and-this-i
 the congestion window ([D41](#d41--the-congestion-window-moves-one-way-per-signal)),
 and this. That is not the same as being correct, and the two worst bugs here
 were found by doing something new rather than by extending a list.
+
+## D43 — A ticket stops being worth stealing
+
+**Problem**: resumption tickets were bounded in number — 256, oldest evicted —
+and not in time.
+
+Those are different bounds. A ticket is single use, but **until it is used it is
+enough on its own to impersonate the peer it was issued to**: redeeming it is
+`NNpsk0` with the ticket as the pre-shared key, and nothing else is required.
+Bounding the count says how many are held, not how long one is worth capturing.
+
+On a busy responder that is nearly the same thing, because 256 more arrive
+quickly. On a quiet one it is not: a device that talks to a single peer holds
+its ticket until 256 others turn up, which is indefinitely. A ticket captured
+today would still work next year.
+
+**Decision**: a ticket expires an hour after it is issued, and
+`Endpoint::set_ticket_lifetime` overrides that. Expired ones are dropped on
+insert as well as refused on redemption, so a quiet responder does not keep one
+alive merely because nothing arrived to push it out.
+
+An hour because resumption exists for a device that reboots and reconnects, and
+an hour covers that. Anything asleep longer pays for a full handshake instead —
+a hundred milliseconds on a microcontroller, not a failure, and the fallback
+path was always required anyway.
+
+**Local policy, not wire format.** Nothing about the lifetime appears on the
+wire and no peer needs to know it. `SPEC.md` §4.6 states it as a SHOULD rather
+than a MUST for that reason.
+
+**How the test was wrong first.** The lifetime was set to 150 ms so the test
+would not take an hour, and the ticket outlived it before the control could
+redeem it — so the control failed. That is exactly what the control is for:
+without it, the expiry assertion at the end would have passed because the
+ticket was refused for a reason nobody had checked.
+
+**What it does not fix**: the window is smaller, not closed. A ticket captured
+and redeemed within the hour still works, and the only defence against that is
+that redeeming it spends it — the legitimate peer's next resumption then fails
+and it falls back to a full handshake, which is a detectable event rather than a
+silent one.
 
 ## Not carried over
 

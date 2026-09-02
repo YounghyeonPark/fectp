@@ -776,19 +776,67 @@ pub(crate) fn deliver(
 /// simply costs the affected peer a full handshake.
 pub const MAX_TICKETS: usize = 256;
 
+/// How long a resumption ticket stays redeemable.
+///
+/// A ticket is key material and it is single use, but until it is used it is
+/// enough on its own to impersonate the peer it was issued to. Bounding the
+/// count is not bounding that: a responder that sees one peer keeps its ticket
+/// until 256 more arrive, which on a quiet device is for ever, so a ticket
+/// captured today would still work next year.
+///
+/// An hour is short enough that a stolen ticket is worth little and long enough
+/// for the case resumption exists for — a device that reboots and reconnects.
+/// Anything longer asleep pays for a full handshake instead, which is a
+/// hundred milliseconds on a microcontroller rather than a failure.
+///
+/// [`Endpoint::set_ticket_lifetime`](crate::Endpoint::set_ticket_lifetime)
+/// overrides it.
+pub const TICKET_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Resumption tickets a server will honour.
-#[derive(Default)]
 pub(crate) struct TicketStore {
-    by_id: std::collections::HashMap<[u8; TICKET_ID_LEN], (ResumptionTicket, PublicKey)>,
+    by_id: std::collections::HashMap<[u8; TICKET_ID_LEN], Held>,
     order: std::collections::VecDeque<[u8; TICKET_ID_LEN]>,
+    lifetime: std::time::Duration,
+}
+
+/// A ticket and when it was issued.
+struct Held {
+    ticket: ResumptionTicket,
+    peer: PublicKey,
+    issued: std::time::Instant,
+}
+
+impl Default for TicketStore {
+    fn default() -> Self {
+        Self {
+            by_id: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            lifetime: TICKET_LIFETIME,
+        }
+    }
 }
 
 impl TicketStore {
+    /// Sets how long a ticket stays redeemable.
+    pub fn set_lifetime(&mut self, lifetime: std::time::Duration) {
+        self.lifetime = lifetime;
+    }
+
     pub fn insert(&mut self, ticket: ResumptionTicket, peer: PublicKey) {
         let id = *ticket.id();
-        if self.by_id.insert(id, (ticket, peer)).is_none() {
+        let held = Held {
+            ticket,
+            peer,
+            issued: std::time::Instant::now(),
+        };
+        if self.by_id.insert(id, held).is_none() {
             self.order.push_back(id);
         }
+        // Expired ones first: they are dead weight, and dropping them here
+        // means a quiet responder does not hold a stolen ticket alive simply
+        // because nothing else arrived to push it out.
+        self.prune();
         while self.order.len() > MAX_TICKETS {
             if let Some(oldest) = self.order.pop_front() {
                 self.by_id.remove(&oldest);
@@ -796,14 +844,33 @@ impl TicketStore {
         }
     }
 
+    /// Drops every ticket past its lifetime.
+    fn prune(&mut self) {
+        let lifetime = self.lifetime;
+        let by_id = &mut self.by_id;
+        self.order.retain(|id| match by_id.get(id) {
+            Some(held) if held.issued.elapsed() < lifetime => true,
+            _ => {
+                by_id.remove(id);
+                false
+            }
+        });
+    }
+
     /// Takes a ticket, removing it.
     ///
     /// Tickets are single use. Letting one be redeemed twice would let an
     /// attacker replay a captured resumption request.
     pub fn take(&mut self, id: &[u8; TICKET_ID_LEN]) -> Option<(ResumptionTicket, PublicKey)> {
-        let found = self.by_id.remove(id)?;
+        let held = self.by_id.remove(id)?;
         self.order.retain(|queued| queued != id);
-        Some(found)
+        // Removed either way. An expired ticket is spent as surely as a
+        // redeemed one, and leaving it would let a caller retry until the
+        // clock happened to suit.
+        if held.issued.elapsed() >= self.lifetime {
+            return None;
+        }
+        Some((held.ticket, held.peer))
     }
 
     /// How many tickets are outstanding.

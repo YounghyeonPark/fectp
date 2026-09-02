@@ -323,7 +323,7 @@ records what each one would cost to change.
 | **0-RTT data is replayable** | And has no forward secrecy. Idempotent payloads only — see [USAGE.md](docs/USAGE.md#sending-with-the-handshake). |
 | **A pre-shared key is symmetric** | Every holder can impersonate every other. One administrative domain only. |
 | **Plaintext mode is genuinely plaintext** | Read, forged and altered at will by anyone on the path. |
-| **A resumption ticket is key material** | Store it as carefully as an identity secret. No expiry; 256 per responder, evicted oldest-first. |
+| **A resumption ticket is key material** | Store it as carefully as an identity secret. It expires after an hour and there are 256 per responder, evicted oldest-first — but within that window it is enough on its own to impersonate you. |
 | **A stranger can still cost you a handshake** | Anyone holding the public key can complete one — four X25519 operations. The peer table and the rate of new handshakes are both bounded, so a flood degrades connection setup rather than the process, but the work is not free. A replay from a new source address is a new handshake; only a cookie exchange would tell them apart, and that costs the round trip 0-RTT exists to save. |
 | **No post-quantum option** | X25519 only. A PQC suite would be a new protocol version, not a negotiation. |
 | **Public keys are your problem** | The protocol authenticates a key you already trust. Getting it to you is out of scope. |
@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-271 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+273 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 

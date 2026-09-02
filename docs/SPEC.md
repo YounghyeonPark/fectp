@@ -434,6 +434,13 @@ index is needed. The identifier travels in the clear, because a responder must
 know which key to try before it can decrypt anything; it is a one-way function
 of the key, so it discloses nothing, and §4.7 binds it into the transcript.
 
+A responder SHOULD also give a ticket a lifetime and refuse it afterwards.
+Bounding only the *number* held does not bound how long one is worth stealing:
+a responder that sees few peers keeps a ticket until enough others arrive to
+push it out, which on a quiet device is indefinitely. The lifetime is local
+policy and appears nowhere on the wire; an initiator whose ticket is refused
+falls back to a full handshake, which it must be able to do in any case.
+
 **Tickets are single use.** A responder MUST remove a ticket when it is
 redeemed, and MUST refuse a second redemption. Allowing reuse would let an
 attacker replay a captured resumption request.
