@@ -34,7 +34,7 @@ mod spec {
 
     /// §3.1 — the type table. All other values are reserved, 10 to 13
     /// included: they belonged to the plaintext mode, which is gone.
-    pub const TYPES: &[u8] = &[1, 2, 3, 4, 5, 6, 7];
+    pub const TYPES: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     /// §3.2 — bits 0x01, 0x02, 0x04 and 0x08 are defined; 0x10–0x80 reserved.
     pub const KNOWN_FLAGS: u8 = 0x01 | 0x02 | 0x04 | 0x08;

@@ -84,6 +84,8 @@ fn frame_type_ids() {
         (FrameType::Ack, 5),
         (FrameType::ResumeInit, 6),
         (FrameType::ResumeResponse, 7),
+        (FrameType::PathChallenge, 8),
+        (FrameType::PathResponse, 9),
     ] {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(frame_type, 0).encode(&mut buf).expect("encode");
@@ -97,7 +99,7 @@ fn frame_type_ids() {
     // Every id the specification does not define must be rejected. Checking
     // the whole 4-bit space rather than a sample means a new frame type cannot
     // be added without this test — and therefore the specification — noticing.
-    const DEFINED: &[u8] = &[1, 2, 3, 4, 5, 6, 7];
+    const DEFINED: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
     for id in 0..16u8 {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(FrameType::Data, 0).encode(&mut buf).expect("encode");
@@ -329,7 +331,7 @@ fn data_frame_overhead() {
 /// about an old frame.
 #[test]
 fn the_retired_plaintext_type_ids_are_refused() {
-    for id in 8u8..16 {
+    for id in 10u8..16 {
         let mut frame = [0u8; HEADER_LEN];
         frame[0] = (VERSION << 4) | id;
         assert!(

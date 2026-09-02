@@ -519,23 +519,41 @@ is not bounded by it. The run-to-run spread on the middle two rows is wide;
 only the 1 Mbit/s row is far enough outside it to lean on, and it holds across
 runs at 2.4-4.7%.
 
-### A rebinding NAT ends the session
+### A rebinding NAT no longer ends the session
 
 | | after the rebind | expected |
 |---|---|---|
-| session survives a new source port | no | no |
+| session survives a new source port | yes | yes |
 
-A session is keyed on the peer's address *and* its session identifier, so a
-peer that reappears on a new port is a stranger. This is a consequence of the
-keying choice rather than an oversight — keying on the pair is what stops one
-client's chosen identifier colliding with another's (D14) — but it does mean a
-NAT whose mapping expires ends the session, and the peers must handshake again.
+The relay forwards from a second source port part-way through, which is what a
+NAT does when its mapping is re-created, **and stops carrying the old mapping
+at the same moment**, which is what a NAT also does. Both halves matter: an
+earlier version of this measurement kept the old return path alive, so the
+session was still being answered on the path it was supposed to have left, and
+the row would have read "yes" whether or not anything migrated.
 
-The relay here forwards from a second source port part-way through, which is
-what a NAT does when its mapping is re-created. The exchange before the rebind
-is the control: it must succeed, or the test proves nothing. An earlier version
-rebound after the third datagram, by which point the test had already finished —
-so it reported the session surviving something that never happened.
+Two controls are printed with the row: the exchange before the rebind must
+work, and the relay must actually have switched ports. Without either, the row
+reports on nothing — an earlier version rebound after the third datagram, by
+which point the test had already finished, and reported the session surviving
+something that never happened.
+
+**This row used to read "no", and the reason it did was a keying decision, not
+an oversight.** Sessions are keyed on the peer's address *and* its session
+identifier, because the identifier alone is chosen by the client and can
+collide (D14). What changed is that the identifier is now also indexed on its
+own, and consulted only when a frame arrives from an address with no session
+on it. A collision there costs one extra AEAD verification; it cannot cause a
+wrong delivery, because the tag decides.
+
+The move is not free and is not instant. A peer heard from at a new address is
+sent a challenge and nothing else — no acknowledgement, no data — until it
+answers, so following a peer costs one extra round trip and the frame that
+reveals the move is not the frame that completes it. That delay is the
+mechanism, not a shortcoming of it: an authenticated frame proves who sealed
+it, never where they are, and a session that moved on the strength of the tag
+alone could be pointed at a third party who never asked for it
+([D47](DECISIONS.md#d47--a-session-follows-its-peer-but-only-after-being-shown)).
 
 ## 11. Jitter, an asymmetric path, and a crowded endpoint
 

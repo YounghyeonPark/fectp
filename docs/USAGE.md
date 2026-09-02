@@ -21,14 +21,16 @@ built-in integer transforms (see [Typed payloads](#typed-payloads)) still apply.
 
 ## Choosing a mode
 
-A connection runs in one of three modes. Everything after the constructor —
-`send`, `recv`, `send_reliable`, codecs, `poll` — is identical in all three, so
-this is a one-line decision, not a different way of working.
+A connection runs in one of two modes. Both encrypt — that is not something a
+caller can decline — and what they differ in is who gets authenticated.
+Everything after the constructor — `send`, `recv`, `send_reliable`, codecs,
+`poll` — is identical in both, so this is a one-line decision, not a different
+way of working.
 
-| | pre-shared | encrypted | handshake | use it for |
+| | pre-shared | authenticates | handshake | use it for |
 |---|---|---|---|---|
-| Public key | server's public key | yes | 4 DH | the internet, several organisations |
-| Pre-shared key | one secret | yes | **1 DH** | one closed system, a lab network |
+| Public key | server's public key | each peer separately | 4 DH | the internet, several organisations |
+| Pre-shared key | one secret | membership of the group | **1 DH** | one closed system, a lab network |
 
 ```rust
 // Public key
@@ -575,6 +577,9 @@ loop {
         Event::Message { peer, data } => {
             server.send(peer, &data, PayloadType::Opaque)?;   // echo
         }
+        Event::PeerMoved { peer, from, to } => {
+            println!("{peer:?} moved from {from} to {to}");    // same session
+        }
         Event::Idle => {}
         _ => {}                                     // `Event` is non-exhaustive
     }
@@ -601,6 +606,42 @@ resolving rather than addressing whoever took its place.
 **Sessions are bound to the peer's address.** A peer that changes address (a
 phone moving between networks) loses its session and must reconnect — or
 resume, which is cheap.
+
+## When a peer changes address
+
+A NAT whose mapping expires re-creates it on a new port. A phone moving from
+Wi-Fi to a cellular network changes address outright. The peer is the same peer
+and holds the same keys, and an `Endpoint` follows it — the `PeerId` does not
+change, because the session does not change.
+
+```rust
+match server.poll(Some(Duration::from_millis(100)))? {
+    Event::PeerMoved { peer, from, to } => {
+        println!("{peer:?} moved from {from} to {to}");
+    }
+    _ => {}
+}
+```
+
+**Nothing needs handling for this to work.** The event is there for logging,
+and for an application that keys anything on a peer's address — a rate limit, a
+log line, an access rule. If yours does, this is where to update it, and it is
+worth asking whether the address was ever the right key: it can change now.
+
+Two things are worth knowing about the timing.
+
+**A move costs a round trip.** A peer heard from at a new address is sent a
+challenge and nothing else — not even the acknowledgement its frame provoked —
+until it answers. So the frame that reveals a move is never the frame that
+completes it, and a reliable message sent across the change will be
+retransmitted once. That delay is deliberate: a frame that authenticates proves
+who sealed it, never where they are, and a session that moved without asking
+could be pointed at a third party who never wanted it.
+
+**A `Connection` does not follow a server that moves.** Its socket is connected
+to one address, so a frame from anywhere else never reaches it. The case that
+happens in practice is a client changing address, and that is the one an
+`Endpoint` handles.
 
 ## Length masking
 

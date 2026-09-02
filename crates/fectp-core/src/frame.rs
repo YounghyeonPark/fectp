@@ -75,6 +75,10 @@ pub enum FrameType {
     ResumeInit,
     /// Resumption message 2.
     ResumeResponse,
+    /// Asks a peer to prove it can receive at the address this arrived from.
+    PathChallenge,
+    /// Echoes a [`FrameType::PathChallenge`] token back.
+    PathResponse,
 }
 
 impl FrameType {
@@ -87,6 +91,8 @@ impl FrameType {
             FrameType::Ack => 5,
             FrameType::ResumeInit => 6,
             FrameType::ResumeResponse => 7,
+            FrameType::PathChallenge => 8,
+            FrameType::PathResponse => 9,
         }
     }
 
@@ -99,6 +105,8 @@ impl FrameType {
             5 => Ok(FrameType::Ack),
             6 => Ok(FrameType::ResumeInit),
             7 => Ok(FrameType::ResumeResponse),
+            8 => Ok(FrameType::PathChallenge),
+            9 => Ok(FrameType::PathResponse),
             _ => Err(Error::BadHeader),
         }
     }

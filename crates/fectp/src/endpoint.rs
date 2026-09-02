@@ -54,7 +54,9 @@ use std::time::{Duration, Instant};
 
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
 use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket, Session};
+    preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
+    Session, PATH_TOKEN_LEN,
+};
 use fectp_core::PublicKey;
 use rand_core::{OsRng, RngCore};
 
@@ -111,6 +113,18 @@ pub enum Event {
         peer: PeerId,
         /// Whether the peer acknowledged all of it.
         delivered: bool,
+    },
+    /// A peer proved it had moved, and the session followed it.
+    ///
+    /// Raised only after the new address answered a challenge, so it is a
+    /// report of something established rather than of something claimed.
+    PeerMoved {
+        /// The peer, whose handle is unchanged — it is the same session.
+        peer: PeerId,
+        /// Where it used to be.
+        from: SocketAddr,
+        /// Where it is now.
+        to: SocketAddr,
     },
     /// Nothing arrived before the timeout elapsed.
     Idle,
@@ -171,6 +185,29 @@ const HANDSHAKE_REPLIES: u8 = 8;
 /// [`Endpoint::set_max_handshakes_per_second`] overrides it.
 pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 
+/// Frames per second from unknown addresses that will be tried against a
+/// session before the rest are dropped unexamined.
+///
+/// Routing on the address costs a hash lookup. Routing on the identifier alone
+/// costs an AEAD verification, and anyone who can address the socket can ask
+/// for one by guessing a 32-bit value. This is the ceiling on that: comfortably
+/// above any rate a real migration produces — a peer that has moved sends a
+/// handful of frames, not hundreds — and far below what would cost anything.
+pub const MAX_MIGRATIONS_PER_SECOND: u32 = 256;
+
+/// Challenges sent to one unproved address before the attempt is abandoned.
+///
+/// A genuine peer answers the first one it receives; the repeats exist for the
+/// case where a challenge or its answer is lost. Bounding them is what stops a
+/// session being used to send repeatedly to an address that never asked.
+const PATH_PROBES: u8 = 3;
+
+/// How long an unanswered probe is kept before the address is forgotten.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Shortest gap between challenges to the same unproved address.
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
 /// A handshake this endpoint started, waiting for its reply.
 enum Handshake {
     Full(Box<Initiator>),
@@ -212,6 +249,14 @@ pub struct Endpoint {
     /// identifier alone is chosen by the client and could collide between two
     /// of them; the pair cannot.
     routes: HashMap<(SocketAddr, u32), PeerId>,
+    /// The same sessions filed by identifier alone.
+    ///
+    /// Only consulted when a frame arrives from an address with no session on
+    /// it, which is the one case where the identifier has to stand on its own.
+    /// It can collide — the client chooses it — so this maps to every session
+    /// wearing it and authentication decides which, if any, is the right one.
+    /// A collision costs one extra AEAD verification, not a wrong delivery.
+    by_session: HashMap<u32, Vec<PeerId>>,
     /// Handshakes started here and still awaiting a reply.
     outbound: HashMap<PeerId, Outbound>,
     /// Completions produced outside `poll`, delivered by the next one.
@@ -223,6 +268,10 @@ pub struct Endpoint {
     handshake_budget: f32,
     handshake_refilled: Instant,
     handshake_rate: u32,
+    /// The same, for frames arriving from an address with no session on it.
+    migration_budget: f32,
+    migration_refilled: Instant,
+    migration_rate: u32,
     max_peers: usize,
     /// Sent in the payload of every handshake response.
     handshake_reply: Vec<u8>,
@@ -233,6 +282,18 @@ pub struct Endpoint {
     ack: Vec<u8>,
     scratch: Vec<u8>,
     epoch: Instant,
+}
+
+/// An address under test, and what has been spent testing it.
+struct Probe {
+    addr: SocketAddr,
+    token: [u8; PATH_TOKEN_LEN],
+    /// Challenges sent so far.
+    sent: u8,
+    /// When the last one went out.
+    last: Instant,
+    /// When the address was first heard from, which bounds the whole attempt.
+    started: Instant,
 }
 
 struct PeerEntry {
@@ -255,6 +316,15 @@ struct PeerEntry {
     /// frame at most a handful of times inside the handshake timeout, so a
     /// small allowance covers every honest case.
     handshake_reply: Option<(Vec<u8>, u8)>,
+    /// An address this peer has been heard from but has not proved it can
+    /// receive at.
+    ///
+    /// Authentication says the frame came from someone holding the key. It
+    /// does not say where that someone is: an on-path attacker can forward a
+    /// genuine frame with a source address of its choosing, and a session that
+    /// followed it would be pointing its data stream at whoever was named.
+    /// Nothing is sent here but the challenge until the answer comes back.
+    probe: Option<Probe>,
     /// Whether anything has ever arrived from this peer since.
     ///
     /// This is what separates a flood from a quiet peer. Completing a
@@ -295,10 +365,14 @@ impl Endpoint {
             tickets: TicketStore::default(),
             peers: HashMap::new(),
             routes: HashMap::new(),
+            by_session: HashMap::new(),
             events: VecDeque::new(),
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
             handshake_rate: MAX_HANDSHAKES_PER_SECOND,
+            migration_budget: MAX_MIGRATIONS_PER_SECOND as f32,
+            migration_refilled: Instant::now(),
+            migration_rate: MAX_MIGRATIONS_PER_SECOND,
             max_peers: MAX_PEERS,
             handshake_reply: Vec::new(),
             outbound: HashMap::new(),
@@ -438,6 +512,7 @@ impl Endpoint {
         match self.peers.remove(&peer) {
             Some(entry) => {
                 self.routes.remove(&(entry.addr, entry.session_id));
+                self.unfile_session(entry.session_id, peer);
                 true
             }
             None => false,
@@ -567,11 +642,73 @@ impl Endpoint {
     }
 
     /// Delivers a data or acknowledgement frame to its session.
+    ///
+    /// Two lookups, in order. The address and identifier together name a
+    /// session outright. Failing that, the identifier alone gives a shortlist
+    /// and the AEAD tag decides — the peer may have moved, or this may be
+    /// someone who guessed an identifier, and only authentication tells those
+    /// apart.
     fn route(&mut self, n: usize, from: SocketAddr, session_id: u32) -> Result<Option<Event>> {
-        let Some(&peer_id) = self.routes.get(&(from, session_id)) else {
-            // No such session. An old frame, or someone else's traffic.
+        if let Some(&peer_id) = self.routes.get(&(from, session_id)) {
+            return self.deliver(peer_id, n, from, true);
+        }
+
+        // The address is new to us. This is the one path where the identifier
+        // has to stand on its own, and it is reachable by anyone who can
+        // address the socket, so it is paid for out of a budget.
+        if self.by_session.contains_key(&session_id) && !self.may_try_unknown_address() {
             return Ok(None);
-        };
+        }
+
+        // Walk the sessions wearing this identifier by index rather than
+        // collecting them, so the path does not allocate either.
+        let mut at = 0;
+        loop {
+            let Some(peer_id) = self
+                .by_session
+                .get(&session_id)
+                .and_then(|sharing| sharing.get(at))
+                .copied()
+            else {
+                return Ok(None);
+            };
+            at += 1;
+
+            // A frame that does not open leaves the session untouched — the
+            // replay window is only advanced once the tag verifies — so trying
+            // a candidate that turns out to be the wrong one costs nothing but
+            // the verification.
+            match self.deliver(peer_id, n, from, false)? {
+                Some(event) => return Ok(Some(event)),
+                None if self.claimed(peer_id, from) => return Ok(None),
+                None => {}
+            }
+        }
+    }
+
+    /// Whether this session has just been heard from at `from`.
+    ///
+    /// Ends the search once a candidate has accepted the frame, since
+    /// accepting it without producing an event is an ordinary outcome.
+    fn claimed(&self, peer_id: PeerId, from: SocketAddr) -> bool {
+        self.peers.get(&peer_id).is_some_and(|entry| {
+            entry.addr == from || entry.probe.as_ref().is_some_and(|p| p.addr == from)
+        })
+    }
+
+    /// Feeds one frame to one session.
+    ///
+    /// `established` says whether `from` is the address this session is filed
+    /// under. When it is not, nothing goes back to `from` but a challenge: the
+    /// frame proves someone holding the key sent it, and says nothing at all
+    /// about who is at the address it came from.
+    fn deliver(
+        &mut self,
+        peer_id: PeerId,
+        n: usize,
+        from: SocketAddr,
+        established: bool,
+    ) -> Result<Option<Event>> {
         let Some(entry) = self.peers.get_mut(&peer_id) else {
             return Ok(None);
         };
@@ -582,19 +719,39 @@ impl Endpoint {
             .peer
             .ingest(&mut self.rx[..n], now, &mut self.ack, &mut ack_len)?;
 
-        // Getting here means the frame authenticated, which is the first thing
-        // a peer does that an attacker completing handshakes never does. It is
-        // what keeps this session off the eviction list.
+        if matches!(ingested, Ingested::Rejected) {
+            // Anyone can address a UDP socket. A frame that did not open says
+            // nothing about this session and must not be credited to it.
+            return Ok(None);
+        }
+
+        // The frame authenticated, which is the first thing a peer does that
+        // an attacker completing handshakes never does. It is what keeps this
+        // session off the eviction list.
         entry.spoke = true;
         // It answered, so it has the handshake response and will not ask again.
         entry.handshake_reply = None;
 
-        if ack_len > 0 {
-            self.socket.send_to(&self.ack[..ack_len], from)?;
+        if established {
+            if ack_len > 0 {
+                self.socket.send_to(&self.ack[..ack_len], from)?;
+            }
+        } else if let Ingested::PathValidated(token) = ingested {
+            return Ok(self.settle_probe(peer_id, from, token));
+        } else {
+            // Heard from an address that has not proved it can receive. The
+            // payload is genuine, so it is delivered; the acknowledgement is
+            // withheld, because until the address answers, sending anything
+            // there is sending it somewhere nobody asked for. The peer repeats
+            // the message, and the repeat is acknowledged once the path holds.
+            self.start_probe(peer_id, from)?;
         }
 
         match ingested {
-            Ingested::Nothing => Ok(None),
+            Ingested::Rejected | Ingested::Nothing => Ok(None),
+            // An answer from the address already on file settles nothing that
+            // was in question.
+            Ingested::PathValidated(_) => Ok(None),
             Ingested::Data { len, compressed } => {
                 let body = &self.rx[HEADER_LEN..HEADER_LEN + len];
                 let mut staging = vec![0u8; decoded_capacity(body, compressed)];
@@ -614,6 +771,93 @@ impl Endpoint {
                 data,
             })),
         }
+    }
+
+    /// Asks an address to prove it can receive, if it is worth asking again.
+    fn start_probe(&mut self, peer_id: PeerId, addr: SocketAddr) -> Result<()> {
+        let Some(entry) = self.peers.get_mut(&peer_id) else {
+            return Ok(());
+        };
+        let now = Instant::now();
+
+        // A different address supersedes whatever was under test: the newest
+        // place the peer was heard from is the one worth proving.
+        let fresh = match &entry.probe {
+            Some(probe) if probe.addr == addr => {
+                if now.duration_since(probe.started) > PROBE_TIMEOUT {
+                    // The attempt has aged out. Start another rather than
+                    // giving up on the address for good: three challenges lost
+                    // in a row is a bad minute on a path, not proof that
+                    // nobody is there, and a peer that really did move would
+                    // otherwise be stranded for the life of the session.
+                    true
+                } else if probe.sent >= PATH_PROBES
+                    || now.duration_since(probe.last) < PROBE_INTERVAL
+                {
+                    return Ok(());
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        };
+
+        let mut token = [0u8; PATH_TOKEN_LEN];
+        if fresh {
+            OsRng.fill_bytes(&mut token);
+            entry.probe = Some(Probe {
+                addr,
+                token,
+                sent: 0,
+                last: now,
+                started: now,
+            });
+        } else if let Some(probe) = &entry.probe {
+            token = probe.token;
+        }
+
+        let len = entry.peer.challenge(&token, &mut self.ack)?;
+        if let Some(probe) = &mut entry.probe {
+            probe.sent += 1;
+            probe.last = now;
+        }
+        self.socket.send_to(&self.ack[..len], addr)?;
+        Ok(())
+    }
+
+    /// Moves a session to an address that has answered its challenge.
+    fn settle_probe(
+        &mut self,
+        peer_id: PeerId,
+        from: SocketAddr,
+        token: [u8; PATH_TOKEN_LEN],
+    ) -> Option<Event> {
+        let entry = self.peers.get_mut(&peer_id)?;
+        let probe = entry.probe.as_ref()?;
+        // The answer has to come from the address that was asked, carrying the
+        // token it was asked with. Either alone would be a way in: a token
+        // replayed from somewhere else, or a fresh address answering a
+        // question that was put to another one.
+        if probe.addr != from || probe.token != token {
+            return None;
+        }
+
+        let previous = entry.addr;
+        entry.addr = from;
+        entry.probe = None;
+        // The round-trip time and window were earned on the old path and do
+        // not describe this one.
+        entry.peer.forget_path();
+        let session_id = entry.session_id;
+
+        self.routes.remove(&(previous, session_id));
+        self.routes.insert((from, session_id), peer_id);
+
+        Some(Event::PeerMoved {
+            peer: peer_id,
+            from: previous,
+            to: from,
+        })
     }
 
     /// Matches a handshake reply to the connection this endpoint started.
@@ -777,6 +1021,18 @@ impl Endpoint {
         self.max_peers = limit.max(1);
     }
 
+    /// Sets how many frames a second from unknown addresses may be tried
+    /// against a session.
+    ///
+    /// The default is [`MAX_MIGRATIONS_PER_SECOND`]. Raise it for an endpoint
+    /// serving many peers on paths that move often; lower it, or set it to
+    /// zero, for one whose peers never move — at zero no session will ever
+    /// follow a peer that changes address.
+    pub fn set_max_migrations_per_second(&mut self, rate: u32) {
+        self.migration_rate = rate;
+        self.migration_budget = self.migration_budget.min(rate as f32);
+    }
+
     /// Files the response just sent against the session it established.
     fn remember_reply(&mut self, event: &Event, reply: Vec<u8>) {
         let Event::Connected { peer, .. } = event else {
@@ -886,6 +1142,25 @@ impl Endpoint {
     ///
     /// A token bucket rather than a counter per interval, so a burst is
     /// absorbed and a sustained flood is not.
+    /// Whether a frame from an unknown address may be tried against a session.
+    ///
+    /// Spends from a budget rather than refusing outright, so a genuine
+    /// migration — a few frames — always gets through, and a flood of guessed
+    /// identifiers cannot buy unbounded verification.
+    fn may_try_unknown_address(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.migration_refilled).as_secs_f32();
+        self.migration_refilled = now;
+        self.migration_budget = (self.migration_budget + elapsed * self.migration_rate as f32)
+            .min(self.migration_rate as f32);
+
+        if self.migration_budget < 1.0 {
+            return false;
+        }
+        self.migration_budget -= 1.0;
+        true
+    }
+
     fn may_answer_handshake(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.handshake_refilled).as_secs_f32();
@@ -919,6 +1194,18 @@ impl Endpoint {
         if let Some(victim) = victim {
             if let Some(entry) = self.peers.remove(&victim) {
                 self.routes.remove(&(entry.addr, entry.session_id));
+                self.unfile_session(entry.session_id, victim);
+            }
+        }
+    }
+
+    /// Drops one session from the identifier index, and the entry with it if
+    /// it was the last one wearing that identifier.
+    fn unfile_session(&mut self, session_id: u32, peer_id: PeerId) {
+        if let Some(sharing) = self.by_session.get_mut(&session_id) {
+            sharing.retain(|&id| id != peer_id);
+            if sharing.is_empty() {
+                self.by_session.remove(&session_id);
             }
         }
     }
@@ -937,7 +1224,9 @@ impl Endpoint {
         // entry rather than shadowing it.
         if let Some(previous) = self.routes.insert((addr, session_id), peer_id) {
             self.peers.remove(&previous);
+            self.unfile_session(session_id, previous);
         }
+        self.by_session.entry(session_id).or_default().push(peer_id);
         self.peers.insert(
             peer_id,
             PeerEntry {
@@ -946,6 +1235,7 @@ impl Endpoint {
                 session_id,
                 filed: Instant::now(),
                 handshake_reply: None,
+                probe: None,
                 spoke: false,
                 datagram_limit,
             },

@@ -41,9 +41,17 @@ The ways they failed, each from this repository:
 | **Racing the harness** | A peer waiting in `recv` while the loop that answers it has stopped times out and looks evicted. Drain before joining. |
 | **Budgeting for an outcome instead of waiting for it** | `flush(3s)` assumed how long a message takes to be abandoned — five retransmissions with exponential backoff, a quarter of a second on an idle loopback and several times that once the round-trip samples grow. Wait for the terminal state; a timeout is "not yet", not a result. |
 | **A wall-clock read of a busy system** | Under load the single poll loop is late, and a peer that is merely waiting looks like a peer that was evicted. Judge once the load has stopped, where the two differ absolutely rather than by degree. |
+| **Forging a frame from the wrong one** | A test forged an unauthenticated frame by flipping a byte in a captured datagram. The only datagram a quiet peer had ever sent was its handshake, and a handshake is turned away by the dispatcher before any session sees it — so the test never reached the code it was aimed at, and passed against the bug and the fix alike. Build the frame type you mean to test; take only the identifier from the capture. |
+| **Assuming a relay is lossless** | A test with a relay between two peers is testing over a network, and networks drop datagrams — loopback included. A single unreliable `send` at the end of such a test asserts your property *and* that nothing was lost, and the second one fails on its own schedule: once in about thirty runs, here. Retry against a deadline where the outcome must be success; keep the single attempt where the outcome being measured is a failure. |
 
 If the test still passes with the fix removed, you have not found the bug's
 cause, or the test is not aimed at it. Both are worth knowing before you commit.
+
+**Run a new networked test thirty times, not once.** A 3% failure rate is
+invisible in a single green run and will find you later, in CI, attached to
+something unrelated. And if adding a `println!` makes a failure stop
+reproducing, that is the shape of a timing problem — not evidence that it is
+fixed.
 
 **Delete the regression file the induced failure wrote.** A `proptest` failure
 saves its seed under `proptest-regressions/`, and a seed from a break you caused

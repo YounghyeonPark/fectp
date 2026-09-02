@@ -146,9 +146,17 @@ match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::Message { peer, data } => {}
     Event::Sent { peer, delivered } => {}      // a split message finished
     Event::ConnectFailed { peer } => {}
+    Event::PeerMoved { peer, from, to } => {}  // the peer changed address
     Event::Idle => {}                          // nothing arrived
 }
 ```
+
+`PeerMoved` reports a move that has already happened and been proved: the
+handle is unchanged, because it is the same session. A peer heard from at a new
+address is challenged first and followed only if it answers, so nothing is sent
+to the new address until then — a frame that authenticates says who sealed it,
+not where they are. Nothing needs handling for this to work; the event is there
+for logging and for applications that key anything on a peer's address.
 
 Retransmissions, acknowledgements and queued large messages all advance here.
 An endpoint that is not polled does nothing.
@@ -277,6 +285,7 @@ alone otherwise.
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
 | `TICKET_LIFETIME` | 1 hour | How long a resumption ticket stays redeemable. `set_ticket_lifetime` overrides it. |
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |
+| `MAX_MIGRATIONS_PER_SECOND` | 256 | Frames a second from unknown addresses that are tried against a session, which is what following a moved peer costs. `set_max_migrations_per_second` overrides it; zero refuses to follow peers at all. |
 
 ---
 

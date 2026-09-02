@@ -359,6 +359,23 @@ impl RetransmitQueue {
         }
     }
 
+    /// Forgets what was learned about the path, keeping what is in flight.
+    ///
+    /// A session that moves to a new address is on a different path, and the
+    /// round-trip time and capacity it measured belong to the old one. Keeping
+    /// them is not merely inaccurate: a window earned on a fast path, applied
+    /// to a slow one, is a burst the new path never agreed to carry.
+    ///
+    /// Messages already in flight stay in flight. They still need delivering,
+    /// and they will be retimed against the initial estimate — which is
+    /// conservative, so the first thing that happens on a new path is a
+    /// measurement rather than a guess.
+    pub fn forget_path(&mut self) {
+        self.rto = Rto::new();
+        self.cwnd = INITIAL_CWND as u32 * CWND_SCALE;
+        self.ssthresh = MAX_IN_FLIGHT as u32 * CWND_SCALE;
+    }
+
     /// How many messages may be outstanding right now.
     ///
     /// The smaller of the congestion window and the slot count. The slots bound

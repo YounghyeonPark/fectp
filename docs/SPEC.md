@@ -166,6 +166,8 @@ value.
 | 5 | `Ack` — acknowledges received reliable messages (§5.7) |
 | 6 | `ResumeInit` — resumption message 1 (§4.7) |
 | 7 | `ResumeResponse` — resumption message 2 (§4.8) |
+| 8 | `PathChallenge` — asks an address to prove it can receive (§5.8) |
+| 9 | `PathResponse` — echoes a challenge token back (§5.8) |
 
 All other values are reserved. A receiver MUST reject them.
 
@@ -195,8 +197,15 @@ unrecognised one would decode the payload incorrectly.
 initiator chooses it, SHOULD choose it at random, and both peers use the same
 value in both directions for the life of the session.
 
-A receiver MUST reject a `Data`, `Close`, or `Ack` frame whose `session_id`
-does not match the session's.
+A receiver MUST reject a `Data`, `Close`, `Ack`, `PathChallenge`, or
+`PathResponse` frame whose `session_id` does not match the session's.
+
+`session_id` demultiplexes; it does not authenticate. Because the initiator
+chooses it, two initiators can choose the same value, so an implementation that
+finds a session by identifier alone MAY find more than one and MUST let the
+AEAD tag decide which — an identifier that matches and a tag that does not is
+someone else's traffic, or nobody's. This matters for §5.8, where a frame
+arrives from an address that names no session.
 
 A server serving many peers on one socket SHOULD key its session table on
 the **pair** `(source address, session_id)`. The identifier alone is chosen
@@ -724,6 +733,86 @@ A receiver SHOULD acknowledge promptly. Delaying acknowledgements to batch them
 saves bandwidth at the cost of retransmission latency; version 1 does not
 specify a delay algorithm.
 
+### 5.8 Address changes
+
+A peer's address can change without its session ending: a NAT re-creates an
+expired mapping on a new port, a host moves between networks. A receiver MAY
+support following such a change. One that does MUST follow this section; one
+that does not MUST treat frames from an unknown address as it treats any other
+traffic it has no session for.
+
+#### 5.8.1 What authentication does and does not establish
+
+A frame that opens proves that whoever sent it holds the session's keys. **It
+does not establish where that peer is.** An attacker on the path can forward a
+genuine frame with a source address of its choosing, and a receiver that moved
+the session on the strength of the tag alone would then be sending the session
+to an address of the attacker's choice — a third party who never asked for it,
+at a volume the attacker does not have to pay for.
+
+A receiver therefore MUST NOT change the address it sends a session to on the
+basis of an authenticated frame alone.
+
+#### 5.8.2 The exchange
+
+```
+-> PathChallenge : header(14) || seal(token[8])
+<- PathResponse  : header(14) || seal(token[8])
+```
+
+Both are sealed like any other frame (§5) and consume sequence numbers from the
+same space, so the replay window of §5.1 covers them. Neither is padded: they
+are the same size in each direction, which is what keeps the exchange from
+amplifying. Neither carries `FLAG_RELIABLE`, `FLAG_FRAGMENT`, or
+`FLAG_COMPRESSED`; a receiver MUST reject one that does.
+
+`token` MUST be 8 bytes and MUST be unpredictable to anyone who has not seen
+the challenge. A responder MUST echo the token unchanged, and MUST send its
+`PathResponse` to the address the challenge arrived from — answering anywhere
+else would defeat the point of asking.
+
+#### 5.8.3 What a receiver does
+
+On an authenticated frame for session S arriving from an address S is not
+filed under:
+
+1. The frame is processed normally. It is genuine, and refusing genuine data
+   during a migration would make the mechanism useless.
+2. The receiver MUST NOT send to the new address anything except a
+   `PathChallenge`. In particular any acknowledgement the frame provoked is
+   withheld until the address is validated; the peer repeats the message, and
+   the repeat is acknowledged once it is.
+3. The receiver SHOULD send a `PathChallenge` to the new address, with a fresh
+   token, and MUST bound how many it will send: this is the one thing an
+   unvalidated address can cause to be sent to it.
+4. The session keeps using its existing address until the challenge is
+   answered.
+
+On a `PathResponse` arriving from the address that was challenged, carrying the
+token that was sent to it, the receiver MAY move the session to that address.
+Both conditions are required. A response from a different address, or with a
+different token, MUST NOT move anything.
+
+#### 5.8.4 After a move
+
+A retransmission timer and a congestion window are not specified here — how
+fast to send is an implementation's own decision — but whatever an
+implementation has learned about timing and capacity, it learned on the path
+that produced it. A receiver that moves a session MUST discard those estimates
+and begin again from whatever it uses for a path it knows nothing about. Applying a window earned on one path to another is a burst the
+new path never agreed to carry.
+
+Messages in flight stay in flight. They are retimed against the initial
+estimate, which is conservative, so the first thing to happen on a new path is
+a measurement rather than a guess.
+
+#### 5.8.5 What this does not defend against
+
+An attacker already on the path can drop, delay, or forward traffic whatever
+this section says; validation does not change that, and is not meant to. What
+it removes is the ability to point the session at a **third party** — an
+address the attacker does not control and cannot answer for.
+
 ## 6. Payload coding
 
 When `COMPRESSED` is set, a 4-byte codec header precedes the body at the
@@ -869,6 +958,8 @@ message after it.
 
 A conforming implementation MUST:
 
+1. Never send a session to an address that has not answered a challenge for
+   it (§5.8). An authenticated frame says who sealed it, not where they are.
 1. Reject unknown protocol versions, frame types, and reserved header flag
    bits.
 2. Use the complete frame header as AEAD associated data on data frames.
@@ -909,6 +1000,8 @@ A conforming implementation SHOULD:
 | BLAKE2s block length | 64 |
 | `CAPS_LEN` | 8 |
 | Data-frame overhead (header + tag) | 30 |
+| `PATH_TOKEN_LEN` | 8 |
+| `PathChallenge` / `PathResponse` frame | 38 |
 | `CODEC_HEADER_LEN` | 4 |
 | `PAD_BLOCK` | 64 |
 | `REPLAY_WINDOW` | 64 (minimum) |

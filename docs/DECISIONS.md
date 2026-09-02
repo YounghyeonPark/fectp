@@ -417,6 +417,12 @@ resumes instead, which is cheap.
 `PeerId` handles are never reused. A handle for a departed peer stops
 resolving rather than silently addressing whoever took its place.
 
+> **Amended by [D47](#d47--a-session-follows-its-peer-but-only-after-being-shown).**
+> The collision argument holds and the pair is still the primary key. What was
+> wrong was the sentence that followed from it — that a peer changing address
+> must lose its session. The identifier is now also indexed alone and consulted
+> only when an address is unknown, where the AEAD tag settles any collision.
+
 `Listener`, the single-peer type this replaced, was subsequently removed: it
 duplicated `Endpoint`, worked in only one mode, and carried a trap — while
 servicing a connection it was not in `accept()`, so a second connection, a
@@ -557,7 +563,7 @@ These are unimplemented, not overlooked.
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
-| **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
+| **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
@@ -769,9 +775,9 @@ nothing that matters is discarded.
 
 | | flash |
 |---|---|
-| full protocol | 22,572 bytes |
+| full protocol | 22,614 bytes |
 | the same image with the protocol removed | 36 bytes |
-| **FECTP** | **22,536 bytes (22.0 KiB)** |
+| **FECTP** | **22,578 bytes (22.0 KiB)** |
 
 The estimate was five times too pessimistic. RAM is smaller still: 294 bytes of
 session state, or 1,334 with the reliable-delivery queue, plus whatever buffers
@@ -1854,3 +1860,164 @@ lessons, both already in FIXING-A-BUG.md and both worth the reminder: run
 `is_encrypted()` went with it. It could only return `true`, so a caller
 branching on it writes dead code and a test asserting it proves nothing —
 exactly the shape this project keeps having to delete.
+
+## D47 — A session follows its peer, but only after being shown
+
+**Question asked**: what happens when one side's address changes mid-session,
+and can a handover be supported?
+
+**What happened before**: nothing good. Sessions were keyed on
+`(address, session_id)`, so a peer whose NAT mapping was re-created on a new
+port was a stranger; its frames matched no route and were dropped in silence.
+The measurement in BENCHMARKS.md §10 said so plainly, and D14 recorded it as
+the price of the keying choice.
+
+**The keying argument was right; the conclusion drawn from it was not.** The
+identifier alone can collide — the client chooses it, 32 bits, at random — so
+it cannot be the primary key. But it does not have to be. It is now a
+*secondary* index, consulted only when a frame arrives from an address no
+session is filed under, and what resolves a collision there is the AEAD tag. An
+identifier that matches with a tag that does not is someone else's traffic. The
+cost of a collision is one extra verification, and it cannot produce a wrong
+delivery.
+
+### Why authentication is not enough on its own
+
+This is the part worth being careful about, because the obvious implementation
+is wrong in a way that is easy to miss.
+
+A frame that opens proves that whoever sent it holds the session keys. **It
+does not prove where they are.** An attacker on the path can forward a genuine
+frame with a source address of its choosing — a third party's. Nothing about
+the frame is forged; it is simply delivered from somewhere else. A receiver
+that moved the session on the strength of the tag would then send the whole
+session to an address that never asked for it, at a volume the attacker never
+has to pay for. That is a reflection, and the amplification factor is however
+much traffic the session carries.
+
+The replay window does not cover this. It stops the *same* frame being used
+twice, so an off-path attacker replaying a capture gets nowhere. It does
+nothing about a fresh frame the attacker suppressed and re-sent, which is
+exactly what being on-path allows.
+
+**Decision**: two new frame types, 8 and 9, and a challenge before a move.
+
+```
+-> PathChallenge : header(14) || seal(token[8])     38 bytes
+<- PathResponse  : header(14) || seal(token[8])     38 bytes
+```
+
+A peer heard from at an unknown address is sent a challenge carrying eight
+random bytes, **and nothing else** — the acknowledgement its frame provoked is
+withheld too. The session keeps writing to the address it already has. Only a
+response from the address that was challenged, carrying the token it was
+challenged with, moves anything. Either condition alone would be a way in: a
+token replayed from elsewhere, or a fresh address answering a question put to
+another one.
+
+The two frames are the same size in each direction, are never padded, and carry
+no flags — a challenge is a fixed-length random token, so there is no length
+for padding to hide, and symmetry is what keeps the exchange from amplifying.
+`Session::open` refuses one dressed in a message identifier, a fragment
+descriptor, a codec header, or padding.
+
+**What it costs.** One round trip. The frame that reveals a move is never the
+frame that completes it. Three challenges per three seconds is the ceiling for
+any one address, so the most an unvalidated address can be made to receive is
+114 bytes in that window — and to provoke even that, an attacker must deliver a
+*fresh* authenticated frame, which means being on the path.
+
+**The estimates are thrown away on a move.** The round-trip time and congestion
+window were earned on the old path. Carrying a window earned on a fast path
+onto a slow one is a burst the new path never agreed to carry, so
+`RetransmitQueue::forget_path` resets both. Messages in flight stay in flight
+and are retimed against the initial estimate, which is conservative — the first
+thing that happens on a new path is a measurement, not a guess.
+
+**What this does not defend against.** An attacker already on the path can
+drop, delay, or forward traffic whatever this does, and validation does not
+change that. What it removes is the ability to point the session at a **third
+party** — an address the attacker does not control and cannot answer for.
+
+**Not supported, and why.** A `Connection` does not follow a *server* that
+moves: its socket is connected to one address, so a frame from anywhere else
+never reaches it. The case that happens in practice is a client changing
+address, and that is the one an `Endpoint` handles.
+
+**The lookup is paid for out of a budget.** Routing on the address costs a hash
+lookup; routing on the identifier alone costs an AEAD verification, and anyone
+who can address the socket can ask for one by guessing a 32-bit value. Before
+this change they had to guess the address too. `MAX_MIGRATIONS_PER_SECOND` is
+256 — comfortably above what a real migration produces, since a peer that has
+moved sends a handful of frames rather than hundreds — and
+`set_max_migrations_per_second(0)` declines to follow peers at all, for an
+endpoint whose peers never move. [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work)
+bounds the other thing a stranger can make this endpoint spend; leaving this
+one open while writing that record would not have been consistent.
+
+**A defect found while checking this one.** The first version gave up on an
+address permanently once its three challenges were spent. Three challenges lost
+in a row is a bad minute on a path, not proof that nobody is there, and a peer
+that really had moved would have been stranded for the life of the session. The
+budget now refreshes when the attempt ages out.
+
+## D48 — A frame that did not authenticate was being credited to the session
+
+**Found while**: implementing D47, which needs to know whether a frame
+authenticated in order to decide whether to challenge its source. That question
+could not be asked: `Peer::ingest` mapped an authentication failure to
+`Ingested::Nothing`, the same value it returns for an acknowledgement or a
+duplicate — deliberately, so that a caller would not treat noise on a UDP port
+as an error.
+
+**The bug**: `Endpoint::route` then did this.
+
+```rust
+let ingested = entry.peer.ingest(...)?;
+
+// Getting here means the frame authenticated, which is the first thing
+// a peer does that an attacker completing handshakes never does. It is
+// what keeps this session off the eviction list.
+entry.spoke = true;
+```
+
+The comment is false. Getting there meant a frame had *arrived*, addressed
+correctly. `spoke` is what the eviction order in
+[D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work) uses to tell
+a real peer from what a handshake flood leaves behind, and the whole argument
+for it was that completing a handshake proves nothing while *authenticating a
+frame afterwards* proves something. Any datagram with a well-formed header set
+the flag.
+
+**The consequence**: an attacker completing handshakes could mark every one of
+its sessions as having spoken by following each with a single unauthenticated
+datagram from the same socket — no spoofing, no keys. The eviction order then
+falls through to age, oldest first, so the sessions dropped to make room would
+have been the genuine long-lived ones. The defence was not merely bypassed, it
+was inverted.
+
+**Decision**: `Ingested::Rejected`, distinct from `Ingested::Nothing`, and a
+route that returns on it before crediting anything. D47 needed the distinction
+anyway; the bug is why it is a separate variant rather than a boolean returned
+beside the old one.
+
+**The test that did not test it.** `forged_frames.rs` forges a frame from a
+captured datagram. The first version captured the quiet peer's *only*
+datagram — its handshake — and flipped a byte in it. That frame has type
+`HandshakeInit`, which the dispatcher turns away long before any session sees
+it, so the test passed against the bug and against the fix alike. It only
+showed up on the revert check that
+[FIXING-A-BUG.md](FIXING-A-BUG.md) exists to insist on. The forgery now takes
+the session identifier from the capture and writes a `Data` header of its own.
+
+**And a flake, found by running the new tests thirty times instead of once.**
+One migration test reported a failed migration about once in thirty runs. It
+was not the protocol: the same failure rate appeared with the replay removed
+entirely, and vanished when the connection did not go through a relay. A relay
+is a network, `send` is unreliable, and a single send-then-receive at the end
+of a test asserts the property *and* that no datagram was lost. The exchanges
+that mean "this must still work" now retry against a deadline; the ones
+measuring a failure still get one attempt, because retrying there only extends
+how long you wait for nothing. Adding a `println!` to the relay made it stop
+reproducing, which is the shape of a timing problem and was not taken as a
+fix.

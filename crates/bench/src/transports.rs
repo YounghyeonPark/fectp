@@ -614,12 +614,29 @@ fn spawn_return_path(
     client: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     flag: Arc<AtomicBool>,
 ) {
+    spawn_return_path_until(back, front, client, flag, None);
+}
+
+/// As [`spawn_return_path`], but stops forwarding once `expired` is set.
+fn spawn_return_path_until(
+    back: UdpSocket,
+    front: UdpSocket,
+    client: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    flag: Arc<AtomicBool>,
+    expired: Option<Arc<AtomicBool>>,
+) {
     thread::spawn(move || {
         let mut buf = [0u8; 65535];
         while !flag.load(Ordering::Relaxed) {
             let Ok(n) = back.recv(&mut buf) else {
                 continue;
             };
+            if expired
+                .as_ref()
+                .is_some_and(|e| e.load(Ordering::SeqCst))
+            {
+                continue;
+            }
             let Some(dest) = *client.lock().expect("lock") else {
                 continue;
             };
@@ -634,6 +651,7 @@ fn spawn_return_path(
 /// port. A session keyed on the peer's address cannot follow it.
 pub struct RebindingRelay {
     pub addr: SocketAddr,
+    pub rebound: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
 
@@ -646,11 +664,14 @@ impl RebindingRelay {
             .set_read_timeout(Some(Duration::from_millis(2)))
             .expect("timeout");
 
+        let rebound = Arc::new(AtomicBool::new(false));
+
         let front_rx = front.try_clone().expect("clone");
         let first_tx = back.try_clone().expect("clone");
         let second_tx = second.try_clone().expect("clone");
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
+        let moved = Arc::clone(&rebound);
         thread::spawn(move || {
             let mut buf = [0u8; 65535];
             let mut seen = 0u64;
@@ -661,6 +682,7 @@ impl RebindingRelay {
                 *learn.lock().expect("lock") = Some(from);
                 seen += 1;
                 let _ = if seen > rebind_after {
+                    moved.store(true, Ordering::SeqCst);
                     second_tx.send(&buf[..n])
                 } else {
                     first_tx.send(&buf[..n])
@@ -668,9 +690,24 @@ impl RebindingRelay {
             }
         });
 
-        spawn_return_path(back, front.try_clone().expect("clone"), Arc::clone(&client), flag_clone(&stop));
+        // The old mapping stops carrying anything once it has been replaced.
+        // A NAT that re-creates a mapping on a new port does not keep the old
+        // one alive, and a relay that did would let a session look as though
+        // it had survived the change while still being answered on the path it
+        // is supposed to have left.
+        spawn_return_path_until(
+            back,
+            front.try_clone().expect("clone"),
+            Arc::clone(&client),
+            flag_clone(&stop),
+            Some(Arc::clone(&rebound)),
+        );
         spawn_return_path(second, front, client, flag_clone(&stop));
-        Self { addr, stop }
+        Self {
+            addr,
+            rebound,
+            stop,
+        }
     }
 }
 

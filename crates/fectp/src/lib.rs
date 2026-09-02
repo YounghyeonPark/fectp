@@ -79,7 +79,9 @@ use rand_core::{OsRng, RngCore};
 
 pub use compress::PayloadType;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
-pub use endpoint::{Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_PEERS};
+pub use endpoint::{
+    Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_MIGRATIONS_PER_SECOND, MAX_PEERS,
+};
 pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
 /// How long a handshake waits for the peer's reply before giving up.
@@ -1123,7 +1125,13 @@ impl Connection {
         }
 
         let (len, compressed) = match ingested {
-            Ingested::Nothing => return Ok(None),
+            Ingested::Rejected | Ingested::Nothing => return Ok(None),
+            // A `Connection` never asks an address to prove itself: its socket
+            // is connected to one peer, so a frame from anywhere else does not
+            // reach it. Answering a challenge is the half it does need, and
+            // `ingest` has already written that answer into the reply buffer
+            // sent above.
+            Ingested::PathValidated(_) => return Ok(None),
             Ingested::Data { len, compressed } => (len, compressed),
             // Already whole and already decoded; it never lived in `rx`.
             Ingested::Message(data) => match out {

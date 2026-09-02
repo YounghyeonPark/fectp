@@ -870,18 +870,30 @@ fn other_things_a_path_does() {
     row_header(&["", "after the rebind", "expected"]);
     let echo = FectpEcho::public_key();
     let public = echo.public.expect("identity");
+    // Rebinding after two datagrams puts the change on the first data frame
+    // that follows the handshake. The old mapping goes silent at the same
+    // moment, as a real one does — otherwise the old path would keep answering
+    // and the session would look as though it had survived a change it never
+    // had to survive.
     let relay = RebindingRelay::spawn(echo.addr, 2);
 
-    let conn =
-        Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+    let conn = Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
     conn.set_read_timeout(Some(Duration::from_millis(500)))
         .expect("timeout");
     conn.send(b"before", PayloadType::Opaque).expect("send");
     let mut buf = [0u8; 256];
     let before = conn.recv(&mut buf).is_ok();
 
-    conn.send(b"after the mapping moved", PayloadType::Opaque).expect("send");
-    let after = conn.recv(&mut buf).is_ok();
+    // Following the peer costs a challenge and its answer, so the exchange
+    // that provokes the move is not the one that completes it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut after = false;
+    while !after && std::time::Instant::now() < deadline {
+        conn.send(b"after the mapping moved", PayloadType::Opaque)
+            .expect("send");
+        after = conn.recv(&mut buf).is_ok();
+    }
+    let rebound = relay.rebound.load(std::sync::atomic::Ordering::SeqCst);
     drop(conn);
     drop(relay);
     drop(echo);
@@ -889,17 +901,18 @@ fn other_things_a_path_does() {
     row(&[
         "session survives a new source port",
         if after { "yes" } else { "no" },
-        "no",
+        "yes",
     ]);
     note(&format!(
-        "The exchange before the rebind {}, which is the control.",
-        if before { "worked" } else { "did NOT work" }
+        "The exchange before the rebind {}, and the relay {} switch ports —",
+        if before { "worked" } else { "did NOT work" },
+        if rebound { "did" } else { "did NOT" }
     ));
-    note("A session is keyed on the peer's address and its session identifier, so a");
-    note("peer that reappears on a new port is a stranger. Keying on the pair is");
-    note("what stops one client's chosen identifier colliding with another's, so");
-    note("this is a consequence of that choice rather than an oversight — but it");
-    note("does mean a NAT rebinding ends the session.");
+    note("both are controls: without them this row reports on nothing.");
+    note("A peer arriving from a new address is challenged to prove it can receive");
+    note("there, and the session follows only once it answers. Until then the old");
+    note("address is what gets written to, which is why the move takes an extra");
+    note("round trip rather than happening on the frame that reveals it.");
 }
 
 // ─────────────────────── 10. jitter, asymmetry, and a crowded endpoint ────

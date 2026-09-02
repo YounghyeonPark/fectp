@@ -46,7 +46,7 @@ send data encrypted, right now, and may be running on 32 KiB of RAM.**
 | | |
 |---|---|
 | **Fast** | Data travels in the **very first packet** — no round trips spent agreeing on keys. |
-| **Encrypted** | Noise, three modes, differing in what you must share beforehand rather than in how you use them. |
+| **Encrypted** | Noise, always. Two modes, differing in what you must share beforehand rather than in how you use them. |
 | **Compressed** | It knows what your data *is*, so it compresses structured binary where gzip and Zstandard cannot. |
 | **Small** | The core is `no_std`, allocates nothing, and measures **22 KiB** of flash. |
 
@@ -337,7 +337,7 @@ records what each one would cost to change.
 | | |
 |---|---|
 | **No ordered delivery** | A message that arrives is delivered at once rather than held back for an earlier one — holding it back is head-of-line blocking, the exact cost this exists to avoid. Put a sequence number in your own payload if you need order. |
-| **A session is bound to its peer's address** | A peer reappearing on a new source port is a stranger, and the session ends. Measured: a NAT rebind kills the session. |
+| **Following a moved peer costs a round trip** | An `Endpoint` follows a peer that changes address, but only after challenging the new address and being answered — nothing is sent there before that. A `Connection` does not follow a *server* that moves: its socket is connected to one address. Measured: a NAT rebind no longer ends the session. |
 | **No path MTU discovery** | Nothing probes the path. The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame; `set_max_datagram` reclaims it where the path is known, and silently loses datagrams where it is not. |
 | **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median is unchanged and p95 grows about fivefold. |
 
@@ -357,11 +357,11 @@ records what each one would cost to change.
 replay protection, reorder tolerance, capability negotiation, per-message
 reliable delivery, messages split across frames, congestion control, session
 resumption, many peers on one socket, outbound dialling on that same socket,
-three security modes, optional length-masking padding, typed payload codecs,
+two security modes, address migration, optional length-masking padding, typed payload codecs,
 optional Zstandard compression.
 
-**Not built:** ordered delivery, path MTU discovery, address migration, ticket
-expiry, peer discovery and NAT traversal, a QUIC backend, bit-packed deltas —
+**Not built:** ordered delivery, path MTU discovery, peer discovery and NAT
+traversal, a QUIC backend, bit-packed deltas —
 each with its consequence under [Limitations](#limitations).
 
 **Not audited.** This is `#![forbid(unsafe_code)]`, cross-validated against an

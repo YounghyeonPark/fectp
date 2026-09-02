@@ -198,6 +198,17 @@ impl Default for ReplayWindow {
 /// Bytes a data frame adds on top of its payload: header plus AEAD tag.
 pub const DATA_OVERHEAD: usize = HEADER_LEN + TAGLEN;
 
+/// Bytes of unpredictable token in a path challenge.
+///
+/// The token only has to be unguessable for the lifetime of one probe, which
+/// is a few round trips. Eight bytes of it costs 38 bytes on the wire in each
+/// direction and leaves an attacker guessing one value in 2^64 within that
+/// window.
+pub const PATH_TOKEN_LEN: usize = 8;
+
+/// Bytes a path challenge or response occupies on the wire.
+pub const PATH_FRAME_LEN: usize = DATA_OVERHEAD + PATH_TOKEN_LEN;
+
 /// Boundary that padded plaintexts are rounded up to.
 pub const PAD_BLOCK: usize = 64;
 
@@ -379,6 +390,32 @@ impl Session {
         self.seal_frame(FrameType::Ack, &block, None, None, 0, out)
     }
 
+    /// Encrypts a challenge asking the peer to prove it can receive where this
+    /// is being sent.
+    ///
+    /// The token is the caller's to choose and to remember; this layer knows
+    /// nothing about addresses and does not decide when a path is in doubt.
+    pub fn seal_path_challenge(
+        &mut self,
+        token: &[u8; PATH_TOKEN_LEN],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        // Never padded. The payload is a fixed-length random token, so there
+        // is no length here for padding to hide — and a challenge and its
+        // response being the same size in both directions is what keeps the
+        // exchange from amplifying.
+        self.seal_frame_padded(FrameType::PathChallenge, token, None, None, 0, false, out)
+    }
+
+    /// Encrypts the answer to a challenge, echoing its token back.
+    pub fn seal_path_response(
+        &mut self,
+        token: &[u8; PATH_TOKEN_LEN],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.seal_frame_padded(FrameType::PathResponse, token, None, None, 0, false, out)
+    }
+
     /// Builds any outgoing frame.
     ///
     /// The plaintext is assembled as `[pad_len]? [message_id]? [fragment]?
@@ -392,6 +429,22 @@ impl Session {
         message_id: Option<MessageId>,
         fragment: Option<Fragment>,
         flags: u8,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let padded = self.padding;
+        self.seal_frame_padded(frame_type, payload, message_id, fragment, flags, padded, out)
+    }
+
+    /// As [`Session::seal_frame`], with padding stated rather than inherited.
+    #[allow(clippy::too_many_arguments)]
+    fn seal_frame_padded(
+        &mut self,
+        frame_type: FrameType,
+        payload: &[u8],
+        message_id: Option<MessageId>,
+        fragment: Option<Fragment>,
+        flags: u8,
+        padded: bool,
         out: &mut [u8],
     ) -> Result<usize> {
         if self.send_seq == u64::MAX {
@@ -418,7 +471,7 @@ impl Session {
 
         // With padding on, the plaintext is rounded up to a block boundary so
         // the frame size no longer reveals the exact payload length.
-        let plaintext_len = if self.padding {
+        let plaintext_len = if padded {
             if inner_len > u16::MAX as usize {
                 return Err(Error::PayloadTooLarge);
             }
@@ -445,7 +498,7 @@ impl Session {
 
         let (hdr, body) = out[..total].split_at_mut(HEADER_LEN);
         let mut at = 0;
-        if self.padding {
+        if padded {
             body[..LEN_PREFIX].copy_from_slice(&(inner_len as u16).to_le_bytes());
             at = LEN_PREFIX;
         }
@@ -473,7 +526,11 @@ impl Session {
         let header = Header::decode(frame)?;
         if !matches!(
             header.frame_type,
-            FrameType::Data | FrameType::Close | FrameType::Ack
+            FrameType::Data
+                | FrameType::Close
+                | FrameType::Ack
+                | FrameType::PathChallenge
+                | FrameType::PathResponse
         ) {
             return Err(Error::BadHeader);
         }
@@ -537,6 +594,21 @@ impl Session {
 
         if at > 0 {
             body.copy_within(at..at + len, 0);
+        }
+
+        // A challenge is a fixed-length token and nothing else. Anything
+        // wrapped around it — a message identifier, a fragment descriptor, a
+        // codec header, padding — is not a challenge, and accepting one would
+        // mean the two sides disagree about what was just proved.
+        if matches!(
+            header.frame_type,
+            FrameType::PathChallenge | FrameType::PathResponse
+        ) && (len != PATH_TOKEN_LEN
+            || message_id.is_some()
+            || fragment.is_some()
+            || header.flags != 0)
+        {
+            return Err(Error::BadHeader);
         }
 
         self.replay.commit(header.sequence);
@@ -1083,6 +1155,92 @@ mod hostile_peer {
 
     const SERVER_SECRET: [u8; 32] = [0xA1; 32];
     const CLIENT_SECRET: [u8; 32] = [0xB2; 32];
+
+    #[test]
+    fn a_path_challenge_round_trips() {
+        let (mut client, mut server) = connect();
+        let token = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+        let mut wire = [0u8; 256];
+        let n = server
+            .seal_path_challenge(&token, &mut wire)
+            .expect("seal challenge");
+        assert_eq!(n, PATH_FRAME_LEN, "SPEC 5.8.2: header, tag, and 8 bytes");
+
+        let opened = client.open(&mut wire[..n]).expect("open challenge");
+        assert_eq!(opened.header.frame_type, FrameType::PathChallenge);
+        assert_eq!(opened.header.flags, 0, "SPEC 5.8.2: no flags");
+        assert_eq!(&wire[HEADER_LEN..HEADER_LEN + PATH_TOKEN_LEN], &token);
+
+        let mut back = [0u8; 256];
+        let n = client
+            .seal_path_response(&token, &mut back)
+            .expect("seal response");
+        assert_eq!(n, PATH_FRAME_LEN, "a response is the size of a challenge");
+        let opened = server.open(&mut back[..n]).expect("open response");
+        assert_eq!(opened.header.frame_type, FrameType::PathResponse);
+        assert_eq!(
+            &back[HEADER_LEN..HEADER_LEN + PATH_TOKEN_LEN],
+            &token,
+            "the token must come back unchanged"
+        );
+    }
+
+    #[test]
+    fn a_padded_session_still_sends_bare_challenges() {
+        // Padding is a session-wide setting, and a challenge carries a
+        // fixed-length random token: there is no length to hide, and the
+        // exchange being the same size in both directions is what keeps it
+        // from amplifying.
+        let (mut client, mut server) = connect();
+        client.set_padding(true);
+        server.set_padding(true);
+
+        // The control. Without this the test would pass just as well against a
+        // session whose padding was never switched on.
+        let mut wire = [0u8; 256];
+        let data = server.seal(b"eight!!!", 0, &mut wire).expect("seal data");
+        assert!(
+            data > DATA_OVERHEAD + 8,
+            "padding is not actually on: an 8-byte payload sealed to {data} bytes"
+        );
+
+        let mut wire = [0u8; 256];
+        let n = server
+            .seal_path_challenge(&[0x42; PATH_TOKEN_LEN], &mut wire)
+            .expect("seal challenge");
+        assert_eq!(n, PATH_FRAME_LEN, "a challenge is never padded");
+        client.open(&mut wire[..n]).expect("a peer accepts it");
+    }
+
+    #[test]
+    fn a_challenge_wearing_extra_flags_is_refused() {
+        // A challenge is a token and nothing else. One arriving with a message
+        // identifier or a codec header is not a challenge, and accepting it
+        // would leave the two sides disagreeing about what was just proved.
+        let (mut client, mut server) = connect();
+        let mut wire = [0u8; 256];
+        let n = server
+            .seal_path_challenge(&[0x42; PATH_TOKEN_LEN], &mut wire)
+            .expect("seal challenge");
+
+        // The control: untouched, it opens.
+        let mut copy = wire;
+        client.open(&mut copy[..n]).expect("the honest frame opens");
+
+        for flag in [FLAG_RELIABLE, FLAG_FRAGMENT, FLAG_PADDED, 0x01] {
+            let (mut client, mut server) = connect();
+            let mut wire = [0u8; 256];
+            let n = server
+                .seal_path_challenge(&[0x42; PATH_TOKEN_LEN], &mut wire)
+                .expect("seal challenge");
+            wire[1] = flag;
+            assert!(
+                client.open(&mut wire[..n]).is_err(),
+                "a challenge flagged {flag:#04x} must be refused"
+            );
+        }
+    }
 
     fn connect() -> (Session, Session) {
         let server_kp = Keypair::from_secret(SERVER_SECRET);
