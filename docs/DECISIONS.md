@@ -554,7 +554,7 @@ These are unimplemented, not overlooked.
 | **Plaintext mode misuse** | Nothing stops an operator choosing plaintext where it is inappropriate. | The API and documentation steer towards pre-shared keys; a protocol cannot enforce judgement. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration** | A session is bound to its peer's address. | Keying on the pair is what avoids session-id collisions (D14); supporting migration would need a different scheme. Measured: a peer reappearing on a new source port is a stranger and the session ends (BENCHMARKS.md §10). |
-| **Answering inside the handshake** | An `Endpoint` receives data sent with a handshake but always replies with an empty payload, so the responder's half of 0-RTT is unreachable through the public API. | The protocol supports it — `Responder::write_response` takes a payload — and `Connection` delivers it through `recv` (D27). Only the endpoint has no way to supply one. |
+| **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
@@ -1178,9 +1178,21 @@ discriminate.
 And then the fourth was flaky, about one run in six, for a reason that had
 nothing to do with the code under test: the honest peer sits in `recv` while
 the loop that answers it has already stopped, times out, and reports being
-evicted when it was only abandoned. The loop now drains before joining. A test
-that fails at random is worse than no test, because what it teaches is to
-ignore a red run.
+evicted when it was only abandoned. The loop drains before joining now.
+
+It came back when [D44](#d44--the-responders-half-of-0-rtt) and
+[D43](#d43--a-ticket-stops-being-worth-stealing) added several second-long
+tests beside it: the single poll loop was late often enough that starvation
+looked like eviction again, in about one run in three. Tolerating a run of
+timeouts instead stopped it catching plain oldest-first eviction, because the
+test ends before enough accumulate — a threshold cannot separate the two when
+both are measured in the same seconds.
+
+The judgement moved instead. **The honest peer is asked once the flood has
+stopped and the loop is draining with nothing else to do.** A peer still filed
+is answered then; one that was evicted has no route on the server and never
+will be. That is not a matter of degree, so it does not need tuning: five runs
+clean with the real policy, four of four failing with the weakened one.
 
 **What was left, and is now done**: see [D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept).
 The responder answered a repeated opening frame afresh, which turned out to be
@@ -1699,6 +1711,45 @@ and redeemed within the hour still works, and the only defence against that is
 that redeeming it spends it — the legitimate peer's next resumption then fails
 and it falls back to a full handshake, which is a detectable event rather than a
 silent one.
+
+## D44 — The responder's half of 0-RTT
+
+**Problem**: this protocol's headline is that data travels in the very first
+packet. Half of that worked. `Connection::connect_and_send` puts a payload in
+the opening frame, and `Connection` has always delivered a payload arriving in
+the response through its first `recv` — but every `write_response` in `Endpoint`
+passed `&[]`. **Nothing could produce one.**
+
+The consequence is a round trip. A sensor that wakes, reports and needs an
+answer before sleeping sent its reading in the handshake and then waited for a
+third packet to hear anything back.
+
+**Decision**: `Endpoint::set_handshake_reply` carries a payload in the response
+to every handshake. The client side needed no change at all, which is the
+clearest sign of where the gap was.
+
+**Same bytes for every peer**, and that is a real limit rather than a first
+version. The response is written inside `accept_full`, before `poll` returns and
+therefore before the application has been told anything, so a reply that
+depended on what the peer said would need a callback in the event loop. That is
+a concept this API does not have and the case does not obviously justify: a
+configuration version, a banner, an acknowledgement — the things worth sending
+here are the same for everyone. An answer that depends on the request takes the
+round trip after, as it did before.
+
+**It is not 0-RTT data and does not carry those caveats.** The opening frame is
+replayable and protected only by the responder's static key (SPEC §4.4.1). The
+response is encrypted after the ephemeral exchange, so it has forward secrecy,
+and reading it needs the initiator's static secret — which whoever replayed the
+opening frame does not have. Worth stating because the symmetry invites the
+assumption that both halves are equally exposed, and they are not.
+
+**Refused when set, not when connecting.** A payload too large for a handshake
+frame would otherwise fail every handshake, and that failure looks exactly like
+an unreachable peer. `set_handshake_reply` returns `PayloadTooLarge` instead.
+
+**Verified by emptying it again**: three of the four tests fail, and the fourth
+is the size check, which is about the setter rather than the wire.
 
 ## Not carried over
 

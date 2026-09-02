@@ -146,26 +146,59 @@ fn the_peer_table_is_bounded_and_evicts_the_silent_first() {
         thread::spawn(move || {
             let conn = Connection::connect(addr, &public, &Identity::generate())
                 .expect("the honest peer must get in before the flood starts");
-            conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+            conn.set_read_timeout(Some(Duration::from_millis(500))).expect("timeout");
             let mut buf = vec![0u8; 256];
+
             // Returns whether it was still being answered when told to stop.
             // Counting successes is not enough: a peer evicted halfway through
             // still has a healthy count from before it happened, which is how
             // an earlier version of this test passed against plain
             // oldest-first eviction and proved nothing.
+            //
+            // But one timed-out read is not eviction either. Under load — and
+            // this suite runs several second-long tests beside this one — the
+            // single poll loop that answers everybody can simply be late. The
+            // two are told apart by persistence: an evicted peer has no route
+            // on the server and is never answered again, while a starved one
+            // gets through eventually. Treating the first timeout as eviction
+            // made this fail about one run in three, on a machine doing
+            // nothing but running the tests.
+            // Best effort while the flood runs: a timed-out read here is as
+            // likely to be the single poll loop being late as anything else,
+            // and this suite runs several second-long tests beside this one.
             while !flag.load(Ordering::Relaxed) {
-                if conn.send(b"still here", PayloadType::Opaque).is_err() {
-                    return false;
-                }
-                match conn.recv(&mut buf) {
-                    Ok(n) if &buf[..n] == b"still here" => {
-                        count.fetch_add(1, Ordering::Relaxed);
+                if conn.send(b"still here", PayloadType::Opaque).is_ok() {
+                    if let Ok(n) = conn.recv(&mut buf) {
+                        if &buf[..n] == b"still here" {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
-                    _ => return false,
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            true
+
+            // The judgement, once the flood has stopped and the loop is
+            // draining with nothing else to do. A peer that is still filed gets
+            // answered now; one that was evicted has no route on the server and
+            // never will, however long it waits.
+            //
+            // Deciding during the flood does not work in either direction.
+            // Treating one timeout as eviction failed about a run in three from
+            // starvation alone; tolerating eight in a row stopped catching
+            // plain oldest-first eviction, because the test ends before eight
+            // have accumulated. Asking afterwards is not a matter of degree.
+            conn.set_read_timeout(Some(Duration::from_millis(700)))
+                .expect("timeout");
+            for _ in 0..3 {
+                if conn.send(b"still here", PayloadType::Opaque).is_ok() {
+                    if let Ok(n) = conn.recv(&mut buf) {
+                        if &buf[..n] == b"still here" {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
         })
     };
 
@@ -222,7 +255,7 @@ fn the_peer_table_is_bounded_and_evicts_the_silent_first() {
     // abandoned by this loop. That race made this test fail about one run in
     // six, which is worse than not having it.
     let draining = Instant::now();
-    while draining.elapsed() < Duration::from_secs(1) {
+    while draining.elapsed() < Duration::from_secs(3) {
         if let Ok(Event::Message { peer, data }) = server.poll(Some(Duration::from_millis(5))) {
             let _ = server.send(peer, &data, PayloadType::Opaque);
         }

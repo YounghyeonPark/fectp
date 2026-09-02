@@ -230,6 +230,8 @@ pub struct Endpoint {
     handshake_refilled: Instant,
     handshake_rate: u32,
     max_peers: usize,
+    /// Sent in the payload of every handshake response.
+    handshake_reply: Vec<u8>,
     next_id: u64,
 
     rx: Vec<u8>,
@@ -314,6 +316,7 @@ impl Endpoint {
             handshake_refilled: Instant::now(),
             handshake_rate: MAX_HANDSHAKES_PER_SECOND,
             max_peers: MAX_PEERS,
+            handshake_reply: Vec::new(),
             outbound: HashMap::new(),
             next_id: 0,
             rx: vec![0u8; size],
@@ -696,7 +699,10 @@ impl Endpoint {
         let len = responder.read_init(&self.rx[..n], &mut staging)?;
         let zero_rtt = staging[..len].to_vec();
 
-        let (session, sent) = responder.write_response(&mut OsRng, &[], &mut self.tx)?;
+        let reply = core::mem::take(&mut self.handshake_reply);
+        let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
+        self.handshake_reply = reply;
+        let (session, sent) = written?;
         self.socket.send_to(&self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(Link::Encrypted(session), from, zero_rtt, false);
@@ -724,7 +730,10 @@ impl Endpoint {
         let len = responder.read_init(&ticket, &self.rx[..n], &mut staging)?;
         let zero_rtt = staging[..len].to_vec();
 
-        let (session, sent) = responder.write_response(&mut OsRng, &[], &mut self.tx)?;
+        let reply = core::mem::take(&mut self.handshake_reply);
+        let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
+        self.handshake_reply = reply;
+        let (session, sent) = written?;
         self.socket.send_to(&self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(Link::Encrypted(session), from, zero_rtt, true);
@@ -738,7 +747,10 @@ impl Endpoint {
         let len = responder.read_init(&self.rx[..n], &mut staging)?;
         let payload = staging[..len].to_vec();
 
-        let (session, sent) = responder.write_response(&[], &mut self.tx)?;
+        let reply = core::mem::take(&mut self.handshake_reply);
+        let written = responder.write_response(&reply, &mut self.tx);
+        self.handshake_reply = reply;
+        let (session, sent) = written?;
         self.socket.send_to(&self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(Link::Plain(session), from, payload, false);
@@ -860,6 +872,39 @@ impl Endpoint {
             entry.handshake_reply = left.checked_sub(1).map(|left| (reply, left));
         }
         Ok(true)
+    }
+
+    /// Sets a payload to carry in the response to every handshake.
+    ///
+    /// A peer that sends data with its handshake ([`Connection::connect_and_send`])
+    /// gets an answer in the same round trip rather than the one after it — the
+    /// other half of the property this protocol exists for, and until now the
+    /// half an `Endpoint` could not reach. `Connection` already delivers it:
+    /// the payload arrives through the first [`recv`](Connection::recv) as
+    /// though it were any other message.
+    ///
+    /// **This is not 0-RTT data and does not carry its caveats.** The opening
+    /// frame is replayable and protected only by the responder's static key
+    /// (SPEC §4.4.1). The *response* is encrypted after the ephemeral exchange,
+    /// so it has forward secrecy, and reading it needs the initiator's static
+    /// secret — which whoever replayed the opening frame does not have.
+    ///
+    /// It is the same bytes for every peer, decided before any of them
+    /// connects, because the response is written inside `poll` before the
+    /// application hears anything. An answer that depends on what the peer
+    /// said needs the round trip after.
+    ///
+    /// Fails with [`Error::PayloadTooLarge`](fectp_core::Error::PayloadTooLarge)
+    /// if it would not fit a handshake frame.
+    pub fn set_handshake_reply(&mut self, payload: &[u8]) -> Result<()> {
+        let overhead = Responder::OVERHEAD
+            .max(ResumeResponder::OVERHEAD)
+            .max(PlainResponder::OVERHEAD);
+        if payload.len() + overhead > max_datagram() {
+            return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
+        }
+        self.handshake_reply = payload.to_vec();
+        Ok(())
     }
 
     /// Sets how long a resumption ticket this endpoint issued stays redeemable,

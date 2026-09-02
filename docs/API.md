@@ -141,6 +141,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 | | |
 |---|---|
 | `poll(timeout)` | Returns the next `Event`. Everything else happens inside it. |
+| `set_handshake_reply(payload)` | A payload carried in the response to every handshake, so a peer that sent data with its opening frame is answered in the same round trip. Same bytes for every peer. |
 
 ```rust
 match endpoint.poll(Some(Duration::from_millis(50)))? {
