@@ -315,6 +315,26 @@ make the level irrelevant:
 
 Only the i32 counters were already fine at −4.
 
+## 7b. Bit packing, measured and rejected
+
+Delta coding emits LEB128, which spends a whole byte on any delta below 64 and
+two below 8192 — so the ratio steps. Packing each block of deltas at its widest
+value's bit width should track the signal instead.
+
+| | transform output | on the wire, after Zstandard |
+|---|---|---|
+| sensor `i16` ×4, slow | −34.8% | **+9.5%** |
+| sensor `i16` ×4, fast | −27.7% | −5.1% |
+| counter `i32` ×2 | −35.9% | **+62.5%** |
+
+The transform output gets a third smaller and the frame gets larger. Packing
+destroys byte alignment and repetition, which is what the entropy stage lives
+on: 2048 identical LEB128 bytes compress to 24, the equivalent bitstream to 39.
+
+Reproduce with `cargo run -p fectp-bench --example bitpack_headroom`. The
+no-Zstandard profile does gain the full third, because there the transform
+output is the wire — see D45.
+
 ## 8. Not compressing what will not compress
 
 Attempting compression costs a few microseconds whether or not it works, and

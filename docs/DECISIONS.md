@@ -559,7 +559,7 @@ These are unimplemented, not overlooked.
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
 | **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
-| **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Block-wise bit-packing would make the ratio track the signal smoothly instead of stepping. |
+| **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
 | **Keys must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake performs its own Diffie-Hellman. | A secure element or HSM that never releases the key — the whole point of one — cannot be used without a trait for the DH. Relevant on exactly the microcontrollers this protocol targets. |
@@ -1750,6 +1750,44 @@ an unreachable peer. `set_handshake_reply` returns `PayloadTooLarge` instead.
 
 **Verified by emptying it again**: three of the four tests fail, and the fourth
 is the size check, which is about the setter rather than the wire.
+
+## D45 — Bit-packed deltas were measured, and not built
+
+**Problem**: [D11](#d11--typed-payload-codecs) notes that delta coding only pays
+when the deltas fit in seven bits — a varint costs one byte below 64 and two
+below 8192, so the compression ratio steps rather than tracking the signal.
+Block-wise bit packing, writing each block of deltas at whatever width its
+widest value needs, is the obvious fix, and it has sat in the gaps table looking
+obviously worthwhile.
+
+**Measured before building**, on the same data `datasets.rs` generates, with
+`crates/bench/examples/bitpack_headroom.rs`:
+
+| | transform output | on the wire, after Zstandard |
+|---|---|---|
+| sensor `i16` ×4, slow | −34.8% | **+9.5%** |
+| sensor `i16` ×4, fast | −27.7% | −5.1% |
+| counter `i32` ×2 | −35.9% | **+62.5%** |
+
+**The transform gets a third smaller and the frame gets bigger.** Packing
+destroys byte alignment and repetition, and repetition is what an entropy coder
+lives on: the counter case is 2048 identical LEB128 bytes that Zstandard takes
+to 24, against a dense bitstream it takes to 39.
+
+**Decision**: not built. A new transform id costs a specification section, a
+codec registry entry and a decoder in every implementation that follows, for a
+result that is worse on two of the three datasets it was aimed at.
+
+**What the measurement did establish**: the no-Zstandard profile gains the full
+third, because there the transform output *is* the wire bytes. That is the
+constrained peer — the one with 22 KiB of flash and the least room for a second
+decoder, which is the wrong place to spend complexity, but it is a real number
+and the case stays open rather than closed.
+
+**Why this is recorded at all**: the entry in the gaps table read as though the
+work was merely undone. It is not; it is undone because it does not work, in
+the configuration nearly everything runs in. Someone would otherwise have built
+it and found out afterwards.
 
 ## Not carried over
 
