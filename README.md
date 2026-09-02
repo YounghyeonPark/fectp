@@ -368,7 +368,7 @@ breaks protocols for a living. Injecting packet loss found a bug that lost
 messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
-260 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
+266 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
 **22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 
@@ -431,6 +431,7 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Full comparison, with the methodology and the mistakes. |
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data shape. |
 | [FIXING-A-BUG.md](docs/FIXING-A-BUG.md) | How a fix is verified here, and the ways tests have passed without testing anything. |
+| [OTHER-LANGUAGES.md](docs/OTHER-LANGUAGES.md) | Using it from Python, Java, C, C++ or Node — what a wrapper costs, and why a browser cannot. |
 | [footprint/README.md](crates/footprint/README.md) | What it costs on a microcontroller, measured on a linked image. |
 | [project_description.md](project_description.md) | The original brief. Kept unedited, with a map of where the implementation departed from it and why. |
 

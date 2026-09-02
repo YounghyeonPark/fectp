@@ -1281,11 +1281,9 @@ a substitute for knowing where the hard states are. The honest summary is that
 the directed test is what protects this particular bug and the properties
 protect the ordinary cases around it.
 
-**What it does not cover**: the congestion window. Its own sequence — grow on
-an acknowledgement, halve on a loss, never below `MIN_CWND` — is exercised here
-only as whatever `register` happens to refuse, and none of those three
-behaviours is asserted anywhere. Fragment reassembly was named here too and now
-has one ([D37](#d37--the-two-layers-that-remember-things)). Nothing here is a
+**What it did not cover**, and both are now covered: fragment reassembly
+([D37](#d37--the-two-layers-that-remember-things)) and the congestion window
+([D41](#d41--the-congestion-window-moves-one-way-per-signal)). Nothing here is a
 security audit.
 
 ## D35 — The specification is implemented twice
@@ -1571,6 +1569,47 @@ socket.
 **What this does not say**: that TCP is worse. It is the right answer for
 ordered bulk transfer, which is why `BENCHMARKS.md` measures against it rather
 than dismissing it. The two are for different things.
+
+## D41 — The congestion window moves one way per signal
+
+**Problem**: the last of the layers that keep state, and the only one that
+decides how fast the sender goes. Its three behaviours — widen on an
+acknowledgement, collapse on a timeout, never below `MIN_CWND` — were exercised
+only as whatever `register` happened to refuse. None of the three was asserted
+anywhere.
+
+That is worth something concrete: congestion control took self-inflicted loss on
+a 1 Mbit/s link from 46% of everything sent to about 3% (BENCHMARKS.md §9). A
+window that widened where it should collapse would put that back, and nothing in
+the suite would have failed.
+
+**Decision**: `tests/congestion_model.rs` drives a sender through generated
+sequences of fill-the-window, acknowledge-everything and let-it-all-time-out,
+and asserts after every step that the window stays within `MIN_CWND` and
+`MAX_IN_FLIGHT`, and that **each signal moves it one way only** — an
+acknowledgement never narrows it, a timeout never widens it, and registering
+messages, which is bounded *by* the window, does not move it at all.
+
+Direction is the whole of additive-increase and multiplicative-decrease.
+Reversing it would be a sender that speeds up into congestion, which is the
+failure that does not announce itself.
+
+Four directed tests beside them: the documented opening width, the collapse to
+the floor rather than a halving, the recovery afterwards, and that growth is
+faster below the threshold than above it. The collapse is deliberate and
+`on_loss` says why — the only loss signal here is a retransmission timer, which
+in TCP terms is the severe one, because an acknowledgement reports the whole
+receive window rather than repeating the last in-order identifier, so there is
+no duplicate-acknowledgement path to react to more gently.
+
+**Verified by breaking it**, twice: widening on loss instead of collapsing fails
+three tests with "a timeout widened the window from 4 to 5", and removing the
+floor fails three with "window fell to 1 against a floor of 2".
+
+**What it does not cover**: the round-trip estimator that decides *when* a
+timeout fires. Karn's algorithm and the RFC 6298 arithmetic have example tests
+and no model, and a wrong RTO is a slow connection rather than an incorrect one
+— which is why it is last rather than never.
 
 ## Not carried over
 
