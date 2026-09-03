@@ -32,6 +32,9 @@ struct Injector {
     addr: SocketAddr,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     inject: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Sent on every pass rather than once, for testing what a stream of noise
+    /// can hold open.
+    repeat: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -51,6 +54,7 @@ impl Injector {
         let stop = Arc::new(AtomicBool::new(false));
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let inject: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let repeat: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
         {
@@ -59,12 +63,16 @@ impl Injector {
             let flag = Arc::clone(&stop);
             let seen = Arc::clone(&last);
             let pending = Arc::clone(&inject);
+            let over_and_over = Arc::clone(&repeat);
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
                 while !flag.load(Ordering::Relaxed) {
                     if let Some(bytes) = pending.lock().expect("lock").take() {
                         let _ = back.send(&bytes);
+                    }
+                    if let Some(bytes) = over_and_over.lock().expect("lock").as_ref() {
+                        let _ = back.send(bytes);
                     }
                     let Ok((n, from)) = front.recv_from(&mut buf) else {
                         continue;
@@ -97,6 +105,7 @@ impl Injector {
             addr,
             last,
             inject,
+            repeat,
             stop,
         }
     }
@@ -107,6 +116,10 @@ impl Injector {
 
     fn send_from_the_peers_address(&self, bytes: Vec<u8>) {
         *self.inject.lock().expect("lock") = Some(bytes);
+    }
+
+    fn keep_sending_from_the_peers_address(&self, bytes: Vec<u8>) {
+        *self.repeat.lock().expect("lock") = Some(bytes);
     }
 }
 
@@ -147,24 +160,33 @@ fn forge_data_frame_for(captured: &[u8]) -> Vec<u8> {
 struct Echo {
     addr: SocketAddr,
     public: [u8; 32],
+    lost: Arc<Mutex<usize>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Echo {
     fn spawn(max_peers: usize) -> Self {
+        Self::spawn_with_timeout(max_peers, None)
+    }
+
+    fn spawn_with_timeout(max_peers: usize, timeout: Option<Duration>) -> Self {
         let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
         server.set_max_peers(max_peers);
+        server.set_peer_timeout(timeout);
         let addr = server.local_addr().expect("addr");
         let public = *server.public_key().expect("identity");
         let stop = Arc::new(AtomicBool::new(false));
+        let lost = Arc::new(Mutex::new(0usize));
         let flag = Arc::clone(&stop);
+        let gone = Arc::clone(&lost);
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::Relaxed) {
                 match server.poll(Some(Duration::from_millis(20))) {
                     Ok(Event::Message { peer, data }) => {
                         let _ = server.send(peer, &data, PayloadType::Opaque);
                     }
+                    Ok(Event::PeerLost { .. }) => *gone.lock().expect("lock") += 1,
                     Ok(_) => {}
                     Err(_) => break,
                 }
@@ -173,9 +195,14 @@ impl Echo {
         Self {
             addr,
             public,
+            lost,
             stop,
             handle: Some(handle),
         }
+    }
+
+    fn lost(&self) -> usize {
+        *self.lost.lock().expect("lock")
     }
 }
 
@@ -244,4 +271,31 @@ fn a_forged_frame_does_not_protect_a_session_from_eviction() {
     );
 
     drop(quiet);
+}
+
+#[test]
+fn a_forged_frame_does_not_hold_a_dead_session_open() {
+    // The other half of what "heard from" has to mean. A peer timeout that
+    // counted any arriving datagram would be a timeout a stranger could veto:
+    // address the socket often enough and the session never expires, and the
+    // table fills with peers that left.
+    let echo = Echo::spawn_with_timeout(16, Some(Duration::from_millis(300)));
+    let relay = Injector::spawn(echo.addr);
+    let conn =
+        Connection::connect(relay.addr, &echo.public, &Identity::generate()).expect("connect");
+    let captured = relay.last().expect("the handshake passed through the relay");
+
+    // Noise from the peer's own address, over and over, while the peer itself
+    // says nothing further.
+    relay.keep_sending_from_the_peers_address(forge_data_frame_for(&captured));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while echo.lost() == 0 && std::time::Instant::now() < deadline {}
+    assert_eq!(
+        echo.lost(),
+        1,
+        "a session must expire on schedule however much noise arrives for it"
+    );
+
+    drop(conn);
 }

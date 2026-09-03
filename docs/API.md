@@ -148,6 +148,7 @@ match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::Sent { peer, delivered } => {}      // a split message finished
     Event::ConnectFailed { peer } => {}
     Event::PeerMoved { peer, from, to } => {}  // the peer changed address
+    Event::PeerLost { peer } => {}             // gave up on the peer
     Event::Idle => {}                          // nothing arrived
 }
 ```

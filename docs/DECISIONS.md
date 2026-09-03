@@ -562,7 +562,7 @@ These are unimplemented, not overlooked.
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
-| **No dead-peer detection** | A session whose peer has gone away stays in the table until eviction or `disconnect` removes it. An unanswered keep-alive ([D49](#d49--something-to-send-for-a-peer-with-nothing-to-say)) is not acted on. | How long to wait before declaring a peer gone depends on what the application does about it, which is not something a transport can pick. The eviction order already drops the longest-silent session when room is needed, which bounds the memory if not the staleness. |
+| **A peer timeout needs keep-alives to mean anything** | `set_peer_timeout` releases a peer nothing authenticated has been heard from ([D51](#d51--giving-up-on-a-peer-and-the-bug-that-found)). On its own it is an idle timeout and will drop a peer that is alive and quiet; it is evidence of death only when keep-alives were being sent for it to ignore. | Both are off by default, and the pairing is documented rather than enforced — an idle timeout without keep-alives is occasionally exactly what a caller wants, and a transport that refused to configure it would be guessing. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
@@ -2192,3 +2192,68 @@ It does not protect traffic sent after a compromise, and it does not help if
 the long-term identity key is taken: that yields new sessions, not old ones.
 It is forward secrecy *within* a session, added to the forward secrecy
 *between* sessions the handshake already provides.
+
+## D51 — Giving up on a peer, and the bug that found
+
+**Problem**: a session whose peer had gone away stayed on file until eviction
+needed the room. There was no way to be told, and no way to release it.
+
+**The hard part is not the timer.** A peer that is alive and has nothing to say
+is indistinguishable from one that has stopped existing. Silence is only
+evidence when there was something to answer — which is what the keep-alives of
+[D49](#d49--something-to-send-for-a-peer-with-nothing-to-say) provide. This is
+the same shape as QUIC's idle timeout and its PING frames, and for the same
+reason.
+
+**Decision**: `set_peer_timeout(Option<Duration>)` on `Endpoint`, releasing the
+session and raising `Event::PeerLost`. Off by default, and documented as
+meaning little without `set_keepalive` — the pairing is stated rather than
+enforced, because an idle timeout on its own is occasionally what a caller
+wants and a transport that refused to configure one would be guessing on their
+behalf.
+
+**Only authenticated frames count as being heard**, the same rule and the same
+reason as `spoke` in [D48](#d48--a-frame-that-did-not-authenticate-was-being-credited-to-the-session).
+A timeout that any arriving datagram could postpone is a timeout a stranger can
+veto: address the socket often enough and the session never expires. There is a
+test that sprays forged frames from the peer's own address and requires the
+session to expire on schedule anyway.
+
+Not offered on `Connection`. Its `recv` already reports a timeout to the
+caller, which is the same information arriving by the route the caller is
+already watching.
+
+### The bug this turned up
+
+The first run of the test failed, and not because the timeout did not work.
+The server thread had stopped:
+
+```
+SERVER STOPPED: Io(Os { code: 10054, kind: ConnectionReset,
+                        message: "An existing connection was forcibly closed..." })
+```
+
+A UDP socket has no connection to reset. What happened is that the endpoint
+sent a keep-alive to a peer that had gone, the machine answered with an ICMP
+port-unreachable, and the kernel handed that back on the *next* socket call —
+`WSAECONNRESET` on Windows, `ECONNREFUSED` on Linux for a connected socket. It
+is a report about a datagram that was not delivered somewhere, which for a
+datagram protocol is Tuesday.
+
+`Endpoint::poll` treated it as fatal and returned `Err`. **One peer that had
+gone away would stop the loop serving every other peer** — and the ordinary way
+to write that loop, which every example in this repository uses, breaks on an
+error. Keep-alives turn sending to a departed peer from a rarity into the
+normal course of events, so the feature meant to notice dead peers was the
+feature that made this reachable.
+
+`is_stale_unreachable` now names the condition, `poll` continues past it, and
+every one of the endpoint's twelve send sites goes through a `send_datagram`
+helper that does the same. Reverting either half fails a test.
+
+**Worth stating plainly**: this was reachable before keep-alives, through
+acknowledgements and retransmissions to a peer that had vanished. It had simply
+never been provoked, because nothing in the test suite kept sending to an
+address that had stopped listening. A test written for one feature found a bug
+in another, which is the argument for tests that use the thing rather than
+tests that inspect it.

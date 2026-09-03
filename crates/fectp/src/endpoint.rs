@@ -62,7 +62,8 @@ use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::{
-    is_timeout, local_capabilities, max_datagram, Error, Identity, PayloadType, Result,
+    is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
+    PayloadType, Result,
 };
 
 /// A stable handle to one connected peer.
@@ -125,6 +126,18 @@ pub enum Event {
         from: SocketAddr,
         /// Where it is now.
         to: SocketAddr,
+    },
+    /// Nothing authenticated arrived from a peer for the configured timeout,
+    /// and its session has been released.
+    ///
+    /// This says the endpoint gave up, not that the peer is provably gone.
+    /// Silence only becomes evidence when there was something to answer, so
+    /// this means what you want it to mean with
+    /// [`set_keepalive`](Endpoint::set_keepalive) on and much less without it.
+    /// The handle is dead either way; the peer must connect again.
+    PeerLost {
+        /// The handle, which no longer resolves.
+        peer: PeerId,
     },
     /// Nothing arrived before the timeout elapsed.
     Idle,
@@ -278,6 +291,8 @@ pub struct Endpoint {
     /// How long a peer may go without being sent anything, or `None` to say
     /// nothing when there is nothing to say.
     keepalive: Option<Duration>,
+    /// How long a peer may go unheard from before its session is released.
+    peer_timeout: Option<Duration>,
     next_id: u64,
 
     rx: Vec<u8>,
@@ -285,6 +300,19 @@ pub struct Endpoint {
     ack: Vec<u8>,
     scratch: Vec<u8>,
     epoch: Instant,
+}
+
+/// Sends one datagram, treating "nobody is listening there" as ordinary.
+///
+/// See [`is_stale_unreachable`]. Everything an endpoint sends goes through
+/// here, because every one of those sends can be the one that draws the
+/// report, and only the peer it was aimed at is affected.
+fn send_datagram(socket: &UdpSocket, buf: &[u8], addr: SocketAddr) -> Result<()> {
+    match socket.send_to(buf, addr) {
+        Ok(_) => Ok(()),
+        Err(e) if is_stale_unreachable(&e) => Ok(()),
+        Err(e) => Err(Error::Io(e)),
+    }
 }
 
 /// An address under test, and what has been spent testing it.
@@ -319,6 +347,15 @@ struct PeerEntry {
     /// frame at most a handful of times inside the handshake timeout, so a
     /// small allowance covers every honest case.
     handshake_reply: Option<(Vec<u8>, u8)>,
+    /// When something that authenticated was last received from this peer.
+    ///
+    /// Only authenticated frames move it. Anyone can address a UDP socket, and
+    /// a session that a stranger could hold open by sending noise at it would
+    /// have a timeout in name only — the same rule as `spoke`, for the same
+    /// reason ([D48]).
+    ///
+    /// [D48]: https://github.com/YounghyeonPark/fectp/blob/main/docs/DECISIONS.md
+    last_heard: Instant,
     /// When something was last sent to this peer.
     ///
     /// Only outbound traffic refreshes a NAT mapping, so this — not when the
@@ -384,6 +421,7 @@ impl Endpoint {
             max_peers: MAX_PEERS,
             handshake_reply: Vec::new(),
             keepalive: None,
+            peer_timeout: None,
             outbound: HashMap::new(),
             next_id: 0,
             rx: vec![0u8; size],
@@ -490,7 +528,7 @@ impl Endpoint {
             }
         };
         frame.truncate(len);
-        self.socket.send_to(&frame, addr)?;
+        send_datagram(&self.socket, &frame, addr)?;
 
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
@@ -546,6 +584,7 @@ impl Endpoint {
                 return Ok(event);
             }
             self.drive_queues()?;
+            self.drive_liveness();
             self.drive_keepalives()?;
             if let Some(event) = self.events.pop_front() {
                 return Ok(event);
@@ -578,10 +617,15 @@ impl Endpoint {
             // A keep-alive is a third thing worth waking for. Sleeping past
             // it would let a NAT mapping lapse while this endpoint sat in
             // `poll` with nothing else to do.
-            let wait = [until_retransmit, until_deadline, self.next_keepalive()]
-                .into_iter()
-                .flatten()
-                .min();
+            let wait = [
+                until_retransmit,
+                until_deadline,
+                self.next_keepalive(),
+                self.next_liveness_check(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             // A zero timeout means "block forever" to the socket layer, which
             // is the opposite of what is meant here.
             self.socket
@@ -589,6 +633,10 @@ impl Endpoint {
 
             let (n, from) = match self.socket.recv_from(&mut self.rx) {
                 Ok(v) => v,
+                // Somebody this endpoint wrote to is not listening. That is
+                // news about one peer, not a failure of the socket, and an
+                // endpoint serving a thousand others must not stop for it.
+                Err(e) if is_stale_unreachable(&e) => continue,
                 Err(e) if is_timeout(&e) => {
                     if deadline.is_none_or(|d| Instant::now() >= d) {
                         return Ok(Event::Idle);
@@ -738,14 +786,15 @@ impl Endpoint {
 
         // The frame authenticated, which is the first thing a peer does that
         // an attacker completing handshakes never does. It is what keeps this
-        // session off the eviction list.
+        // session off the eviction list, and what keeps it off the timeout.
         entry.spoke = true;
+        entry.last_heard = Instant::now();
         // It answered, so it has the handshake response and will not ask again.
         entry.handshake_reply = None;
 
         if established {
             if ack_len > 0 {
-                self.socket.send_to(&self.ack[..ack_len], from)?;
+                send_datagram(&self.socket, &self.ack[..ack_len], from)?;
                 if let Some(entry) = self.peers.get_mut(&peer_id) {
                     entry.last_sent = Instant::now();
                 }
@@ -835,7 +884,7 @@ impl Endpoint {
             probe.sent += 1;
             probe.last = now;
         }
-        self.socket.send_to(&self.ack[..len], addr)?;
+        send_datagram(&self.socket, &self.ack[..len], addr)?;
         if let Some(entry) = self.peers.get_mut(&peer_id) {
             entry.last_sent = Instant::now();
         }
@@ -933,7 +982,7 @@ impl Endpoint {
         let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
         self.handshake_reply = reply;
         let (session, sent) = written?;
-        self.socket.send_to(&self.tx[..sent], from)?;
+        send_datagram(&self.socket, &self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(session, from, zero_rtt, false);
         self.remember_reply(&event, reply);
@@ -964,7 +1013,7 @@ impl Endpoint {
         let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
         self.handshake_reply = reply;
         let (session, sent) = written?;
-        self.socket.send_to(&self.tx[..sent], from)?;
+        send_datagram(&self.socket, &self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(session, from, zero_rtt, true);
         self.remember_reply(&event, reply);
@@ -1034,6 +1083,29 @@ impl Endpoint {
     ///
     /// A limit of zero is treated as one, because an endpoint that can hold no
     /// sessions cannot do anything.
+    /// Releases a peer nothing has been heard from for `within`.
+    ///
+    /// The session is dropped and [`Event::PeerLost`] is raised. Only frames
+    /// that authenticate count as being heard, so a stranger cannot hold a
+    /// dead peer's session open by addressing the socket.
+    ///
+    /// **Silence is not evidence of death.** A peer that is alive and has
+    /// nothing to say looks exactly like one that has gone. Pair this with
+    /// [`set_keepalive`](Self::set_keepalive) and the silence means something:
+    /// the peer was asked at intervals and did not answer. Without it, this is
+    /// an idle timeout and will drop peers that are merely quiet — which is
+    /// occasionally what a caller wants, and should be what a caller chose.
+    ///
+    /// Off by default, and the default is what a sensor that wakes, reports
+    /// and sleeps for an hour gets. Memory is bounded without it:
+    /// [`MAX_PEERS`] and the eviction order already drop the longest-silent
+    /// session when room is needed.
+    ///
+    /// `None` turns it off.
+    pub fn set_peer_timeout(&mut self, within: Option<Duration>) {
+        self.peer_timeout = within;
+    }
+
     /// Sends a small frame to any peer nothing has been sent to for `every`.
     ///
     /// Off by default, and deliberately so: a battery-powered peer that wakes,
@@ -1123,7 +1195,7 @@ impl Endpoint {
             // need. Either way this is not a handshake to answer.
             return Ok(true);
         };
-        self.socket.send_to(&reply, from)?;
+        send_datagram(&self.socket, &reply, from)?;
         if let Some(entry) = self.peers.get_mut(&peer_id) {
             entry.handshake_reply = left.checked_sub(1).map(|left| (reply, left));
         }
@@ -1285,6 +1357,7 @@ impl Endpoint {
                 addr,
                 session_id,
                 filed: Instant::now(),
+                last_heard: Instant::now(),
                 last_sent: Instant::now(),
                 handshake_reply: None,
                 probe: None,
@@ -1314,7 +1387,7 @@ impl Endpoint {
                 entry
                     .peer
                     .drive_queue(now, limit, &mut self.tx, |frame| {
-                        socket.send_to(frame, addr)?;
+                        send_datagram(socket, frame, addr)?;
                         *stamp = Instant::now();
                         Ok(())
                     })?;
@@ -1351,9 +1424,46 @@ impl Endpoint {
             outbound.next_attempt = now
                 + Duration::from_millis(HANDSHAKE_RETRY_MS * u64::from(outbound.attempts));
             let (frame, addr) = (outbound.frame.clone(), outbound.addr);
-            self.socket.send_to(&frame, addr)?;
+            send_datagram(&self.socket, &frame, addr)?;
         }
         Ok(None)
+    }
+
+    /// Releases peers nothing has been heard from inside the timeout.
+    ///
+    /// Runs before the keep-alives, so a peer is never sent a challenge on the
+    /// same pass that gives up on it.
+    fn drive_liveness(&mut self) {
+        let Some(limit) = self.peer_timeout else {
+            return;
+        };
+        let now = Instant::now();
+        let lost: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, e)| now.duration_since(e.last_heard) >= limit)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in lost {
+            // The same removal as `disconnect`, so a peer given up on leaves
+            // nothing behind in either index.
+            if let Some(entry) = self.peers.remove(&id) {
+                self.routes.remove(&(entry.addr, entry.session_id));
+                self.unfile_session(entry.session_id, id);
+                self.events.push_back(Event::PeerLost { peer: id });
+            }
+        }
+    }
+
+    /// When the earliest peer timeout falls due, if any.
+    fn next_liveness_check(&self) -> Option<Duration> {
+        let limit = self.peer_timeout?;
+        let now = Instant::now();
+        self.peers
+            .values()
+            .map(|e| (e.last_heard + limit).saturating_duration_since(now))
+            .min()
     }
 
     /// Sends a keep-alive to every peer that has not been sent to recently.
@@ -1381,7 +1491,7 @@ impl Endpoint {
             let mut token = [0u8; PATH_TOKEN_LEN];
             OsRng.fill_bytes(&mut token);
             let n = entry.peer.challenge(&token, &mut self.ack)?;
-            self.socket.send_to(&self.ack[..n], addr)?;
+            send_datagram(&self.socket, &self.ack[..n], addr)?;
             if let Some(entry) = self.peers.get_mut(&id) {
                 entry.last_sent = Instant::now();
             }
@@ -1417,7 +1527,7 @@ impl Endpoint {
             entry
                 .peer
                 .drive_retransmits(now, limit, &mut self.tx, |frame| {
-                    socket.send_to(frame, addr)?;
+                    send_datagram(socket, frame, addr)?;
                     *stamp = Instant::now();
                     Ok(())
                 })?;
@@ -1439,7 +1549,7 @@ impl Endpoint {
         let n = entry
             .peer
             .seal(data, payload_type, None, None, limit, &mut self.tx)?;
-        self.socket.send_to(&self.tx[..n], addr)?;
+        send_datagram(&self.socket, &self.tx[..n], addr)?;
         entry.last_sent = Instant::now();
         Ok(())
     }
@@ -1473,7 +1583,7 @@ impl Endpoint {
             let n = entry
                 .peer
                 .seal(data, payload_type, Some(id), None, limit, &mut self.tx)?;
-            self.socket.send_to(&self.tx[..n], addr)?;
+            send_datagram(&self.socket, &self.tx[..n], addr)?;
             let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
             entry.last_sent = Instant::now();
             entry.peer.pending.push(Pending {

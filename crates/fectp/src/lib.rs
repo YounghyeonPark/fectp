@@ -119,6 +119,26 @@ pub(crate) fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
+/// Whether an error is the kernel reporting an ICMP message about an *earlier*
+/// datagram, rather than a failure of the operation being attempted.
+///
+/// A UDP socket has no connection to reset, but sending to a port with nothing
+/// behind it draws an ICMP unreachable, and the kernel hands that back on the
+/// next call — `WSAECONNRESET` on Windows, `ECONNREFUSED` on Linux for a
+/// connected socket. It says a datagram was not delivered somewhere, which for
+/// a datagram protocol is Tuesday.
+///
+/// It matters because an endpoint serving many peers is one socket. Treating
+/// this as fatal means one peer that has gone away takes down the loop serving
+/// everybody else — and keep-alives make sending to a departed peer the normal
+/// course of events rather than a rarity.
+pub(crate) fn is_stale_unreachable(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
+    )
+}
+
 
 /// How long to wait for a handshake reply before sending the opening frame again.
 ///

@@ -685,12 +685,33 @@ traffic and, on a battery, more wake-ups.
 the NAT — the side that dialled. A server that only accepts gains liveness from
 it, not reachability.
 
-Two things it does not do. It does not detect a dead peer: an unanswered
-keep-alive is not acted on, and a session with a peer that has gone away stays
-in the table until something else removes it. And on a `Connection` it only
-runs while a call is inside `recv` or `flush`, because a `Connection` has no
-thread of its own — a program that leaves one idle without reading from it
-sends nothing, and wants an `Endpoint`.
+On a `Connection` it only runs while a call is inside `recv` or `flush`,
+because a `Connection` has no thread of its own — a program that leaves one
+idle without reading from it sends nothing, and wants an `Endpoint`.
+
+### Giving up on a peer
+
+```rust
+node.set_peer_timeout(Some(Duration::from_secs(30)));
+```
+
+A peer nothing authenticated has been heard from for that long is released and
+reported as `Event::PeerLost { peer }`. The handle stops resolving; the peer
+must connect again.
+
+**This is only meaningful with keep-alives on.** Silence is not evidence of
+death — a peer that is alive and has nothing to say looks exactly like one that
+has gone. With keep-alives the peer is asked at intervals, so silence means it
+did not answer. Without them this is a plain idle timeout, and it will drop
+peers that are merely quiet. That is occasionally what you want; it should be
+what you chose.
+
+Only frames that *authenticate* count as being heard, so a stranger cannot hold
+a departed peer's session open by addressing the socket.
+
+Off by default. Memory is bounded without it: `MAX_PEERS` and the eviction
+order already drop the longest-silent session when room is needed, so a timeout
+buys prompt notice rather than safety.
 
 ## Length masking
 
