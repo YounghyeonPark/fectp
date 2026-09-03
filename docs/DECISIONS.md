@@ -2257,3 +2257,38 @@ never been provoked, because nothing in the test suite kept sending to an
 address that had stopped listening. A test written for one feature found a bug
 in another, which is the argument for tests that use the thing rather than
 tests that inspect it.
+
+## D52 — The three mechanisms tested together, not one at a time
+
+**Problem**: keep-alives ([D49](#d49--something-to-send-for-a-peer-with-nothing-to-say)),
+address migration ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown))
+and peer timeouts ([D51](#d51--giving-up-on-a-peer-and-the-bug-that-found)) were
+each built and tested on their own. The case they exist for needs all three at
+once, and nothing exercised that: a device connects, goes quiet, and has its
+NAT mapping re-created on a different port while it is saying nothing. Nothing
+in the application sends anything during it.
+
+**Decision**: `tests/interaction.rs`, with a NAT model whose mapping is expired
+on demand rather than after a fixed count of datagrams — a count is never
+reached during an idle period, which is exactly the period that matters.
+
+The session survives, follows the mapping exactly once, is not declared dead
+on the way, and is usable afterwards without being re-established. Breaking
+`settle_probe` fails it on the move; breaking `drive_liveness` fails its
+negative half.
+
+**The negative half is the more useful one.** Re-creating a mapping needs an
+outbound datagram, because that is what a NAT does — the mapping appears when
+something is sent through it. So a peer that goes quiet with **no keep-alive of
+its own** can never reveal where it now is, whatever the server does. The
+documented claim was that keep-alives are the job of the side behind the NAT;
+the test holds it to that, and requires the honest outcome, which is that the
+peer is given up on rather than held as a session that can never be written to.
+
+**What the first attempt got wrong**: the harness comment claimed the NAT
+rebound "on a timer rather than a datagram count", and the break check
+disagreed — turning off the client's keep-alive failed the test on
+*"the NAT never re-created its mapping; nothing was tested"* rather than on
+anything about the session. The model was right about NATs and the comment was
+wrong about the model, and the control assertion was hiding the real outcome
+behind it. Both halves are now separate tests that say what they mean.
