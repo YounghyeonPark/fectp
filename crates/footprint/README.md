@@ -55,6 +55,6 @@ Flash is half the question. For the other half:
 cargo run -p fectp-core --example sizes
 ```
 
-294 bytes of session state, 1,334 with the reliable-delivery queue, plus the
+358 bytes of session state, 1,406 with the reliable-delivery queue, plus the
 buffers the caller supplies. The core allocates nothing, so that is the whole
 answer.

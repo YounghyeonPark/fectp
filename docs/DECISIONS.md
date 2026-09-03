@@ -780,10 +780,15 @@ nothing that matters is discarded.
 | the same image with the protocol removed | 36 bytes |
 | **FECTP** | **23,608 bytes (23.1 KiB)** |
 
-The estimate was five times too pessimistic. RAM is smaller still: 294 bytes of
-session state, or 1,334 with the reliable-delivery queue, plus whatever buffers
+The estimate was five times too pessimistic. RAM is smaller still: 358 bytes of
+session state, or 1,406 with the reliable-delivery queue, plus whatever buffers
 the caller supplies — about 3.7 KiB for a full-duplex reliable session at the
 default frame size (`cargo run -p fectp-core --example sizes`).
+
+Both figures grew by 64 bytes when keys started being replaced
+([D50](#d50--one-key-does-not-last-a-whole-session)): a receiver keeps the
+previous generation's key, and each direction remembers which generation it is
+on.
 
 **Decision**: the premise holds, and the estimate is replaced by the
 measurement. On a Cortex-M4 with 256 KiB of flash and 64 KiB of RAM — a small
@@ -1143,8 +1148,8 @@ operations and the table entry are spent either way.
 Measured rather than assumed: a single-threaded attacker on loopback files
 **34 sessions a second** and never sends a byte. That is a floor — it politely
 waits for each reply, where a real flood would not. Nothing bounded the table,
-and nothing expired an idle session, so at 294 bytes of state each this fills
-the 32 KiB of the microcontroller this protocol is for in about four seconds.
+and nothing expired an idle session, so at 358 bytes of state each this fills
+the 32 KiB of the microcontroller this protocol is for in under three seconds.
 
 **Decision**: two bounds, because one is not enough.
 

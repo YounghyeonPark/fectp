@@ -374,7 +374,7 @@ messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
 277 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
-**23.1 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
+**23.1 KiB of flash** and needs 358 bytes of session state — 1,406 with reliable
 delivery — plus the caller's buffers.
 
 ---

@@ -144,7 +144,7 @@ const HANDSHAKE_ATTEMPTS: u8 = 4;
 /// byte — and that is a floor, since it politely waits for each reply.
 ///
 /// Without a bound that is unbounded memory, and on the microcontroller this
-/// protocol is for, 294 bytes of session state each fills 32 KiB in about four
+/// protocol is for, 358 bytes of session state each fills 32 KiB in under three
 /// seconds. The bound is generous for a real server and still finite.
 ///
 /// [`Endpoint::set_max_peers`] overrides it. A microcontroller wants far fewer
