@@ -48,7 +48,7 @@ send data encrypted, right now, and may be running on 32 KiB of RAM.**
 | **Fast** | Data travels in the **very first packet** — no round trips spent agreeing on keys. |
 | **Encrypted** | Noise, always. Two modes, differing in what you must share beforehand rather than in how you use them. |
 | **Compressed** | It knows what your data *is*, so it compresses structured binary where gzip and Zstandard cannot. |
-| **Small** | The core is `no_std`, allocates nothing, and measures **22 KiB** of flash. |
+| **Small** | The core is `no_std`, allocates nothing, and measures **23 KiB** of flash. |
 
 Delivery is per-message: fire-and-forget by default, guaranteed when you ask.
 
@@ -62,7 +62,7 @@ transport for software you control on both ends. See
 flowchart TB
     A["Your application"]
     B["fectp · needs std<br/>Connection · Endpoint · Zstandard"]
-    C["fectp-core · no_std · 22 KiB<br/>Noise handshake · framing<br/>replay window · reliability"]
+    C["fectp-core · no_std · 23 KiB<br/>Noise handshake · framing<br/>replay window · reliability"]
     D["Transport trait<br/>UDP, or a link you supply"]
     A --> B --> C --> D
 ```
@@ -358,7 +358,8 @@ records what each one would cost to change.
 replay protection, reorder tolerance, capability negotiation, per-message
 reliable delivery, messages split across frames, congestion control, session
 resumption, many peers on one socket, outbound dialling on that same socket,
-two security modes, address migration, optional NAT keep-alive, optional
+two security modes, address migration, key replacement within a session,
+optional NAT keep-alive, optional
 length-masking padding, typed payload codecs, optional Zstandard compression.
 
 **Not built:** ordered delivery, path MTU discovery, peer discovery and NAT
@@ -373,7 +374,7 @@ messages outright while 179 tests passed, which is the honest measure of what
 testing alone catches.
 
 277 tests pass. Linked for `thumbv7em-none-eabihf`, the whole protocol costs
-**22.0 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
+**23.1 KiB of flash** and needs 294 bytes of session state — 1,334 with reliable
 delivery — plus the caller's buffers.
 
 ---

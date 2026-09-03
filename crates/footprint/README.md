@@ -17,9 +17,9 @@ cargo build --release --features baseline && python size.py   # the same image, 
 
 | | flash |
 |---|---|
-| full protocol | 22,614 bytes |
+| full protocol | 23,644 bytes |
 | baseline | 36 bytes |
-| **FECTP** | **22,578 bytes (22.0 KiB)** |
+| **FECTP** | **23,608 bytes (23.1 KiB)** |
 
 The estimate was five times too pessimistic.
 

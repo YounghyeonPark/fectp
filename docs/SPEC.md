@@ -834,6 +834,72 @@ this section says; validation does not change that, and is not meant to. What
 it removes is the ability to point the session at a **third party** — an
 address the attacker does not control and cannot answer for.
 
+### 5.9 Key replacement
+
+A session's keys are replaced as its sequence counter advances. Nothing is
+signalled and nothing is negotiated: **which key a frame uses follows from the
+sequence number in its own header**, so both peers compute it from the same
+value and cannot disagree about it.
+
+```
+generation = sequence / REKEY_INTERVAL
+```
+
+`REKEY_INTERVAL` is 65,536. Generation 0 uses the key the handshake produced.
+Each generation after that is derived from the one before with the Noise
+`REKEY` function:
+
+```
+REKEY(k) = first 32 bytes of ENCRYPT(k, 2^64-1, zerolen, zeros[32])
+```
+
+The two directions are independent: each side derives its send key from its own
+counter, and its receive key from the counter in the frame in front of it.
+
+**The counter itself is never reset.** It is the nonce (§2.3), and a nonce
+reused under any key would be fatal; each generation therefore covers a
+disjoint span of nonce values. A sender that reaches 2^64 − 1 MUST terminate the
+session (§2.3) — replacing keys does not lift that.
+
+#### 5.9.1 What this is for, and what it is not
+
+This is not required for the safety of ChaCha20-Poly1305, which is sound far
+past 65,536 frames. It bounds what one key is worth. An attacker who extracts a
+key from a device holds the traffic since the last replacement; everything
+earlier was encrypted under keys that no longer exist anywhere, because
+`REKEY` is one-way and the old key is destroyed when it is replaced.
+
+It does **not** protect traffic sent *after* the compromise, and it does not
+help if the peer's long-term identity key is taken — that yields new sessions,
+not old ones.
+
+#### 5.9.2 What a receiver does
+
+A receiver keeps the key for the generation it is on, and the one before it.
+
+- A frame in the current generation opens with the current key.
+- A frame one generation back opens with the retained key. This is what lets
+  frames reordered across a boundary arrive; the replay window (§5.1) is
+  narrower than a generation, so the two never disagree about a frame's fate.
+- A frame more than one generation back MUST be refused. That key is gone,
+  which is the point of replacing it.
+- A frame in a later generation is opened with a key derived forward from the
+  current one. **A receiver MUST bound how far forward it will derive** and
+  SHOULD allow at least 4 generations; beyond that the frame MUST be refused
+  without deriving anything.
+
+**Nothing about the session may change until the frame authenticates.** The
+sequence number is in the clear, so anyone can name any generation; a receiver
+that adopted a derived key before checking the tag would discard the key
+actually in use, and a stranger able to guess a session identifier could end
+any session with one datagram. A derived key is a candidate until the tag
+verifies, and only then replaces the current one.
+
+A jump of more than one generation means the peer sent at least 65,536 frames
+that all went missing. A receiver that catches up across such a gap MUST NOT
+retain a key for the generation it skipped: it never derived one, and holding a
+key it cannot account for would widen the window it is meant to be closing.
+
 ## 6. Payload coding
 
 When `COMPRESSED` is set, a 4-byte codec header precedes the body at the
@@ -1022,6 +1088,9 @@ A conforming implementation SHOULD:
 | `CAPS_LEN` | 8 |
 | Data-frame overhead (header + tag) | 30 |
 | `PATH_TOKEN_LEN` | 8 |
+| `REKEY_INTERVAL` | 65536 |
+| Generations a receiver derives forward | 4 (minimum) |
+| Generations a receiver retains | 2 (current and previous) |
 | `PathChallenge` / `PathResponse` frame | 38 |
 | `CODEC_HEADER_LEN` | 4 |
 | `PAD_BLOCK` | 64 |
@@ -1088,7 +1157,6 @@ These are absent by omission and remain to be defined:
   batching algorithm is defined.
 - **Ticket expiry.** Tickets are bounded in number but carry no lifetime;
   a responder decides for itself when to forget one.
-- **Rekeying.** A session ends at counter exhaustion rather than rekeying.
 - **Path MTU discovery.** Frame size comes from `max_frame_size` alone.
 - **Key distribution.** Obtaining the responder's static public key is out of
   scope. So is distributing the first ticket, which falls out of the full

@@ -198,6 +198,50 @@ impl Default for ReplayWindow {
 /// Bytes a data frame adds on top of its payload: header plus AEAD tag.
 pub const DATA_OVERHEAD: usize = HEADER_LEN + TAGLEN;
 
+/// Frames encrypted under one key before it is replaced.
+///
+/// A session's key is not replaced because ChaCha20-Poly1305 needs it to be —
+/// it is safe far past this — but to bound what one key is worth. An attacker
+/// who takes a key off a device holds only the traffic since the last
+/// replacement; everything before it was encrypted under keys that no longer
+/// exist anywhere. That is the concrete threat for a fleet of microcontrollers,
+/// where extracting a key means having the device in hand.
+///
+/// 65,536 frames is about 78 MB at the default frame ceiling. A sensor sending
+/// ten frames a second replaces its key roughly every two hours; a stream
+/// saturating a gigabit link does it a few times a second, and each replacement
+/// is one ChaCha20 block.
+pub const REKEY_INTERVAL: u64 = 1 << 16;
+
+/// A receiver keeps the current key and one before it, which is enough only
+/// because a frame cannot pass the replay window while being more than one
+/// generation behind. Enforced here rather than asserted in a test: if these
+/// two ever invert, reordering would start losing frames the specification
+/// says must open, and the crate should not build.
+const _: () = assert!(
+    REPLAY_WINDOW < REKEY_INTERVAL,
+    "the replay window must be narrower than a key's lifetime"
+);
+
+/// Generations a receiver will derive forward on the strength of one frame.
+///
+/// A frame's generation is read from its sequence number, which is in the
+/// clear, so anyone can claim any generation. This bounds the derivation that
+/// claim can buy — and the claim buys nothing else, because no state changes
+/// until the frame authenticates.
+///
+/// One generation ahead means the peer sent 65,536 frames that all went
+/// missing. Four is generous for a real path and cheap for a forged one.
+const MAX_REKEY_LOOKAHEAD: u64 = 4;
+
+/// Which key in the chain a frame belongs to.
+///
+/// Both sides compute this from the same sequence number, so they cannot
+/// disagree about it and nothing has to be signalled or agreed.
+const fn generation_of(sequence: u64) -> u64 {
+    sequence / REKEY_INTERVAL
+}
+
 /// Bytes of unpredictable token in a path challenge.
 ///
 /// The token only has to be unguessable for the lifetime of one probe, which
@@ -235,6 +279,14 @@ pub struct Opened {
 pub struct Session {
     send: CipherState,
     recv: CipherState,
+    /// The key one generation behind [`Session::recv`].
+    ///
+    /// Kept only so that frames reordered across a boundary still open. Two
+    /// generations back is gone, which is the point.
+    recv_prev: Option<CipherState>,
+    /// Which key in the chain each direction is on.
+    send_generation: u64,
+    recv_generation: u64,
     session_id: u32,
     send_seq: u64,
     replay: ReplayWindow,
@@ -257,6 +309,9 @@ impl Session {
             send,
             recv,
             session_id,
+            recv_prev: None,
+            send_generation: 0,
+            recv_generation: 0,
             send_seq: 0,
             replay: ReplayWindow::new(),
             peer_caps,
@@ -451,6 +506,15 @@ impl Session {
             return Err(Error::NonceExhausted);
         }
 
+        // The sequence number this frame will carry decides its key, so the
+        // receiver reaches the same conclusion from the header alone.
+        let generation = generation_of(self.send_seq);
+        while self.send_generation < generation {
+            // The old key is dropped here, and `CipherState` zeroizes on drop.
+            self.send = self.send.rekeyed()?;
+            self.send_generation += 1;
+        }
+
         let mut flags = flags;
         let id_len = if message_id.is_some() {
             flags |= FLAG_RELIABLE;
@@ -544,8 +608,35 @@ impl Session {
         // authentic, so a forged sequence number cannot advance it.
         self.replay.check(header.sequence)?;
 
+        // Which key opens this frame follows from its sequence number. The
+        // number is in the clear, so a forged frame can name any generation —
+        // and must be able to buy nothing with the claim. A key that has to be
+        // derived is derived into a local, used to check the frame, and only
+        // adopted below once the tag has verified.
+        let generation = generation_of(header.sequence);
+        let ahead = generation.saturating_sub(self.recv_generation);
+        if ahead > MAX_REKEY_LOOKAHEAD {
+            return Err(Error::SequenceTooFarAhead);
+        }
+        let candidate = if ahead > 0 {
+            Some(self.recv.rekeyed_by(ahead)?)
+        } else {
+            None
+        };
+        let cipher = match &candidate {
+            Some(next) => next,
+            None if generation == self.recv_generation => &self.recv,
+            // One generation back is kept for frames reordered across a
+            // boundary. Anything older was encrypted under a key that no
+            // longer exists here.
+            None if generation + 1 == self.recv_generation => {
+                self.recv_prev.as_ref().ok_or(Error::Decrypt)?
+            }
+            None => return Err(Error::Decrypt),
+        };
+
         let (hdr, body) = frame.split_at_mut(HEADER_LEN);
-        let pt_len = self.recv.decrypt_at(hdr, header.sequence, body)?;
+        let pt_len = cipher.decrypt_at(hdr, header.sequence, body)?;
 
         // Peel the prefixes in the order they were written, then shift the
         // payload down so callers always find it at `HEADER_LEN`, whatever the
@@ -609,6 +700,20 @@ impl Session {
             || header.flags != 0)
         {
             return Err(Error::BadHeader);
+        }
+
+        // Authenticated. Now, and only now, the session moves on.
+        if let Some(next) = candidate {
+            self.recv_prev = if ahead == 1 {
+                Some(core::mem::replace(&mut self.recv, next))
+            } else {
+                // More than one generation was skipped, so the key for the
+                // generation just behind this one was never derived. Better to
+                // hold none than to hold one that is not what it claims.
+                self.recv = next;
+                None
+            };
+            self.recv_generation = generation;
         }
 
         self.replay.commit(header.sequence);
@@ -1240,6 +1345,165 @@ mod hostile_peer {
                 "a challenge flagged {flag:#04x} must be refused"
             );
         }
+    }
+
+    /// Drives `frames` frames from `a` to `b`, checking each one arrives.
+    fn carry(a: &mut Session, b: &mut Session, frames: u64) {
+        let mut wire = [0u8; 128];
+        for i in 0..frames {
+            let payload = (i as u32).to_le_bytes();
+            let n = a.seal(&payload, 0, &mut wire).expect("seal");
+            let opened = b.open(&mut wire[..n]).expect("open");
+            assert_eq!(
+                &wire[HEADER_LEN..HEADER_LEN + opened.len],
+                &payload,
+                "frame {i} did not survive the trip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_crosses_a_rekey_boundary() {
+        let (mut client, mut server) = connect();
+        // Past the first boundary and a little way into the next generation,
+        // so the crossing is inside the run rather than at the end of it.
+        carry(&mut client, &mut server, REKEY_INTERVAL + 64);
+    }
+
+    #[test]
+    fn frames_reordered_across_a_boundary_still_open() {
+        let (mut client, mut server) = connect();
+        carry(&mut client, &mut server, REKEY_INTERVAL - 1);
+
+        // The last frame of one generation, held back.
+        let mut held = [0u8; 128];
+        let held_len = client.seal(b"before", 0, &mut held).expect("seal");
+
+        // The first frames of the next generation overtake it.
+        let mut wire = [0u8; 128];
+        let n = client.seal(b"after", 0, &mut wire).expect("seal");
+        let opened = server.open(&mut wire[..n]).expect("the new generation opens");
+        assert_eq!(&wire[HEADER_LEN..HEADER_LEN + opened.len], b"after");
+
+        // And the straggler still opens, under the key kept for exactly this.
+        let opened = server
+            .open(&mut held[..held_len])
+            .expect("a frame reordered across the boundary must still open");
+        assert_eq!(&held[HEADER_LEN..HEADER_LEN + opened.len], b"before");
+    }
+
+    #[test]
+    fn a_frame_claiming_a_distant_generation_is_refused() {
+        // The generation is read from the sequence number, which is in the
+        // clear, so anyone can claim any generation. Deriving forward to reach
+        // it must be bounded, or a datagram buys unbounded work.
+        let (mut client, mut server) = connect();
+        let mut wire = [0u8; 128];
+        let n = client.seal(b"hello", 0, &mut wire).expect("seal");
+
+        // The control: untouched, it opens.
+        let mut honest = wire;
+        server.open(&mut honest[..n]).expect("the honest frame opens");
+
+        let (mut client, mut server) = connect();
+        let n = client.seal(b"hello", 0, &mut wire).expect("seal");
+        let far = (MAX_REKEY_LOOKAHEAD + 1) * REKEY_INTERVAL;
+        wire[6..14].copy_from_slice(&far.to_le_bytes());
+
+        // The *reason* matters, not the outcome. Such a frame fails to open
+        // whether or not the bound exists — it was sealed under another key —
+        // so asserting only that it is refused tests nothing. What the bound
+        // prevents is the work of walking there, and the way to see that is
+        // that the walk never starts.
+        assert_eq!(
+            server.open(&mut wire[..n]),
+            Err(Error::SequenceTooFarAhead),
+            "a frame more than {MAX_REKEY_LOOKAHEAD} generations ahead must be \
+             refused before any key is derived for it"
+        );
+    }
+
+    #[test]
+    fn a_generation_may_be_skipped_entirely() {
+        // The other half of the bound: within it, a jump is legitimate and
+        // must work. Losing 65,536 frames in a row is not a reason to end a
+        // session, and a receiver that could only ever advance one generation
+        // at a time would never recover from it.
+        let (mut client, mut server) = connect();
+        carry(&mut client, &mut server, 1);
+
+        // The sender runs on alone, far enough to change key twice.
+        let mut wire = [0u8; 128];
+        for _ in 0..2 * REKEY_INTERVAL {
+            client.seal(b"lost", 0, &mut wire).expect("seal");
+        }
+
+        let n = client.seal(b"found", 0, &mut wire).expect("seal");
+        let opened = server
+            .open(&mut wire[..n])
+            .expect("a receiver must catch up across a skipped generation");
+        assert_eq!(&wire[HEADER_LEN..HEADER_LEN + opened.len], b"found");
+    }
+
+    #[test]
+    fn a_forged_frame_naming_a_future_generation_changes_nothing() {
+        // The security property of deriving the key from the sequence number:
+        // the claim is free to make, so it must buy nothing. A receiver that
+        // adopted the derived key before checking the tag would throw away the
+        // key actually in use, and a stranger could end any session it could
+        // name.
+        let (mut client, mut server) = connect();
+        let mut wire = [0u8; 128];
+        let n = client.seal(b"first", 0, &mut wire).expect("seal");
+        let opened = server.open(&mut wire[..n]).expect("open");
+        assert_eq!(&wire[HEADER_LEN..HEADER_LEN + opened.len], b"first");
+
+        // A frame that names a future generation and authenticates as nothing.
+        let mut forged = [0u8; 128];
+        forged[..HEADER_LEN].copy_from_slice(&wire[..HEADER_LEN]);
+        forged[6..14].copy_from_slice(&(2 * REKEY_INTERVAL).to_le_bytes());
+        assert!(
+            server.open(&mut forged[..n]).is_err(),
+            "a forged frame must not open"
+        );
+
+        // The session is untouched by it.
+        let n = client.seal(b"second", 0, &mut wire).expect("seal");
+        let opened = server
+            .open(&mut wire[..n])
+            .expect("a forged frame must not disturb the session");
+        assert_eq!(&wire[HEADER_LEN..HEADER_LEN + opened.len], b"second");
+    }
+
+    #[test]
+    fn the_key_chain_moves_forward() {
+        // Each link differs from the last, and from the one before it: a chain
+        // rather than a fixed point. Without this a "rekey" could be the
+        // identity and every test above would still pass.
+        let mut state = CipherState::new();
+        state.initialize_key([0x2A; 32]);
+
+        let first = state.rekeyed().expect("rekey");
+        let second = first.rekeyed().expect("rekey");
+
+        let mut a = [0u8; 64];
+        let mut b = [0u8; 64];
+        let mut c = [0u8; 64];
+        let ad = [0u8; 0];
+        state.encrypt_at(&ad, 7, &mut a, 32).expect("encrypt");
+        first.encrypt_at(&ad, 7, &mut b, 32).expect("encrypt");
+        second.encrypt_at(&ad, 7, &mut c, 32).expect("encrypt");
+
+        assert_ne!(a, b, "the first link must differ from the key it came from");
+        assert_ne!(b, c, "the second link must differ from the first");
+        assert_ne!(a, c, "and must not return to where it started");
+
+        // And it is a function, not a source of randomness: the same key
+        // derives the same next key, or the two sides would diverge.
+        let again = state.rekeyed().expect("rekey");
+        let mut d = [0u8; 64];
+        again.encrypt_at(&ad, 7, &mut d, 32).expect("encrypt");
+        assert_eq!(b, d, "deriving twice from one key must give one answer");
     }
 
     fn connect() -> (Session, Session) {

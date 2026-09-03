@@ -57,6 +57,45 @@ impl CipherState {
         self.nonce = nonce;
     }
 
+    /// Derives the next key in the chain, per the Noise `REKEY` function.
+    ///
+    /// `REKEY(k)` is `ENCRYPT(k, 2^64-1, zerolen, zeros)` truncated to
+    /// `KEYLEN`, where `zeros` is 32 zero bytes. It is one-way: holding the
+    /// result says nothing about the key it came from, which is the whole
+    /// reason to replace a key that is still working.
+    ///
+    /// Returns a fresh `CipherState` rather than mutating, so a caller can
+    /// derive a candidate key, use it to check a frame, and only then decide
+    /// whether to keep it. Nothing about the session should change on the word
+    /// of a frame that has not authenticated.
+    pub fn rekeyed(&self) -> Result<Self> {
+        let key = self.key.as_ref().ok_or(Error::NotReady)?;
+        let mut scratch = [0u8; KEYLEN + TAGLEN];
+        let aead = ChaCha20Poly1305::new(Key::from_slice(key));
+        let (body, tag) = scratch.split_at_mut(KEYLEN);
+        let computed = aead
+            .encrypt_in_place_detached(&Self::build_nonce(MAX_NONCE), &[], body)
+            .map_err(|_| Error::Decrypt)?;
+        tag.copy_from_slice(&computed);
+
+        let mut next = [0u8; KEYLEN];
+        next.copy_from_slice(&scratch[..KEYLEN]);
+        scratch.zeroize();
+
+        let mut state = Self::new();
+        state.initialize_key(next);
+        Ok(state)
+    }
+
+    /// Derives `steps` keys along the chain, keeping none of the intermediates.
+    pub fn rekeyed_by(&self, steps: u64) -> Result<Self> {
+        let mut state = self.rekeyed()?;
+        for _ in 1..steps {
+            state = state.rekeyed()?;
+        }
+        Ok(state)
+    }
+
     /// Builds the 96-bit ChaCha20-Poly1305 nonce for `counter`.
     ///
     /// Noise specifies 32 zero bits followed by the 64-bit counter in

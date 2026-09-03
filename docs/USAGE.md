@@ -767,7 +767,7 @@ one for `thumbv7em-none-eabihf` with LTO and `--gc-sections`:
 
 | | |
 |---|---|
-| flash | **22.0 KiB**, handshake, session and codec included |
+| flash | **23.1 KiB**, handshake, session and codec included |
 | RAM, session state | 294 bytes, or 1,334 with reliable delivery |
 | RAM, buffers | the caller's — 2,400 bytes for send and receive at the default frame size |
 

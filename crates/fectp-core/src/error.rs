@@ -18,8 +18,19 @@ pub enum Error {
     /// AEAD authentication failed: the frame was forged, corrupted, or
     /// encrypted under a different key.
     Decrypt,
-    /// The 64-bit nonce counter is exhausted. The session must be rekeyed.
+    /// The 64-bit sequence counter is exhausted and the session must end.
+    ///
+    /// Keys are replaced as the counter advances, but the counter itself is
+    /// never reset — it is the nonce, and a nonce reused under any key would
+    /// be fatal. There is nowhere to go from here but a new session.
     NonceExhausted,
+    /// The frame's sequence number is so far ahead that reaching the key it
+    /// claims would cost more than reading the frame is worth.
+    ///
+    /// Separate from [`Error::Decrypt`] because the frame is refused before
+    /// any attempt to open it, and because a caller reading a log should be
+    /// able to tell "this did not authenticate" from "this asked for work".
+    SequenceTooFarAhead,
     /// A handshake method was called out of order.
     HandshakeState,
     /// The frame carries an unrecognised protocol version.
@@ -43,6 +54,7 @@ impl core::fmt::Display for Error {
             Error::MessageTooShort => "message too short",
             Error::Decrypt => "decryption failed",
             Error::NonceExhausted => "nonce counter exhausted",
+            Error::SequenceTooFarAhead => "sequence number too far ahead",
             Error::HandshakeState => "handshake called out of order",
             Error::UnsupportedVersion => "unsupported protocol version",
             Error::BadHeader => "malformed header",

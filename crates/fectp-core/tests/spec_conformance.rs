@@ -22,7 +22,8 @@ use fectp_core::noise::{
 };
 use fectp_core::session::{
     Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
-    CAPS_LEN, CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, PAD_BLOCK, REPLAY_WINDOW, TICKET_ID_LEN,
+    CAPS_LEN, CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
+    TICKET_ID_LEN,
 };
 
 /// SPEC §2 — cipher suite sizes.
@@ -321,6 +322,18 @@ fn ticket_ids_are_derived_from_their_keys() {
 fn data_frame_overhead() {
     assert_eq!(DATA_OVERHEAD, HEADER_LEN + TAGLEN);
     assert_eq!(DATA_OVERHEAD, 30, "SPEC §8 constants table");
+}
+
+/// SPEC §5.9, §8 — how long one key lasts, and why keeping two is enough.
+#[test]
+fn key_replacement_interval() {
+    assert_eq!(REKEY_INTERVAL, 65536, "SPEC §8 constants table");
+
+    // The specification's reason for two retained keys being enough — that a
+    // frame cannot pass the replay window while more than one generation
+    // behind — is enforced in `session.rs` as a `const` assertion, so the
+    // crate does not build if it stops holding. `REPLAY_WINDOW` itself is
+    // pinned by `replay_window_size` above.
 }
 
 /// SPEC §3.1 — the type ids 10 to 13 are reserved, not merely unused.

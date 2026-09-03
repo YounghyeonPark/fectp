@@ -568,7 +568,7 @@ These are unimplemented, not overlooked.
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
-| **Rekeying** | A session ends after 2^64 frames. | Not reachable in practice, but the error path exists (`Error::NonceExhausted`). |
+| **Counter exhaustion ends a session** | A session ends after 2^64 frames. Keys are replaced along the way ([D50](#d50--one-key-does-not-last-a-whole-session)), but the counter is never reset — it is the nonce. | Not reachable in practice: at a million frames a second it is half a million years. The error path exists (`Error::NonceExhausted`) because a bound with no code behind it is a comment. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
@@ -776,9 +776,9 @@ nothing that matters is discarded.
 
 | | flash |
 |---|---|
-| full protocol | 22,614 bytes |
+| full protocol | 23,644 bytes |
 | the same image with the protocol removed | 36 bytes |
-| **FECTP** | **22,578 bytes (22.0 KiB)** |
+| **FECTP** | **23,608 bytes (23.1 KiB)** |
 
 The estimate was five times too pessimistic. RAM is smaller still: 294 bytes of
 session state, or 1,334 with the reliable-delivery queue, plus whatever buffers
@@ -1791,7 +1791,7 @@ result that is worse on two of the three datasets it was aimed at.
 
 **What the measurement did establish**: the no-Zstandard profile gains the full
 third, because there the transform output *is* the wire bytes. That is the
-constrained peer — the one with 22 KiB of flash and the least room for a second
+constrained peer — the one with 23 KiB of flash and the least room for a second
 decoder, which is the wrong place to spend complexity, but it is a real number
 and the case stays open rather than closed.
 
@@ -2105,3 +2105,85 @@ away stays in the table until eviction or `disconnect` removes it. An idle
 timeout is a separate decision with its own trade — how long to wait before
 declaring a peer gone is not something a transport can pick for an application
 — and is not made here.
+
+## D50 — One key does not last a whole session
+
+**Problem**: a session used one key from its handshake to its end. With
+migration ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown))
+and keep-alives ([D49](#d49--something-to-send-for-a-peer-with-nothing-to-say))
+now keeping sessions alive across address changes and quiet periods, "its end"
+moved a long way out.
+
+**Not a cryptographic necessity.** ChaCha20-Poly1305 is sound far past any
+volume this protocol will put through one key, and the 64-bit counter will not
+run out. This is about what one key is *worth*. The threat this project has
+written down since D15 is a device in an attacker's hands: for pre-shared-key
+mode, "extracting it from any one device compromises all sessions using it,
+including recorded past ones". A key taken today should not decrypt traffic
+recorded last week.
+
+**Decision**: replace the key every 65,536 frames, deriving each from the last
+with the Noise `REKEY` function, and **read which key a frame uses from the
+sequence number already in its header**.
+
+```
+generation = sequence / REKEY_INTERVAL
+```
+
+That last part is the whole design. Nothing is signalled, nothing is
+negotiated, there is no new frame type, and there is no round trip. Both sides
+apply the same function to the same number, so **they cannot disagree** — which
+is the failure mode that makes signalled rekeying unpleasant, because a
+disagreement is a session that stops working for no visible reason.
+
+The counter is not reset. It is the nonce, and each generation therefore covers
+a disjoint span of nonce values — reuse is impossible by construction rather
+than by care. Exhaustion at 2^64 still ends the session; replacing keys does
+not lift that, and `Error::NonceExhausted` said otherwise until this change.
+
+### The part that had to be got right
+
+A frame's generation is read from a field in the clear, so anyone can claim any
+generation. **Nothing may change until the tag verifies.** A receiver that
+adopted a derived key before checking would throw away the key actually in use,
+and a stranger who guessed a session identifier could end any session with one
+datagram — a worse denial of service than the one the whole D32 bound exists to
+prevent. A derived key is a candidate held in a local until the frame opens.
+
+Deriving forward is also bounded, at 4 generations, because a forged sequence
+number of 2^64 would otherwise buy 2^48 key derivations from one datagram.
+
+The bound needed a test that could see it, and the first one could not: a frame
+claiming a distant generation fails to open whether or not the bound exists,
+because it was sealed under another key. Asserting `is_err()` tested nothing.
+`Error::SequenceTooFarAhead` exists so the refusal can be told apart from a
+failure to authenticate — the test asserts the reason, not the outcome.
+
+**Two keys are kept, not one.** A frame reordered across a boundary must still
+open. This is sufficient only because the replay window (64) is far narrower
+than a generation (65,536), so a frame that passes the window cannot be more
+than one generation behind; `spec_conformance.rs` asserts that relationship
+rather than leaving it as a thing someone once knew.
+
+**A skipped generation keeps no previous key.** Catching up across a gap of
+more than 65,536 lost frames means the key for the generation just behind was
+never derived. Holding none is right; deriving one to hold would widen the very
+window this is closing.
+
+### What it costs
+
+**1,030 bytes of flash**, taking the `no_std` core from 22,578 to 23,608 bytes
+— 22.0 KiB to 23.1 KiB, or 9% of a 256 KiB part either way. Per frame it is a
+shift and a comparison; the derivation itself happens once in 65,536 frames and
+is one ChaCha20 block.
+
+That is the honest price. It is not nothing on a microcontroller, and it buys a
+property that only matters if the device is physically taken — which is exactly
+the threat the pre-shared-key mode has always been documented as weak against.
+
+### What it does not do
+
+It does not protect traffic sent after a compromise, and it does not help if
+the long-term identity key is taken: that yields new sessions, not old ones.
+It is forward secrecy *within* a session, added to the forward secrecy
+*between* sessions the handshake already provides.
