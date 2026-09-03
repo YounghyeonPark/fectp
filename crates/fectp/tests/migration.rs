@@ -145,17 +145,31 @@ impl Rebinding {
             });
         }
 
-        // Server to client, on both back ports.
-        for back in ports {
+        // Server to client. The old mapping stops carrying anything the
+        // moment it is replaced, as a real one does.
+        //
+        // This is not a detail. While the old path still answered, the server
+        // could keep replying to the address it was supposed to have left and
+        // the client would hear it — so the exchange after the rebind
+        // succeeded whether or not anything migrated, and the only assertion
+        // that noticed was the one counting moves, which then raced. The same
+        // flaw was found and fixed in the benchmark relay first; leaving it
+        // here made this test weaker than the measurement it mirrors.
+        for (index, back) in ports.into_iter().enumerate() {
             let front = front.try_clone().expect("clone");
             let flag = Arc::clone(&stop);
             let learn = Arc::clone(&client);
+            let moved = Arc::clone(&rebound);
+            let expires = index == 0;
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
                 while !flag.load(Ordering::Relaxed) {
                     let Ok(n) = back.recv(&mut buf) else {
                         continue;
                     };
+                    if expires && moved.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let target = *learn.lock().expect("lock");
                     if let Some(target) = target {
                         let _ = front.send_to(&buf[..n], target);

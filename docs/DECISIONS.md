@@ -2011,6 +2011,20 @@ showed up on the revert check that
 [FIXING-A-BUG.md](FIXING-A-BUG.md) exists to insist on. The forgery now takes
 the session identifier from the capture and writes a `Data` header of its own.
 
+**A test that did not require the thing it was named for.** CI found this one,
+on Windows, four commits later: `a_peer_that_changes_address_keeps_its_session`
+reported zero moves while its exchange-after-the-move assertion passed. The
+relay rebound the client to a second source port but let the first port go on
+carrying replies, so the server could answer on the address it was supposed to
+have left. The data frame from the new address is delivered by design (§5.8.3
+step 1), the echo went back the old way, and the exchange succeeded with
+nothing migrated. Only the move count noticed, and that raced. The relay now
+drops the old mapping when it rebinds, as a real NAT does, so the exchange
+itself fails without a migration — breaking `settle_probe` moves the failure
+from the count to the exchange. The same flaw had already been found and fixed
+in the *benchmark* relay, and written up in BENCHMARKS.md §10, before being
+left in place here.
+
 **And a flake, found by running the new tests thirty times instead of once.**
 One migration test reported a failed migration about once in thirty runs. It
 was not the protocol: the same failure rate appeared with the replay removed
