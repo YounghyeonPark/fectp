@@ -206,11 +206,33 @@ fn round_trip_latency() {
     println!();
     note("The control is the same measurement as the first row, run last: it moved");
     note(&format!(
-        "{:.0}%. Treat any difference smaller than that as noise rather than result —",
+        "{:.0}%. Treat any difference smaller than that as noise rather than result.",
         noise.abs()
     ));
-    note("which on this host is most of the gap between raw UDP and FECTP. The TLS");
-    note("figure is the only one in this table that clearly clears the bar.");
+
+    // Which rows clear the bar is a property of this run, not of the section.
+    // It used to be written out as fixed text — true when the control drifted
+    // 11%, quietly false on a quiet machine, and printed either way. A
+    // benchmark that states its conclusion regardless of what it measured is
+    // worse than one that states none.
+    let bar = noise.abs();
+    let fectp_over = (fectp_stats.median_us() / base - 1.0) * 100.0;
+    let tls_over = (tls_stats.median_us() / base - 1.0) * 100.0;
+    let clears = |over: f64| over.abs() > bar;
+    match (clears(fectp_over), clears(tls_over)) {
+        (true, true) => note("Both FECTP and TLS clear it on this run."),
+        (false, true) => {
+            note("TLS clears it; the gap between raw UDP and FECTP does not, and is")
+        }
+        (false, false) => note("Neither clears it on this run: this table says nothing"),
+        (true, false) => note("FECTP clears it and TLS does not, which is odd enough to"),
+    }
+    match (clears(fectp_over), clears(tls_over)) {
+        (false, true) => note("noise on this host rather than a result."),
+        (false, false) => note("beyond that both protocols cost something."),
+        (true, false) => note("be worth re-running before believing."),
+        (true, true) => {}
+    }
     note("On loopback the transport barely matters anyway. Section 3 is where it does.");
 }
 

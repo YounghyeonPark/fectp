@@ -7,9 +7,12 @@ cargo run -p fectp-bench --release
 ```
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
-Yours will differ. What should survive the change of machine is the *shape* of
-the results, and the places where FECTP is worse than the alternatives — those
-are called out rather than buried.
+Yours will differ, and so will these: re-running §5 on the same machine on the
+same day moved its baseline 68% while leaving the ratio it measures unchanged
+(§5). **Read the comparisons against each section's control, not the absolute
+microseconds** — the control is measured in the same run and the absolute
+figure is not. The places where FECTP is worse than the alternatives are called
+out rather than buried.
 
 Everything runs over loopback. That deliberately removes the network, so what
 is left is each protocol's own cost. It also flatters every protocol that needs
@@ -64,6 +67,19 @@ a fourth row, an unencrypted mode, and reported it as 11–15% *faster* than raw
 UDP — impossible, since it was raw UDP plus a 14-byte header. The row is gone
 with the mode, but the control that exposed it stays: it is what keeps that
 kind of artifact visible instead of quotable.
+
+Four further runs put the control at 2–3% and FECTP at +11%, +18%, +20% and
++24%. The overhead is a result rather than noise, and the estimate of it is
+loose — anyone quoting a single figure from this table is quoting one run.
+
+**The harness used to disagree with its own numbers here.** It printed, as
+fixed text beside a computed control, that "most of the gap between raw UDP and
+FECTP" was noise and that TLS was the only row clearing the bar. That was true
+when it was written, with the control drifting 11%. On a quiet machine the
+control drifts 2% and the sentence is simply false — and it printed anyway. The
+note is now derived from the run: it compares each row against the control and
+says which clear it. A benchmark that states its conclusion regardless of what
+it measured is worse than one that states none.
 
 ## 3. Round trips before a request is answered
 
@@ -128,23 +144,52 @@ against UDP's 28, before any retransmission.
 
 | | per send | over raw sendto | throughput |
 |---|---|---|---|
-| raw UDP sendto (no protocol) | 7.6 µs | — | 128 MiB/s |
-| FECTP: + framing + AEAD | 8.8 µs | +1.2 µs | 111 MiB/s |
+| raw UDP sendto (no protocol) | 10.1 µs | — | 97 MiB/s |
+| FECTP: + framing + AEAD | 11.4 µs | **+13%** | 85 MiB/s |
 
-Framing and encryption used to be separate rows, because the unencrypted mode
-let one be measured without the other; it put encryption at roughly 2 µs of the
-total. That mode is gone, so the split is history rather than something this
-build can reproduce — what remains measurable is the pair together.
+**Read the percentage, not the microseconds.** Three runs of this section on
+one host in one afternoon:
+
+| run | raw sendto | FECTP | over raw |
+|---|---|---|---|
+| 1 | 12.6 µs | 14.4 µs | +14% |
+| 2 | 12.8 µs | 14.7 µs | +15% |
+| 3 | 10.1 µs | 11.4 µs | +13% |
+| 4 | 9.7 µs | 11.1 µs | +14% |
+| an earlier session | 7.6 µs | 8.8 µs | +16% |
+
+The baseline — a bare `sendto`, no protocol involved — moved from 7.6 µs to
+12.8 µs, **68%**, with nothing changed but how busy the machine was. The
+fraction FECTP adds on top did not move: 13% to 16% across all five, three
+protocol changes apart. The table above reports one of the least-loaded runs,
+because noise only ever adds; the spread is printed here rather than hidden
+behind it.
+
+That is worth stating as a rule for this file. **An absolute figure in
+microseconds describes a machine on a day. A ratio against a control measured
+in the same run describes the protocol.** Where the two disagree, the ratio is
+the result.
+
+It also answers a question that was asked and, at the time, only asserted:
+replacing session keys every 65,536 frames
+([D50](DECISIONS.md#d50--one-key-does-not-last-a-whole-session)) was claimed to
+cost "a shift and a compare" per frame without anyone measuring it. Across a
+68% swing in the baseline the ratio is unchanged, so whatever it costs is below
+what this harness can see — which is not the same as free, and is as much as
+can honestly be said.
 
 Every send seals under a lock, since `Connection` is usable from two threads
 (D22). Idle, that lock is inside the noise here — which says it is free when
 uncontended, not that it is free under contention, which this does not
 measure.
 
-**Framing is below what this can resolve** — repeated runs put it between −0.3
-and +0.2 µs, which means it costs something smaller than the measurement noise.
-Encryption costs about 2 µs. The syscall, at 8.3 µs, is the largest single item
-by a wide margin.
+**Framing and encryption cannot be told apart here.** They were separate rows
+once, because an unencrypted mode existed to measure one without the other; it
+put encryption at roughly 2 µs. That mode is gone
+([D46](DECISIONS.md#d46--the-mode-that-was-not-encrypted-is-gone)), and the
+figure went with it. An earlier version of this section kept quoting the 2 µs
+alongside a sentence saying the split was no longer reproducible — both in the
+same paragraph. What remains measurable is the pair together.
 
 Two things about this table are worth more than the numbers in it.
 
