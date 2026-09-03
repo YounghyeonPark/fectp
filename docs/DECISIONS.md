@@ -562,6 +562,7 @@ These are unimplemented, not overlooked.
 | **Ordering** | Reliable delivery is unordered by design (D12). | Not a gap so much as a decision; an application needing order sequences its own payloads. Measured against a same-delay control, reordering costs nothing (BENCHMARKS.md §10). |
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
+| **No dead-peer detection** | A session whose peer has gone away stays in the table until eviction or `disconnect` removes it. An unanswered keep-alive ([D49](#d49--something-to-send-for-a-peer-with-nothing-to-say)) is not acted on. | How long to wait before declaring a peer gone depends on what the application does about it, which is not something a transport can pick. The eviction order already drops the longest-silent session when room is needed, which bounds the memory if not the staleness. |
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
@@ -2021,3 +2022,72 @@ measuring a failure still get one attempt, because retrying there only extends
 how long you wait for nothing. Adding a `println!` to the relay made it stop
 reproducing, which is the shape of a timing problem and was not taken as a
 fix.
+
+## D49 — Something to send, for a peer with nothing to say
+
+**Question asked**: if a peer changes address, must it tell the other side?
+
+**No, and it cannot.** The answer is short enough to state here: an
+announcement is itself a datagram, and sending a datagram already carries the
+address — as the source address the kernel observed, which is a measurement
+rather than a claim. The field would add no capability. It is also usually
+empty or wrong: a NAT re-creating a mapping changes nothing the host can see,
+and a host behind CGNAT that announced its own address would announce
+`10.x.x.x`. And announcing does not remove the work — MOBIKE (RFC 4555) has
+`UPDATE_SA_ADDRESSES` and still requires a return-routability check afterwards.
+Even for a planned handover, sending one frame from the new path pre-validates
+it ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)) and
+works behind a NAT, which an announcement does not.
+
+**The question turned up a real gap, though, and not the one it was about.**
+
+A NAT maps an inside address to an outside one when something is sent out, and
+forgets the mapping when nothing has been for a while. RFC 4787 REQ-5 asks for
+at least two minutes; plenty of equipment does thirty seconds. Once the mapping
+is gone, **inbound datagrams have nowhere to go, and nothing reports it**: both
+ends hold a good session and one of them is simply unreachable.
+
+This has nothing to do with migration and predates it. It costs nothing for a
+peer that talks, because its own traffic refreshes the mapping. It breaks a
+peer that connects and then mostly listens — a device waiting for commands —
+which had no way to hold the door open.
+
+**Decision**: a keep-alive, and a `PathChallenge` is what it sends.
+
+That frame already exists, is authenticated, is 38 bytes, and is *answered* —
+so one exchange refreshes the mapping in both directions rather than only the
+one. No new frame type, no new parsing, nothing added to the wire format that
+was not already there. SPEC §5.8.5 says a challenge may be sent to the address
+already in use and that the answer changes nothing.
+
+**Off by default.** The peer this protocol is for is often a battery-powered
+sensor that wakes, reports a reading and sleeps, and waking it every fifteen
+seconds to say nothing would be a poor trade made on its behalf. `set_keepalive`
+turns it on where a session stays open through quiet periods.
+
+**Measured from the last thing sent, not from the last keep-alive**, so a busy
+session sends none at all. Every send path stamps the clock, including
+retransmissions and queued fragments — a mapping is refreshed by any datagram,
+not only an interesting one.
+
+**A bug from getting that wrong.** The first version stamped the clock around
+the call to `drive_retransmits` rather than inside its send closure. That
+function runs on every pass through the loop and usually sends nothing, so the
+clock always read "just now" and a keep-alive never came due. The test caught
+it immediately, which is the entire argument for having written the test first.
+
+**On a `Connection` it only runs inside `recv` or `flush`.** A `Connection` has
+no thread of its own, so there is nowhere else for it to run. A program that
+leaves one idle without reading from it sends nothing and wants an `Endpoint`,
+whose `poll` drives it. This was nearly built for `Endpoint` alone, on the
+reasoning that a peer wanting to idle is `Endpoint`-shaped. That was wrong:
+the peer that needs a keep-alive most is behind a NAT and receive-only, which
+is exactly `Connection`-shaped, and `pump` already computed a wake time as the
+minimum of several deadlines — adding a third cost almost nothing.
+
+**Not done, and worth stating.** This does not detect a dead peer. An
+unanswered keep-alive is not acted on, and a session with a peer that has gone
+away stays in the table until eviction or `disconnect` removes it. An idle
+timeout is a separate decision with its own trade — how long to wait before
+declaring a peer gone is not something a transport can pick for an application
+— and is not made here.

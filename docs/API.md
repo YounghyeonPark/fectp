@@ -119,6 +119,7 @@ its retries, or if the timeout expires.
 |---|---|
 | `set_read_timeout(t)` | How long `recv` waits before reporting a timeout. |
 | `set_padding(on)` | Pads frames to 64 bytes to mask payload lengths. Off by default. |
+| `set_keepalive(every)` | Send a 38-byte frame whenever nothing has been sent for `every`, so a NAT mapping does not lapse in a quiet period. Off by default, and only runs while a call is inside `recv` or `flush`. |
 
 ---
 

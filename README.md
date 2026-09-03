@@ -338,6 +338,7 @@ records what each one would cost to change.
 |---|---|
 | **No ordered delivery** | A message that arrives is delivered at once rather than held back for an earlier one — holding it back is head-of-line blocking, the exact cost this exists to avoid. Put a sequence number in your own payload if you need order. |
 | **Following a moved peer costs a round trip** | An `Endpoint` follows a peer that changes address, but only after challenging the new address and being answered — nothing is sent there before that. A `Connection` does not follow a *server* that moves: its socket is connected to one address. Measured: a NAT rebind no longer ends the session. |
+| **A silent peer must be told to speak** | A NAT forgets an idle mapping — thirty seconds on plenty of equipment — after which inbound datagrams have nowhere to go, with both ends still holding a good session. `set_keepalive` sends a 38-byte frame through the quiet, and is off by default so a sleeping sensor is not woken by its own transport. Nothing detects a peer that has gone away: an unanswered keep-alive is not acted on. |
 | **No path MTU discovery** | Nothing probes the path. The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame; `set_max_datagram` reclaims it where the path is known, and silently loses datagrams where it is not. |
 | **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median is unchanged and p95 grows about fivefold. |
 
@@ -357,8 +358,8 @@ records what each one would cost to change.
 replay protection, reorder tolerance, capability negotiation, per-message
 reliable delivery, messages split across frames, congestion control, session
 resumption, many peers on one socket, outbound dialling on that same socket,
-two security modes, address migration, optional length-masking padding, typed payload codecs,
-optional Zstandard compression.
+two security modes, address migration, optional NAT keep-alive, optional
+length-masking padding, typed payload codecs, optional Zstandard compression.
 
 **Not built:** ordered delivery, path MTU discovery, peer discovery and NAT
 traversal, a QUIC backend, bit-packed deltas —

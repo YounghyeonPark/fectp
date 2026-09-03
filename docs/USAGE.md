@@ -292,7 +292,7 @@ connection. On a connection that stays open and carries thousands of messages
 that is nothing. It matters when connections are short:
 
 - a battery-powered sensor that wakes, reports one reading, and sleeps
-- reconnecting after a NAT mapping expires, which ends a session
+- reconnecting after a peer has been unreachable long enough to give up on
 - anywhere the very first answer's latency is what somebody notices
 
 If your program connects once and streams, use plain `connect` and ignore this.
@@ -642,6 +642,55 @@ could be pointed at a third party who never wanted it.
 to one address, so a frame from anywhere else never reaches it. The case that
 happens in practice is a client changing address, and that is the one an
 `Endpoint` handles.
+
+## Staying reachable through a quiet period
+
+A NAT maps an inside address to an outside one when something is sent out, and
+forgets the mapping when nothing has been for a while. RFC 4787 asks for at
+least two minutes; plenty of equipment does thirty seconds. Once the mapping is
+gone, **inbound datagrams have nowhere to go** — and nothing reports this. Both
+ends still hold a perfectly good session; one of them has simply become
+unreachable.
+
+A peer with traffic of its own never notices, because its own traffic refreshes
+the mapping. The case that breaks is a peer that connects and then mostly
+listens: a device waiting for commands.
+
+```rust
+conn.set_keepalive(Some(Duration::from_secs(15)))?;
+```
+
+or, on an endpoint:
+
+```rust
+node.set_keepalive(Some(Duration::from_secs(15)));
+```
+
+Nothing is sent while the connection is busy — the interval is measured from
+the last thing sent, whatever it was, so an active session sends no keep-alives
+at all. When it does fire, it is a 38-byte path challenge, which the peer
+answers, so one exchange refreshes the mapping in **both** directions.
+
+**It is off by default, and that is deliberate.** A battery-powered sensor that
+wakes, reports a reading and sleeps must not be woken every fifteen seconds by
+its own transport. Turn it on where a session stays open through quiet periods
+and the cost is worth paying, and leave it off otherwise.
+
+**Pick the interval from the equipment, not from taste.** It has to be shorter
+than the shortest mapping timeout on the path, which you generally cannot see;
+15–25 seconds is the usual guess and is what ICE uses. Shorter costs more
+traffic and, on a battery, more wake-ups.
+
+**Only outbound traffic refreshes a mapping**, so this helps the side *behind*
+the NAT — the side that dialled. A server that only accepts gains liveness from
+it, not reachability.
+
+Two things it does not do. It does not detect a dead peer: an unanswered
+keep-alive is not acted on, and a session with a peer that has gone away stays
+in the table until something else removes it. And on a `Connection` it only
+runs while a call is inside `recv` or `flush`, because a `Connection` has no
+thread of its own — a program that leaves one idle without reading from it
+sends nothing, and wants an `Endpoint`.
 
 ## Length masking
 

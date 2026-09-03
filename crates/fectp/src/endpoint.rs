@@ -275,6 +275,9 @@ pub struct Endpoint {
     max_peers: usize,
     /// Sent in the payload of every handshake response.
     handshake_reply: Vec<u8>,
+    /// How long a peer may go without being sent anything, or `None` to say
+    /// nothing when there is nothing to say.
+    keepalive: Option<Duration>,
     next_id: u64,
 
     rx: Vec<u8>,
@@ -316,6 +319,11 @@ struct PeerEntry {
     /// frame at most a handful of times inside the handshake timeout, so a
     /// small allowance covers every honest case.
     handshake_reply: Option<(Vec<u8>, u8)>,
+    /// When something was last sent to this peer.
+    ///
+    /// Only outbound traffic refreshes a NAT mapping, so this — not when the
+    /// peer was last heard from — is what a keep-alive is measured against.
+    last_sent: Instant,
     /// An address this peer has been heard from but has not proved it can
     /// receive at.
     ///
@@ -375,6 +383,7 @@ impl Endpoint {
             migration_rate: MAX_MIGRATIONS_PER_SECOND,
             max_peers: MAX_PEERS,
             handshake_reply: Vec::new(),
+            keepalive: None,
             outbound: HashMap::new(),
             next_id: 0,
             rx: vec![0u8; size],
@@ -537,6 +546,7 @@ impl Endpoint {
                 return Ok(event);
             }
             self.drive_queues()?;
+            self.drive_keepalives()?;
             if let Some(event) = self.events.pop_front() {
                 return Ok(event);
             }
@@ -565,12 +575,13 @@ impl Endpoint {
                 }),
                 None => until_retransmit,
             };
-            let wait = match (until_retransmit, until_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            // A keep-alive is a third thing worth waking for. Sleeping past
+            // it would let a NAT mapping lapse while this endpoint sat in
+            // `poll` with nothing else to do.
+            let wait = [until_retransmit, until_deadline, self.next_keepalive()]
+                .into_iter()
+                .flatten()
+                .min();
             // A zero timeout means "block forever" to the socket layer, which
             // is the opposite of what is meant here.
             self.socket
@@ -735,6 +746,9 @@ impl Endpoint {
         if established {
             if ack_len > 0 {
                 self.socket.send_to(&self.ack[..ack_len], from)?;
+                if let Some(entry) = self.peers.get_mut(&peer_id) {
+                    entry.last_sent = Instant::now();
+                }
             }
         } else if let Ingested::PathValidated(token) = ingested {
             return Ok(self.settle_probe(peer_id, from, token));
@@ -822,6 +836,9 @@ impl Endpoint {
             probe.last = now;
         }
         self.socket.send_to(&self.ack[..len], addr)?;
+        if let Some(entry) = self.peers.get_mut(&peer_id) {
+            entry.last_sent = Instant::now();
+        }
         Ok(())
     }
 
@@ -1006,6 +1023,40 @@ impl Endpoint {
             resumed,
             initiated,
         }
+    }
+
+    /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
+    ///
+    /// Above the limit, the peer that has been quiet longest is dropped to make
+    /// room — see [`MAX_PEERS`] for why the alternative is unbounded memory.
+    /// Sessions already held are not dropped by lowering it; the new limit
+    /// applies as peers arrive.
+    ///
+    /// A limit of zero is treated as one, because an endpoint that can hold no
+    /// sessions cannot do anything.
+    /// Sends a small frame to any peer nothing has been sent to for `every`.
+    ///
+    /// Off by default, and deliberately so: a battery-powered peer that wakes,
+    /// reports a reading and sleeps must not be kept awake by the library.
+    ///
+    /// Turn it on where sessions stay open through quiet periods. A NAT maps
+    /// an inside address to an outside one when something is sent out and
+    /// forgets the mapping when nothing has been for a while — thirty seconds
+    /// on plenty of equipment — after which **inbound datagrams have nowhere
+    /// to go**, with both ends still believing the session is fine.
+    ///
+    /// Only outbound traffic refreshes a mapping, so this helps the side
+    /// *behind* the NAT. An endpoint that dialled out is that side; one that
+    /// only accepts is not, and gains liveness from it rather than reachability.
+    ///
+    /// The frame is a path challenge, which the peer answers, so one exchange
+    /// refreshes the mapping in both directions. It costs 38 bytes each way,
+    /// per peer, per interval — worth pricing before turning it on for a
+    /// thousand of them.
+    ///
+    /// `None` turns it off.
+    pub fn set_keepalive(&mut self, every: Option<Duration>) {
+        self.keepalive = every;
     }
 
     /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
@@ -1234,6 +1285,7 @@ impl Endpoint {
                 addr,
                 session_id,
                 filed: Instant::now(),
+                last_sent: Instant::now(),
                 handshake_reply: None,
                 probe: None,
                 spoke: false,
@@ -1257,11 +1309,13 @@ impl Endpoint {
             let addr = entry.addr;
             let limit = entry.datagram_limit;
             let socket = &self.socket;
+            let stamp = &mut entry.last_sent;
             let finished =
                 entry
                     .peer
                     .drive_queue(now, limit, &mut self.tx, |frame| {
                         socket.send_to(frame, addr)?;
+                        *stamp = Instant::now();
                         Ok(())
                     })?;
             if let Some(finished) = finished {
@@ -1302,6 +1356,51 @@ impl Endpoint {
         Ok(None)
     }
 
+    /// Sends a keep-alive to every peer that has not been sent to recently.
+    ///
+    /// A path challenge is what goes out: it already exists, is authenticated,
+    /// is 38 bytes, and is answered — so one exchange refreshes a NAT mapping
+    /// in both directions rather than only this one.
+    fn drive_keepalives(&mut self) -> Result<()> {
+        let Some(every) = self.keepalive else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        let due: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, e)| now.duration_since(e.last_sent) >= every)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in due {
+            let Some(entry) = self.peers.get_mut(&id) else {
+                continue;
+            };
+            let addr = entry.addr;
+            let mut token = [0u8; PATH_TOKEN_LEN];
+            OsRng.fill_bytes(&mut token);
+            let n = entry.peer.challenge(&token, &mut self.ack)?;
+            self.socket.send_to(&self.ack[..n], addr)?;
+            if let Some(entry) = self.peers.get_mut(&id) {
+                entry.last_sent = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    /// When the earliest keep-alive falls due, if any.
+    fn next_keepalive(&self) -> Option<Duration> {
+        let every = self.keepalive?;
+        let now = Instant::now();
+        self.peers
+            .values()
+            .map(|e| {
+                (e.last_sent + every).saturating_duration_since(now)
+            })
+            .min()
+    }
+
     /// Resends whatever has timed out, for every peer.
     fn drive_retransmits(&mut self) -> Result<()> {
         let now = self.now_ms();
@@ -1314,10 +1413,12 @@ impl Endpoint {
             let addr = entry.addr;
             let limit = entry.datagram_limit;
             let socket = &self.socket;
+            let stamp = &mut entry.last_sent;
             entry
                 .peer
                 .drive_retransmits(now, limit, &mut self.tx, |frame| {
                     socket.send_to(frame, addr)?;
+                    *stamp = Instant::now();
                     Ok(())
                 })?;
         }
@@ -1339,6 +1440,7 @@ impl Endpoint {
             .peer
             .seal(data, payload_type, None, None, limit, &mut self.tx)?;
         self.socket.send_to(&self.tx[..n], addr)?;
+        entry.last_sent = Instant::now();
         Ok(())
     }
 
@@ -1373,6 +1475,7 @@ impl Endpoint {
                 .seal(data, payload_type, Some(id), None, limit, &mut self.tx)?;
             self.socket.send_to(&self.tx[..n], addr)?;
             let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
+            entry.last_sent = Instant::now();
             entry.peer.pending.push(Pending {
                 id,
                 payload_type,

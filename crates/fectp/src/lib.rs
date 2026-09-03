@@ -73,7 +73,8 @@ use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
 use fectp_core::frame::HEADER_LEN;
 use fectp_core::reliability::MessageId;
 use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumptionTicket, Session};
+    preshared_key, Initiator, ResumeInitiator, ResumptionTicket, Session, PATH_TOKEN_LEN,
+};
 use fectp_core::{Keypair, PublicKey, Transport};
 use rand_core::{OsRng, RngCore};
 
@@ -348,6 +349,12 @@ struct Core {
     /// The caller's own receive timeout, which retransmission scheduling must
     /// not silently override.
     read_timeout: Option<Duration>,
+    /// How long this connection may go without sending, or `None` to say
+    /// nothing when there is nothing to say.
+    keepalive: Option<Duration>,
+    /// When something was last put on the wire, on the same clock as the
+    /// reliability layer.
+    last_sent_ms: u64,
 }
 
 impl Core {
@@ -360,7 +367,38 @@ impl Core {
             inbox: VecDeque::new(),
             epoch: Instant::now(),
             read_timeout: None,
+            keepalive: None,
+            last_sent_ms: 0,
         }
+    }
+
+    /// Hands `self.tx[..n]` to the socket, remembering when.
+    ///
+    /// Every outgoing frame goes through here, because a keep-alive is
+    /// measured from the last thing sent — and a NAT mapping is refreshed by
+    /// any datagram, not only by an interesting one.
+    fn transmit(&mut self, n: usize) -> Result<()> {
+        self.transport.send(&self.tx[..n])?;
+        self.last_sent_ms = self.now_ms();
+        Ok(())
+    }
+
+    /// Sends a frame whose only purpose is to have been sent.
+    ///
+    /// A path challenge is what this uses, because it already exists, is
+    /// authenticated, is 38 bytes, and is answered — so one exchange refreshes
+    /// the mapping in both directions rather than only this one.
+    fn send_keepalive(&mut self) -> Result<()> {
+        let mut token = [0u8; PATH_TOKEN_LEN];
+        OsRng.fill_bytes(&mut token);
+        let n = self.peer.challenge(&token, &mut self.tx)?;
+        self.transmit(n)
+    }
+
+    /// When the next keep-alive is due, if any.
+    fn keepalive_due_ms(&self) -> Option<u64> {
+        self.keepalive
+            .map(|every| self.last_sent_ms.saturating_add(every.as_millis() as u64))
     }
 
     /// Milliseconds since this connection was established.
@@ -655,8 +693,7 @@ impl Core {
     /// does not actually shrink the payload, the original bytes are sent.
     pub fn send_one(&mut self, data: &[u8], payload_type: PayloadType) -> Result<()> {
         let n = self.seal(data, payload_type, None)?;
-        self.transport.send(&self.tx[..n])?;
-        Ok(())
+        self.transmit(n)
     }
 
     /// Sends `data` and keeps resending it until the peer acknowledges it.
@@ -682,7 +719,7 @@ impl Core {
         let now = self.now_ms();
         let id = self.peer.retransmit.register(now)?;
         let n = self.seal(data, payload_type, Some(id))?;
-        self.transport.send(&self.tx[..n])?;
+        self.transmit(n)?;
         self.peer.pending.push(Pending {
             id,
             payload_type,
@@ -710,9 +747,17 @@ impl Core {
         let now = self.now_ms();
         let limit = self.transport.max_datagram_size();
         let transport = &mut self.transport;
+        // A retransmission is a datagram like any other and refreshes a
+        // mapping like any other, so it counts. Stamped inside the closure
+        // rather than around the call: `drive_retransmits` runs on every pass
+        // and usually sends nothing, and stamping unconditionally would mean
+        // the clock always read "just now" and a keep-alive never came due.
+        let stamp = &mut self.last_sent_ms;
         self.peer
             .drive_retransmits(now, limit, &mut self.tx, |frame| {
-                transport.send(frame).map_err(Error::Io)
+                transport.send(frame).map_err(Error::Io)?;
+                *stamp = now;
+                Ok(())
             })
     }
 }
@@ -989,15 +1034,57 @@ impl Connection {
             peer,
             transport,
             tx,
+            last_sent_ms: stamp,
             ..
         } = &mut *core;
-        peer.drive_queue(now, limit, tx, |frame| transport.send(frame).map_err(Error::Io))?;
+        peer.drive_queue(now, limit, tx, |frame| {
+            transport.send(frame).map_err(Error::Io)?;
+            *stamp = now;
+            Ok(())
+        })?;
         Ok(())
     }
 
     /// Messages split across frames and not yet fully sent.
     pub fn queued(&self) -> usize {
         self.core().map(|c| c.peer.queued()).unwrap_or(0)
+    }
+
+    /// Receives the next authentic datagram, writing its payload to `out`.
+    ///
+    /// Frames that fail to authenticate, that replay a sequence number already
+    /// seen, or that belong to another session are discarded and the call keeps
+    /// waiting. Anyone can send bytes to a UDP port, so a forged frame is not
+    /// an application-level error; surfacing it as one would hand an off-path
+    /// attacker a denial of service.
+    /// Sends a small frame whenever nothing has been sent for `every`.
+    ///
+    /// Off by default, and deliberately so: a battery-powered peer that wakes,
+    /// reports a reading and sleeps must not be kept awake by the library.
+    ///
+    /// Turn it on for a connection that stays open and mostly listens. A NAT
+    /// maps an inside address to an outside one when something is sent out and
+    /// forgets the mapping when nothing has been for a while — thirty seconds
+    /// on plenty of equipment — after which **inbound datagrams have nowhere
+    /// to go**. A peer with traffic of its own never notices; one waiting for
+    /// commands stops hearing them, with both ends still believing the session
+    /// is fine.
+    ///
+    /// The frame sent is a path challenge, which the peer answers, so one
+    /// exchange refreshes the mapping in both directions. It costs 38 bytes
+    /// each way.
+    ///
+    /// This only runs while a call is inside [`recv`](Self::recv) or
+    /// [`flush`](Self::flush) — a `Connection` has no thread of its own. A
+    /// program that leaves one idle without reading from it will not send
+    /// keep-alives, and wants an [`Endpoint`] instead.
+    ///
+    /// `None` turns it off.
+    pub fn set_keepalive(&self, every: Option<Duration>) -> Result<()> {
+        let mut core = self.core()?;
+        core.keepalive = every;
+        core.last_sent_ms = core.now_ms();
+        Ok(())
     }
 
     /// Receives the next authentic datagram, writing its payload to `out`.
@@ -1075,6 +1162,14 @@ impl Connection {
         let wait = {
             let mut core = self.core()?;
             core.drive_retransmits()?;
+            // Before working out how long to sleep, say something if it has
+            // been too long since anything was said.
+            if core
+                .keepalive_due_ms()
+                .is_some_and(|at| core.now_ms() >= at)
+            {
+                core.send_keepalive()?;
+            }
             let now = core.now_ms();
             let until_retransmit = core
                 .peer
@@ -1082,12 +1177,16 @@ impl Connection {
                 .next_deadline_ms()
                 .map(|at| Duration::from_millis(at.saturating_sub(now)));
             let until_deadline = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            match (until_retransmit, until_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            }
+            // A keep-alive is a third thing worth waking for. Sleeping past it
+            // would let a NAT mapping lapse while this connection sat in
+            // `recv` with nothing to do.
+            let until_keepalive = core
+                .keepalive_due_ms()
+                .map(|at| Duration::from_millis(at.saturating_sub(now)));
+            [until_retransmit, until_deadline, until_keepalive]
+                .into_iter()
+                .flatten()
+                .min()
         };
 
         let mut reader = self.reader.lock().map_err(|_| Error::Closed)?;

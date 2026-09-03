@@ -806,7 +806,28 @@ Messages in flight stay in flight. They are retimed against the initial
 estimate, which is conservative, so the first thing to happen on a new path is
 a measurement rather than a guess.
 
-#### 5.8.5 What this does not defend against
+#### 5.8.5 A challenge to an address already in use
+
+A peer MAY send a `PathChallenge` to the address a session is already using.
+The responder MUST answer it exactly as it answers any other, and the sender
+MUST NOT treat the answer as changing anything: the address is the one already
+on file, so there is nothing to move.
+
+This exists because sending it is the point. A NAT maps an inside address to an
+outside one when something is sent out and forgets the mapping when nothing has
+been for a while; once it is forgotten, inbound datagrams have nowhere to go.
+Only outbound traffic refreshes a mapping, so a peer with quiet periods needs
+something to send, and a frame that is already defined, already authenticated,
+38 bytes, and answered — refreshing the mapping in both directions from one
+exchange — is that something.
+
+How often, and whether at all, is not specified: it depends on equipment this
+document cannot see. An implementation that sends these SHOULD make the
+interval configurable and SHOULD default to not sending them, since a
+battery-powered peer that wakes, reports and sleeps is worse off for being kept
+awake.
+
+#### 5.8.6 What this does not defend against
 
 An attacker already on the path can drop, delay, or forward traffic whatever
 this section says; validation does not change that, and is not meant to. What
