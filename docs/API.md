@@ -287,6 +287,8 @@ alone otherwise.
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
 | `TICKET_LIFETIME` | 1 hour | How long a resumption ticket stays redeemable. `set_ticket_lifetime` overrides it. |
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |
+| `MIN_KEEPALIVE` | 100 ms | Floor under `set_keepalive`. A zero interval taken literally sends one datagram per loop pass — measured at 1,123 in 200 ms. |
+| `MIN_PEER_TIMEOUT` | 1 s | Floor under `set_peer_timeout`. Below a second nothing distinguishes a peer that has gone from one that is slow. |
 | `MAX_MIGRATIONS_PER_SECOND` | 256 | Frames a second from unknown addresses that are tried against a session, which is what following a moved peer costs. `set_max_migrations_per_second` overrides it; zero refuses to follow peers at all. |
 
 ---

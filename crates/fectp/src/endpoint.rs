@@ -109,6 +109,12 @@ pub enum Event {
     /// Arrives once every fragment has been acknowledged, or once one has been
     /// abandoned — a fragmented message missing a piece is not partially
     /// delivered, it is not delivered.
+    ///
+    /// **Not raised for a message still queued when its peer goes away.**
+    /// [`Event::PeerLost`] and [`Endpoint::disconnect`] end the session and
+    /// everything queued on it at once; that is the report, and a `Sent` for
+    /// each abandoned message would only repeat it. A caller keeping a table
+    /// of messages in flight should clear the peer's entries on those two.
     Sent {
         /// Which peer it was going to.
         peer: PeerId,
@@ -134,7 +140,8 @@ pub enum Event {
     /// Silence only becomes evidence when there was something to answer, so
     /// this means what you want it to mean with
     /// [`set_keepalive`](Endpoint::set_keepalive) on and much less without it.
-    /// The handle is dead either way; the peer must connect again.
+    /// The handle is dead either way; the peer must connect again. Anything
+    /// still queued for it is discarded without a separate [`Event::Sent`].
     PeerLost {
         /// The handle, which no longer resolves.
         peer: PeerId,
@@ -207,6 +214,27 @@ pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 /// above any rate a real migration produces — a peer that has moved sends a
 /// handful of frames, not hundreds — and far below what would cost anything.
 pub const MAX_MIGRATIONS_PER_SECOND: u32 = 256;
+
+/// The shortest keep-alive interval that will be honoured.
+///
+/// A NAT mapping lives tens of seconds at worst, so ten datagrams a second
+/// cannot be serving one — anything faster is arithmetic that produced a
+/// number nobody meant. Taken literally, a zero interval sends one datagram
+/// per pass of the loop: measured, 1,123 in 200 ms at a single peer, from the
+/// endpoint's own socket at its own peers.
+///
+/// `set_max_peers` has refused to take zero literally since it was written;
+/// this is the same rule.
+pub const MIN_KEEPALIVE: Duration = Duration::from_millis(100);
+
+/// The shortest peer timeout that will be honoured.
+///
+/// Below about a second there is nothing to distinguish a peer that has gone
+/// from one that is slow: a single retransmission cycle takes longer than
+/// that. Taken literally, a zero timeout makes every session overdue the
+/// instant it is filed, and the endpoint releases each peer as it arrives —
+/// which looks like a network fault rather than a configuration one.
+pub const MIN_PEER_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Challenges sent to one unproved address before the attempt is abandoned.
 ///
@@ -917,7 +945,23 @@ impl Endpoint {
         let session_id = entry.session_id;
 
         self.routes.remove(&(previous, session_id));
-        self.routes.insert((from, session_id), peer_id);
+
+        // Two sessions cannot share one route. The identifier is chosen by the
+        // client, so a peer moving to an address where another session already
+        // wears the same identifier is possible — vanishingly unlikely by
+        // accident, since it needs a 32-bit collision *and* the same address.
+        // `file` has always displaced the older entry in this situation;
+        // discarding the return here instead left the displaced peer in
+        // `peers` and `by_session` with no route, which is a state nothing
+        // else in this file expects. Its traffic would then be handed to the
+        // session that took its place, fail to open, and be dropped for ever,
+        // with no event to say so.
+        if let Some(displaced) = self.routes.insert((from, session_id), peer_id) {
+            if let Some(entry) = self.peers.remove(&displaced) {
+                self.unfile_session(entry.session_id, displaced);
+                self.events.push_back(Event::PeerLost { peer: displaced });
+            }
+        }
 
         Some(Event::PeerMoved {
             peer: peer_id,
@@ -1101,9 +1145,10 @@ impl Endpoint {
     /// [`MAX_PEERS`] and the eviction order already drop the longest-silent
     /// session when room is needed.
     ///
-    /// `None` turns it off.
+    /// Anything shorter than [`MIN_PEER_TIMEOUT`] is raised to it. `None`
+    /// turns it off.
     pub fn set_peer_timeout(&mut self, within: Option<Duration>) {
-        self.peer_timeout = within;
+        self.peer_timeout = within.map(|t| t.max(MIN_PEER_TIMEOUT));
     }
 
     /// Sends a small frame to any peer nothing has been sent to for `every`.
@@ -1126,9 +1171,10 @@ impl Endpoint {
     /// per peer, per interval — worth pricing before turning it on for a
     /// thousand of them.
     ///
-    /// `None` turns it off.
+    /// Anything shorter than [`MIN_KEEPALIVE`] is raised to it. `None` turns
+    /// it off.
     pub fn set_keepalive(&mut self, every: Option<Duration>) {
-        self.keepalive = every;
+        self.keepalive = every.map(|t| t.max(MIN_KEEPALIVE));
     }
 
     /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].

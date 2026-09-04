@@ -2292,3 +2292,55 @@ disagreed — turning off the client's keep-alive failed the test on
 anything about the session. The model was right about NATs and the comment was
 wrong about the model, and the control assertion was hiding the real outcome
 behind it. Both halves are now separate tests that say what they mean.
+
+## D53 — Three things found by looking rather than by tripping over them
+
+Five features went in one after another, and five defects came out of them —
+every one found while building the next thing, none by looking. That is a
+detection method, not a good one, so this is what a deliberate pass over the
+same code turned up.
+
+### A zero interval is a flood
+
+`set_keepalive(Some(Duration::ZERO))` says "send if nothing has been sent for
+no time", which is true on every pass of the loop. Measured: **1,123 datagrams
+in 200 ms** at a single peer, from the endpoint's own socket, aimed at its own
+peers. `set_peer_timeout(Some(Duration::ZERO))` says every session is overdue
+the instant it is filed, and the endpoint releases each peer as it arrives —
+which presents as a network fault rather than a configuration one.
+
+Neither value is one anybody types. Both are what arithmetic on a
+configuration file produces. `set_max_peers` has clamped zero to one since it
+was written; these now have floors for the same reason, at 100 ms and 1 s,
+each justified by what the setting is for rather than by taste: ten datagrams
+a second cannot be maintaining a NAT mapping, and under a second there is
+nothing to tell a dead peer from a slow one.
+
+### A migration could orphan a session
+
+`file` displaces whatever was already filed under `(address, session_id)`,
+removing it from `peers` and `by_session` together. `settle_probe` inserted the
+same key and discarded the return, so a peer moving onto an address where
+another session already wore the same identifier left that session in both
+tables with no route. Its traffic would then be handed to the session that took
+its place, fail to open, and be dropped for ever, with no event to say so.
+
+**Not demonstrated, and not reachable through the public API.** It needs a
+32-bit identifier collision *and* the same address, and to arrange it
+deliberately an attacker would have to receive at the victim's address, which
+is already game over. It is fixed because the two paths disagreeing left the
+table in a state nothing else in the file expects, not because anyone got there.
+There is no test, and saying so is better than writing one that cannot fail.
+
+### `Event::Sent` promised something it could not keep
+
+Its documentation said the event arrives "once every fragment has been
+acknowledged, or once one has been abandoned". A message still queued when its
+peer is released by [D51](#d51--giving-up-on-a-peer-and-the-bug-that-found)'s
+timeout — or by `disconnect` — gets neither. A caller keeping a table of
+messages in flight would wait for an event that is never coming.
+
+Fixed in the documentation rather than the code: `PeerLost` and `disconnect`
+end the session and everything on it at once, and a `Sent` for each abandoned
+message would only repeat what they already said. What was wrong was the
+absolute promise, and it is now stated at both ends.

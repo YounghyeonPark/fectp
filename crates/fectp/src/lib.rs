@@ -82,6 +82,7 @@ pub use compress::PayloadType;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 pub use endpoint::{
     Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_MIGRATIONS_PER_SECOND, MAX_PEERS,
+    MIN_KEEPALIVE, MIN_PEER_TIMEOUT,
 };
 pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
@@ -1099,10 +1100,12 @@ impl Connection {
     /// program that leaves one idle without reading from it will not send
     /// keep-alives, and wants an [`Endpoint`] instead.
     ///
+    /// Anything shorter than [`MIN_KEEPALIVE`] is raised to it — a zero
+    /// interval taken literally sends one datagram per pass of the read loop.
     /// `None` turns it off.
     pub fn set_keepalive(&self, every: Option<Duration>) -> Result<()> {
         let mut core = self.core()?;
-        core.keepalive = every;
+        core.keepalive = every.map(|t| t.max(MIN_KEEPALIVE));
         core.last_sent_ms = core.now_ms();
         Ok(())
     }
