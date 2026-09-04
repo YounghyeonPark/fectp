@@ -659,23 +659,34 @@ impl Endpoint {
             self.socket
                 .set_read_timeout(wait.map(|w| w.max(Duration::from_millis(1))))?;
 
-            let (n, from) = match self.socket.recv_from(&mut self.rx) {
-                Ok(v) => v,
+            match self.socket.recv_from(&mut self.rx) {
+                Ok((n, from)) => {
+                    if let Some(event) = self.dispatch(n, from)? {
+                        return Ok(event);
+                    }
+                }
                 // Somebody this endpoint wrote to is not listening. That is
                 // news about one peer, not a failure of the socket, and an
                 // endpoint serving a thousand others must not stop for it.
-                Err(e) if is_stale_unreachable(&e) => continue,
+                Err(e) if is_stale_unreachable(&e) => {}
                 Err(e) if is_timeout(&e) => {
                     if deadline.is_none_or(|d| Instant::now() >= d) {
                         return Ok(Event::Idle);
                     }
-                    continue;
                 }
                 Err(e) => return Err(Error::Io(e)),
-            };
+            }
 
-            if let Some(event) = self.dispatch(n, from)? {
-                return Ok(event);
+            // The timeout belongs to the caller, and a datagram arriving is
+            // not a reason to extend it. This used to be checked only when the
+            // socket read timed out, so an endpoint went round this loop for
+            // as long as datagrams kept coming — and the cheapest datagram to
+            // send is one that fails at the version check, which needs no key,
+            // no handshake and no session. Measured, `poll(50 ms)` took 3.7
+            // seconds to return under one flooding thread on loopback, and
+            // everything the caller does between polls waited for it.
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(Event::Idle);
             }
         }
     }

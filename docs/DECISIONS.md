@@ -2404,3 +2404,58 @@ tripping over defects is not a detection method. This one adds the obvious
 corollary: neither is re-reading your own work an hour after writing it. The
 benchmark pass reached a conclusion I had reached, checked whether the numbers
 supported it, and found they did not — which is the thing I had not done.
+
+## D55 — Two ways to stop an endpoint, found by asking what a stranger can do
+
+The adversarial pass of [D54](#d54--the-re-measurement-that-needed-re-measuring)'s
+review round found these. Both are pre-existing; neither was reachable by
+anything in the test suite, because nothing in it was trying.
+
+### One frame from one peer ended the loop for every peer
+
+`Peer::ingest`'s fragment branch propagated a decode failure:
+
+```rust
+piece.truncate(written?);
+```
+
+`written` is `deliver(...)`, which refuses any codec header the receiver cannot
+reverse. That `Err` left `ingest`, left `Endpoint::deliver`, left `route` and
+`dispatch`, and was returned by `poll` — and **every loop in this repository,
+including the example in the module documentation, exits on `Err`**.
+
+Four lines away, the unfragmented path does the opposite on purpose, and says
+why: *"A payload this peer coded in a way we cannot reverse is that peer's
+problem, not a reason to stop serving everyone else."* The two paths had
+disagreed since fragmentation was written.
+
+The cheapest trigger needs no `compress` feature and no Zstandard: one `Data`
+frame flagged `FRAGMENT | COMPRESSED`, carrying a codec header that promises
+five bytes over a body of three. `Transform::None::reverse` refuses it. The
+precondition is one completed handshake, which in public-key mode needs only
+the endpoint's public key.
+
+Now dropped like any other unusable payload. The test is in-crate because a
+cooperating peer cannot produce the frame.
+
+### `poll` did not bound its own duration
+
+The caller's deadline was checked in exactly one place: the arm where the
+socket read timed out. When a datagram arrived and produced no event, the loop
+went round again with no deadline test — so `poll` returned when the sender
+decided, not when the caller asked.
+
+**Measured: `poll(50 ms)` took 3.7 seconds** under one thread sending 14-byte
+datagrams with a version this protocol does not have. No key, no handshake, no
+session — the floor of what anybody can send. Everything the application does
+between polls waits for it: its own timers, its own sockets, its own shutdown.
+
+The deadline is now checked on every path that goes round the loop. The
+timeout-arm semantics are unchanged, including that a `poll(None)` still
+reports `Idle` when a retransmission deadline wakes it.
+
+**Worth noticing about the fix that came before it.** The `is_stale_unreachable`
+arm added in [D51](#d51--giving-up-on-a-peer-and-the-bug-that-found) was a bare
+`continue`, so it inherited the same defect and gave an ICMP storm the same
+leverage. Adding a branch to a loop whose exit conditions you have not read is
+how a bug spreads.

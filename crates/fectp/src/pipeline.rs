@@ -711,7 +711,16 @@ impl Peer {
             let mut scratch = core::mem::take(&mut self.secondary);
             let written = deliver(body, compressed, &mut scratch, &mut piece);
             self.secondary = scratch;
-            piece.truncate(written?);
+            // A payload this peer coded in a way we cannot reverse is that
+            // peer's problem, not a reason to stop serving everyone else —
+            // the same rule the unfragmented path applies, which this used to
+            // contradict by propagating instead. An `Endpoint` returns
+            // whatever `ingest` returns, so one frame from any peer that had
+            // completed a handshake ended the poll loop for every peer.
+            let Ok(written) = written else {
+                return Ok(Ingested::Nothing);
+            };
+            piece.truncate(written);
 
             return match self.reassembly.accept(fragment, &piece) {
                 Ok(Some(whole)) => Ok(Ingested::Message(whole)),
@@ -1159,6 +1168,105 @@ mod reassembly_tests {
         assert!(
             reassembly.accept(at(1), &[0u8; 60]).is_err(),
             "a short fragment that is not the last cannot be placed"
+        );
+    }
+}
+
+/// One peer's bad frame must not be everybody's problem.
+///
+/// In-crate because it needs `Peer::ingest` directly: the frame is one a
+/// cooperating peer never sends, so there is no way to produce it through
+/// `Connection`, and going through a socket would only test that `poll`
+/// returns what `ingest` gave it.
+#[cfg(test)]
+mod hostile_fragment {
+    use super::*;
+    use fectp_core::codec::{CodecHeader, Entropy, Transform};
+    use fectp_core::frame::{FLAG_COMPRESSED, FLAG_FRAGMENT};
+    use fectp_core::keys::Keypair;
+    use fectp_core::session::{Capabilities, Initiator, Responder, Session};
+    use rand_core::OsRng;
+
+    fn connect() -> (Session, Session) {
+        let server_kp = Keypair::from_secret([0xA1; 32]);
+        let server_public = *server_kp.public();
+        let caps = Capabilities::minimal(4096);
+        let mut initiator = Initiator::new(
+            Keypair::from_secret([0xB2; 32]),
+            server_public,
+            0x5EED_0002,
+            caps,
+        )
+        .expect("initiator");
+        let mut responder = Responder::new(server_kp, caps);
+
+        let mut wire = [0u8; 4096];
+        let mut scratch = [0u8; 4096];
+        let n = initiator
+            .write_init(&mut OsRng, b"", &mut wire)
+            .expect("init");
+        responder.read_init(&wire[..n], &mut scratch).expect("read");
+        let (server, n) = responder
+            .write_response(&mut OsRng, b"", &mut wire)
+            .expect("response");
+        let (client, _) = initiator
+            .read_response(&wire[..n], &mut scratch)
+            .expect("read response");
+        (client, server)
+    }
+
+    #[test]
+    fn a_fragment_that_cannot_be_decoded_is_dropped_not_raised() {
+        // A frame claiming both a fragment descriptor and a codec header, whose
+        // codec header cannot be reversed: `Transform::None` refuses when the
+        // body length disagrees with `original_len`.
+        //
+        // The non-fragment path drops such a payload with a comment saying it
+        // is "that peer's problem, not a reason to stop serving everyone
+        // else". The fragment path used to propagate it instead, and an
+        // `Endpoint` returns whatever `ingest` returns — so one datagram from
+        // any peer that had completed a handshake ended the poll loop for
+        // every peer, and every loop in this repository exits on `Err`.
+        let (mut client, server) = connect();
+
+        let mut plaintext = Vec::new();
+        // A fragment descriptor: message 1, one fragment, index 0.
+        let mut descriptor = [0u8; FRAGMENT_LEN];
+        Fragment {
+            message: 1,
+            index: 0,
+            count: 1,
+        }
+        .encode(&mut descriptor)
+        .expect("descriptor");
+        plaintext.extend_from_slice(&descriptor);
+        // A codec header promising five bytes, followed by three.
+        let mut header = [0u8; CODEC_HEADER_LEN];
+        CodecHeader {
+            transform: Transform::None,
+            param: 0,
+            entropy: Entropy::None,
+            original_len: 5,
+        }
+        .encode(&mut header)
+        .expect("codec header");
+        plaintext.extend_from_slice(&header);
+        plaintext.extend_from_slice(&[0u8; 3]);
+
+        let mut wire = vec![0u8; 512];
+        let n = client
+            .seal(&plaintext, FLAG_FRAGMENT | FLAG_COMPRESSED, &mut wire)
+            .expect("seal");
+
+        let mut peer = Peer::new(server, 1200);
+        let mut ack = vec![0u8; 512];
+        let mut ack_len = 0;
+        let ingested = peer.ingest(&mut wire[..n], 0, &mut ack, &mut ack_len);
+
+        assert!(
+            matches!(ingested, Ok(Ingested::Nothing)),
+            "a fragment nobody can decode must be dropped like any other \
+             unusable payload, not returned as an error"
         );
     }
 }
