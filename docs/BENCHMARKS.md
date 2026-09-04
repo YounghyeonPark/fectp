@@ -7,12 +7,13 @@ cargo run -p fectp-bench --release
 ```
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
-Yours will differ, and so will these: re-running §5 on the same machine on the
-same day moved its baseline 68% while leaving the ratio it measures unchanged
-(§5). **Read the comparisons against each section's control, not the absolute
-microseconds** — the control is measured in the same run and the absolute
-figure is not. The places where FECTP is worse than the alternatives are called
-out rather than buried.
+Yours will differ, and so will these: re-running §5 on the same machine on one
+afternoon moved its baseline 32%, with nothing changed but how busy the machine
+was. **Read each section against its own control, measured in the same run —
+not against an absolute figure from a different one.** Sections that have such
+a control say so; several do not, and those are the ones to trust least. The
+places where FECTP is worse than the alternatives are called out rather than
+buried.
 
 Everything runs over loopback. That deliberately removes the network, so what
 is left is each protocol's own cost. It also flatters every protocol that needs
@@ -68,9 +69,16 @@ UDP — impossible, since it was raw UDP plus a 14-byte header. The row is gone
 with the mode, but the control that exposed it stays: it is what keeps that
 kind of artifact visible instead of quotable.
 
-Four further runs put the control at 2–3% and FECTP at +11%, +18%, +20% and
-+24%. The overhead is a result rather than noise, and the estimate of it is
-loose — anyone quoting a single figure from this table is quoting one run.
+Seven further runs put the control anywhere from −10% to +6% and FECTP from
+−7% to +24%. **In one of them FECTP measured faster than unencrypted UDP**,
+which is the same impossible signature the removed plaintext row had. So the
+overhead is usually positive and usually larger than the control, and it is not
+reliably separable from it on this host. Anyone quoting a single figure from
+this table is quoting one run.
+
+The bar itself is one sample — a single difference of two medians — and it
+ranged 4% to 10% across three runs today. A verdict that flips with it deserves
+more than one degree of freedom behind it.
 
 **The harness used to disagree with its own numbers here.** It printed, as
 fixed text beside a computed control, that "most of the gap between raw UDP and
@@ -145,10 +153,49 @@ against UDP's 28, before any retransmission.
 | | per send | over raw sendto | throughput |
 |---|---|---|---|
 | raw UDP sendto (no protocol) | 10.1 µs | — | 97 MiB/s |
-| FECTP: + framing + AEAD | 11.4 µs | **+13%** | 85 MiB/s |
+| FECTP send | 11.4 µs | +1.3 µs | 85 MiB/s |
 
-**Read the percentage, not the microseconds.** Three runs of this section on
-one host in one afternoon:
+**This section is under correction. Read the caveats before the table.** An
+earlier version of it — one commit old at the time of writing — drew
+conclusions its own measurement could not support, and the corrections are left
+here rather than tidied away.
+
+### What the row actually contains
+
+Not "framing + AEAD", which is what it used to say. Three things are in it that
+the label did not admit:
+
+- **A failed compression attempt.** The payload is 1024 bytes and
+  `MIN_COMPRESS_SIZE` is 1024, so `should_compress` passes and a Zstandard
+  attempt runs on incompressible data and is discarded. It does not run on
+  every send — the coding path backs off — but it runs **4 times in every 36**,
+  measured at 2.86 µs each, so about **0.32 µs per send**, a quarter of the
+  1.3 µs in the table.
+- **The other side's decryption.** The raw arm sends to a socket that discards;
+  the FECTP arm sends to a peer that opens the frame and advances a replay
+  window, on the same cores. Stopping both receivers moves the difference from
+  7.6 µs to 3.9 µs — more than half of it was a thread that is not part of a
+  send.
+- **Nothing that could be called throughput.** The last column is
+  1024 ÷ send-call latency with nothing confirmed to have arrived.
+
+### What it can support
+
+The noise floor, measured by interleaving the two arms in alternating batches
+rather than running them one after the other:
+
+```
+paired delta   median 2.31 µs   p05 0.88 µs   p95 3.54 µs
+```
+
+The quantity being reported is about the size of its own spread. **Nothing
+below roughly 1 µs per send is resolvable here.** What survives is: a FECTP
+send costs on the order of 1–3 µs more than a bare `sendto` on this host,
+compression probe included.
+
+### The rule this section reached, and how far it goes
+
+Five runs at different machine loads:
 
 | run | raw sendto | FECTP | over raw |
 |---|---|---|---|
@@ -156,53 +203,59 @@ one host in one afternoon:
 | 2 | 12.8 µs | 14.7 µs | +15% |
 | 3 | 10.1 µs | 11.4 µs | +13% |
 | 4 | 9.7 µs | 11.1 µs | +14% |
-| an earlier session | 7.6 µs | 8.8 µs | +16% |
+| an earlier session, different build | 7.6 µs | 8.8 µs | +16% |
 
-The baseline — a bare `sendto`, no protocol involved — moved from 7.6 µs to
-12.8 µs, **68%**, with nothing changed but how busy the machine was. The
-fraction FECTP adds on top did not move: 13% to 16% across all five, three
-protocol changes apart. The table above reports one of the least-loaded runs,
-because noise only ever adds; the spread is printed here rather than hidden
-behind it.
+The baseline moved 32% across the four same-day runs — nothing changed but how
+busy the machine was. That much holds, and it is why an absolute figure in
+microseconds from this file describes a machine on a day.
 
-That is worth stating as a rule for this file. **An absolute figure in
-microseconds describes a machine on a day. A ratio against a control measured
-in the same run describes the protocol.** Where the two disagree, the ratio is
-the result.
+**The ratio is not the stable quantity the previous version claimed.** Seven
+replications on one build put it between +13% and +27%, with one outlier past
++100%; the four values above are four draws from that, not a constant. And the
+stability such as it is cannot mean what it was used for: when the host slows,
+the syscall and the userspace work dilate together, so the ratio is insensitive
+to load *by construction* — it would sit still whether the protocol's fixed
+cost were 0 or 0.5 µs.
 
-It also answers a question that was asked and, at the time, only asserted:
-replacing session keys every 65,536 frames
-([D50](DECISIONS.md#d50--one-key-does-not-last-a-whole-session)) was claimed to
-cost "a shift and a compare" per frame without anyone measuring it. Across a
-68% swing in the baseline the ratio is unchanged, so whatever it costs is below
-what this harness can see — which is not the same as free, and is as much as
-can honestly be said.
+The rule that survives is narrower, and is still worth having: **compare
+against a control measured in the same run, not against a figure from another
+one.** §2, §10's asymmetry table and §10's rebinding row do that; most of this
+file does not.
 
-Every send seals under a lock, since `Connection` is usable from two threads
-(D22). Idle, that lock is inside the noise here — which says it is free when
-uncontended, not that it is free under contention, which this does not
-measure.
+### A claim that was withdrawn
 
-**Framing and encryption cannot be told apart here.** They were separate rows
-once, because an unencrypted mode existed to measure one without the other; it
-put encryption at roughly 2 µs. That mode is gone
-([D46](DECISIONS.md#d46--the-mode-that-was-not-encrypted-is-gone)), and the
-figure went with it. An earlier version of this section kept quoting the 2 µs
-alongside a sentence saying the split was no longer reproducible — both in the
-same paragraph. What remains measurable is the pair together.
+The previous version said the unchanged ratio showed that replacing session
+keys ([D50](DECISIONS.md#d50--one-key-does-not-last-a-whole-session)) costs
+less than this harness can see. That does not follow, for a reason that is easy
+to check and was not: this section sends **20,050 frames**, and `REKEY_INTERVAL`
+is **65,536**. The replacement is never executed once. What is exercised is the
+divide-and-compare on every frame, and nothing else.
 
-Two things about this table are worth more than the numbers in it.
+D50's per-frame claim — a shift and a comparison, on the order of a nanosecond
+— is four orders of magnitude below what this resolves. It remains unmeasured,
+and saying so is the only honest position. Settling it needs two builds
+alternating inside one run, one of them with the interval set out of reach.
 
-The payload is deliberately incompressible. An earlier version of this section
-sent 1200 constant bytes, which code down to almost nothing — so the syscall
-was moving about 30 bytes rather than 1200, and the section was measuring the
-wrong thing. It also only fitted in a frame *because* it compressed; the same
-1200 bytes of real data are refused, as `max_payload` is 1186.
+### Two things that are right about the table
 
-It also needs a harness that can resolve a microsecond. Timing one 8 µs send at
-a time cannot: the scheduler noise around it is the same order as the thing
-being measured, and it will cheerfully report that adding work made the send
-faster. These figures time batches of 500 and divide.
+The payload is deliberately incompressible. An earlier version sent 1200
+constant bytes, which code down to almost nothing — so the syscall was moving
+about 30 bytes rather than 1200. It also only fitted in a frame *because* it
+compressed; the same 1200 bytes of real data are refused, as `max_payload` is
+1170.
+
+And it needs a harness that can resolve a microsecond. Timing one send at a
+time cannot: the scheduler noise around it is the same order as the thing being
+measured, and it will cheerfully report that adding work made the send faster.
+These figures time batches of 500 and divide.
+
+### What would settle it
+
+Time `Peer::seal` into a buffer with no socket, which isolates framing and
+AEAD; time the `sendto` separately; use a payload of 1023 bytes or an `Opaque`
+type so the compression probe is out of the path; equalise or stop the
+receivers; and print the paired p05/p95 as the noise floor rather than leaving
+a reader to assume there is not one.
 
 ---
 

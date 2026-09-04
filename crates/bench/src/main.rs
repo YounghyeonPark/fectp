@@ -35,9 +35,17 @@ fn main() {
 
     println!("FECTP — measured comparison");
     println!("{}", "=".repeat(72));
+    // The profile used to be fixed text saying "release" whatever it was. A
+    // debug build of this same benchmark opens a connection about 48 times
+    // slower, so the sentence was not a detail.
     println!(
-        "\nLoopback, release build, median of {SAMPLES} samples after {WARMUP} warmup runs."
+        "\nLoopback, {} build, median of {SAMPLES} samples after {WARMUP} warmup runs.",
+        if cfg!(debug_assertions) { "debug" } else { "release" }
     );
+    if cfg!(debug_assertions) {
+        println!("Every figure below is meaningless: a debug build opens a connection");
+        println!("about 48 times slower. Re-run with --release.");
+    }
 
     connection_setup();
     round_trip_latency();
@@ -264,7 +272,8 @@ fn round_trips_needed() {
         ]);
     }
     note("TCP + TLS: 1 round trip for the TCP handshake, 1 for TLS, 1 for the exchange.");
-    note("This is the whole argument. Everything else is a rounding error beside it.");
+    note("On a path with real latency this dominates the per-message costs of §2");
+    note("and §5. It is arithmetic on round trips, not a measurement.");
 }
 
 // ──────────────────────────────────────────── 4. per-message overhead ─────
@@ -689,8 +698,9 @@ fn under_loss() {
     note("a 20 ms floor against a loopback round trip of about 30 us. Recovery is");
     note("governed by the timer, not by the path — one loss costs on the order of");
     note("a thousand round trips, and no amount of protocol tuning changes that.");
-    note("The per-loss column falls as the rate rises because the fixed cost of the");
-    note("first timeout is shared over more of them.");
+    note("The per-loss column divides by an expected count, not a counted one: the");
+    note("relay drops in both directions and drops retransmissions too, so the");
+    note("divisor is low and the column is a model rather than a measurement.");
     println!();
 
     // The same again for a fragmented message, where every fragment is a

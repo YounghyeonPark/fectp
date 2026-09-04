@@ -2344,3 +2344,63 @@ Fixed in the documentation rather than the code: `PeerLost` and `disconnect`
 end the session and everything on it at once, and a `Sent` for each abandoned
 message would only repeat what they already said. What was wrong was the
 absolute promise, and it is now stated at both ends.
+
+## D54 — The re-measurement that needed re-measuring
+
+[D53](#d53--three-things-found-by-looking-rather-than-by-tripping-over-them)
+argued that finding defects only while building the next feature is a poor
+detection method. Three review passes were run instead — against the
+documentation, against the benchmark, and against the protocol — and the
+benchmark pass was aimed squarely at work that was one commit old.
+
+It found that work wrong. This records what, because a correction buried in a
+diff teaches nothing.
+
+**The claim**: §5's rewrite said the fraction FECTP adds over a bare `sendto`
+"did not move: 13% to 16% across all five, three protocol changes apart", and
+took that as evidence that key replacement costs less than the harness can
+resolve.
+
+**What was wrong with it, in the order it matters.**
+
+*The measurement never reaches the feature.* §5 sends `WARMUP + 40 × 500 =`
+**20,050** frames on one connection. `REKEY_INTERVAL` is **65,536**. The key is
+never replaced once. What is exercised is the divide-and-compare on every
+frame, and nothing else — which is a shift and a comparison, on the order of a
+nanosecond, against a harness that resolves about ±1 µs. The measurement is
+roughly a thousand times too blunt to comment, and the sentence read as though
+it had.
+
+*The ratio is not stable.* Seven replications on one build put it between +13%
+and +27%. The five values quoted were five draws from that. And ratio-stability
+under load cannot mean what it was used for anyway: when the host slows, the
+syscall and the userspace work dilate together, so the ratio is insensitive to
+load **by construction** — it would sit still whether the fixed cost were zero
+or half a microsecond.
+
+*The 68% was two things added together.* The preamble said the baseline moved
+68% "on the same machine on the same day". The 68% spans 7.6 µs to 12.8 µs, and
+7.6 is the row §5 itself labels "an earlier session" — a different day and a
+different build. The same-day span is **32%**. The commit message asserting
+"nothing changed but how busy the machine was" and the table saying the runs
+were "three protocol changes apart" cannot both be true of the same pair.
+
+**And the row was mislabelled.** It said "framing + AEAD". It also contains a
+Zstandard attempt that always fails — the payload is 1024 bytes and
+`MIN_COMPRESS_SIZE` is 1024, so the probe is in the path 4 sends in every 36 at
+2.86 µs each, about 0.32 µs amortised, a quarter of the figure. And it charges
+FECTP for the other side's work: the raw arm sends to a socket that discards,
+the FECTP arm to a peer that decrypts, on the same cores. Stopping both
+receivers moves the difference from 7.6 µs to 3.9 µs.
+
+**The rule that survives** is narrower than the one that was written, and is
+still worth having: compare against a control measured in the same run, not
+against a figure from another one. §2, §10's asymmetry table and §10's
+rebinding row do that. Most of this file does not, and those sections are now
+marked.
+
+**What this says about the method.** The previous entry's lesson was that
+tripping over defects is not a detection method. This one adds the obvious
+corollary: neither is re-reading your own work an hour after writing it. The
+benchmark pass reached a conclusion I had reached, checked whether the numbers
+supported it, and found they did not — which is the thing I had not done.
