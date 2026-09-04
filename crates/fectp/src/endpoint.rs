@@ -209,10 +209,21 @@ pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 /// session before the rest are dropped unexamined.
 ///
 /// Routing on the address costs a hash lookup. Routing on the identifier alone
-/// costs an AEAD verification, and anyone who can address the socket can ask
-/// for one by guessing a 32-bit value. This is the ceiling on that: comfortably
-/// above any rate a real migration produces — a peer that has moved sends a
-/// handful of frames, not hundreds — and far below what would cost anything.
+/// costs an AEAD verification — and up to [`MAX_REKEY_LOOKAHEAD`] key
+/// derivations before it, since a frame's key follows from a sequence number
+/// that is in the clear. Anyone who can address the socket can ask for that by
+/// guessing a 32-bit value.
+///
+/// This bounds the *attempts*, one token per candidate tried, not one per
+/// datagram: the work is per candidate, and an identifier can be worn by more
+/// than one session. Counting datagrams instead let a crowded identifier
+/// multiply the ceiling by however many sessions shared it.
+///
+/// The rate is comfortably above what a real migration produces — a peer that
+/// has moved sends a handful of frames, not hundreds — and far below what
+/// would cost anything.
+///
+/// [`MAX_REKEY_LOOKAHEAD`]: fectp_core::session
 pub const MAX_MIGRATIONS_PER_SECOND: u32 = 256;
 
 /// The shortest keep-alive interval that will be honoured.
@@ -235,6 +246,26 @@ pub const MIN_KEEPALIVE: Duration = Duration::from_millis(100);
 /// instant it is filed, and the endpoint releases each peer as it arrives —
 /// which looks like a network fault rather than a configuration one.
 pub const MIN_PEER_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Sessions tried against one frame from an unknown address.
+///
+/// The identifier is chosen by whoever opens the session, so one peer can put
+/// the same value on all of its own — and the index the migration lookup uses
+/// is keyed on the identifier alone. Without a cap, one datagram is worth an
+/// authentication attempt for every session wearing the identifier it names.
+/// Measured, with 400 sharing one: an established peer's median round trip
+/// went from 39 µs to 78 ms.
+///
+/// Two sessions sharing an identifier by accident is already a one-in-ten-
+/// thousand event across a full table of randomly chosen 32-bit values; three
+/// is far rarer than that. Four is generous for every honest case and refuses
+/// to pay for a crowd.
+///
+/// The residue: a session whose identifier is already worn by four others
+/// cannot be found by this lookup, so it cannot migrate. Reaching that needs
+/// the crowd to have been filed first under the identifier the newcomer then
+/// picks at random, which is about one in ten million per session.
+const MAX_CANDIDATES: usize = 4;
 
 /// Challenges sent to one unproved address before the attempt is abandoned.
 ///
@@ -753,15 +784,12 @@ impl Endpoint {
 
         // The address is new to us. This is the one path where the identifier
         // has to stand on its own, and it is reachable by anyone who can
-        // address the socket, so it is paid for out of a budget.
-        if self.by_session.contains_key(&session_id) && !self.may_try_unknown_address() {
-            return Ok(None);
-        }
-
+        // address the socket.
+        //
         // Walk the sessions wearing this identifier by index rather than
         // collecting them, so the path does not allocate either.
         let mut at = 0;
-        loop {
+        while at < MAX_CANDIDATES {
             let Some(peer_id) = self
                 .by_session
                 .get(&session_id)
@@ -771,6 +799,17 @@ impl Endpoint {
                 return Ok(None);
             };
             at += 1;
+
+            // Every candidate is an authentication attempt, bought by a frame
+            // that has authenticated to nothing. The budget used to be spent
+            // once per datagram while the work was per candidate, so a crowded
+            // identifier multiplied what the rate limit was meant to cap —
+            // and a sequence number forged some generations ahead multiplied
+            // it again, since the key has to be derived before the tag can be
+            // checked. Spend for each.
+            if !self.may_try_unknown_address() {
+                return Ok(None);
+            }
 
             // A frame that does not open leaves the session untouched — the
             // replay window is only advanced once the tag verifies — so trying
@@ -782,6 +821,7 @@ impl Endpoint {
                 None => {}
             }
         }
+        Ok(None)
     }
 
     /// Whether this session has just been heard from at `from`.

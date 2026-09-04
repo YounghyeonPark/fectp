@@ -1952,7 +1952,12 @@ address, and that is the one an `Endpoint` handles.
 
 **The lookup is paid for out of a budget.** Routing on the address costs a hash
 lookup; routing on the identifier alone costs an AEAD verification, and anyone
-who can address the socket can ask for one by guessing a 32-bit value. Before
+who can address the socket can ask for one by guessing a 32-bit value.
+
+> **Amended by [D56](#d56--a-bound-that-counted-the-wrong-thing).** The
+> sentence below saying "the cost of a collision is one extra verification"
+> was true of one collision and applied to a bound that counted datagrams. An
+> identifier can be worn by as many sessions as its owner chooses. Before
 this change they had to guess the address too. `MAX_MIGRATIONS_PER_SECOND` is
 256 — comfortably above what a real migration produces, since a peer that has
 moved sends a handful of frames rather than hundreds — and
@@ -2459,3 +2464,59 @@ arm added in [D51](#d51--giving-up-on-a-peer-and-the-bug-that-found) was a bare
 `continue`, so it inherited the same defect and gave an ICMP storm the same
 leverage. Adding a branch to a loop whose exit conditions you have not read is
 how a bug spreads.
+
+## D56 — A bound that counted the wrong thing
+
+**Found by** the adversarial pass, and reproduced here before being believed.
+
+`MAX_MIGRATIONS_PER_SECOND` was introduced with
+[D47](#d47--a-session-follows-its-peer-but-only-after-being-shown) to bound
+what the identifier lookup can be made to cost. Its comment said "routing on
+the identifier alone costs an AEAD verification", and D47 said "the cost of a
+collision is one extra verification". Both are statements about *one*
+collision, and both were attached to a budget spent **once per datagram**.
+
+**The identifier is chosen by whoever opens the session.** Nothing stops one
+peer putting the same value on all of its own — measured, 40 sessions from 40
+source ports all wearing `0xDEADBEEF`, all resident, because the primary route
+key is `(address, identifier)` and the addresses differ. The secondary index
+that migration needs is keyed on the identifier alone, and `route` walked every
+entry in it.
+
+**And each entry costs more than a verification.** A frame's key follows from
+its sequence number, which is in the clear, so a sequence forged four
+generations ahead makes the receiver derive four keys before it can refuse the
+frame: **0.898 µs to 4.444 µs** for a 30-byte frame.
+
+**Measured**, 400 sessions sharing one identifier, flooded from one thread with
+a forged sequence, against an established peer echoing on the side:
+
+| | median round trip |
+|---|---|
+| identifier nobody wears (control, same table) | 39 µs |
+| identifier all 400 wear | **78.5 ms** |
+
+**Decision**: spend a token per candidate rather than per datagram, and stop
+the walk at `MAX_CANDIDATES = 4`. The first makes the bound count the work it
+is bounding. The second keeps one datagram from draining the budget at once,
+and is generous: two sessions sharing a randomly chosen 32-bit identifier is
+already a one-in-ten-thousand event across a full table.
+
+**The cap has a cost, and the test pins it rather than the benefit.** A session
+filed after the first four under one identifier cannot be found by this lookup,
+so it cannot migrate. Reaching that needs a crowd already filed under the
+identifier a newcomer then picks at random — about one in ten million per
+session. The regression test asserts exactly that boundary: the first session
+filed is reachable from a new address, the twelfth is not.
+
+**Why the check is a boundary test and not the latency measurement.** The first
+attempt at a guard compared round trips under load. It failed twice for
+different reasons. Its control had one peer on file while its treatment had
+four hundred, so it compared a crowded identifier and a large peer table at
+once — the unmatched-control mistake
+[D54](#d54--the-re-measurement-that-needed-re-measuring) had just finished
+writing up. Matched, it passed, but only at a scale that took 92 seconds in
+release and longer in the debug build CI uses; shrunk to fit, the signal
+disappeared into the per-datagram cost of a large peer table, which is a
+separate finding. The measurement is kept, as a measurement, and the check is
+deterministic.
