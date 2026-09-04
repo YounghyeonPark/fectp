@@ -2520,3 +2520,47 @@ release and longer in the debug build CI uses; shrunk to fit, the signal
 disappeared into the per-datagram cost of a large peer table, which is a
 separate finding. The measurement is kept, as a measurement, and the check is
 deterministic.
+
+## D57 — One datagram in must not buy a stream out
+
+**Found by** the adversarial pass, alongside
+[D55](#d55--two-ways-to-stop-an-endpoint-found-by-asking-what-a-stranger-can-do)
+and [D56](#d56--a-bound-that-counted-the-wrong-thing).
+
+Reaching the peer table needs the endpoint's public key — public by design —
+and one datagram. `accept_full` completes the responder half, answers, and
+files the session, all without hearing back. **The source address on that
+datagram is whatever the sender wrote**, so the session can be filed pointing
+at an address that never asked for anything.
+
+`drive_keepalives` then aimed a 38-byte challenge at `entry.addr` on every
+interval, consulting neither `spoke` nor any probe state. One datagram in, a
+stream out, at a target of the sender's choosing, for as long as the session
+survived eviction. Measured, 7 unasked-for datagrams in 800 ms at a 100 ms
+interval, and continuing.
+
+This is the property `start_probe` is careful about and this path was not.
+[D47](#d47--a-session-follows-its-peer-but-only-after-being-shown) caps
+challenges to an unproved address at three per three seconds and prices it —
+"at most 114 bytes in that window". `drive_keepalives` had no equivalent, on
+addresses proved by even less.
+
+**Decision**: keep-alives go only to peers something authenticated has been
+heard from. `spoke` is already that proof and is already load-bearing — it is
+what the eviction order of
+[D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work) uses to
+tell a real peer from what a flood leaves behind. An authenticated frame cannot
+arrive unless the handshake response reached somebody holding the keys, so it
+is proof the address can receive as well as proof the peer is real.
+
+**What this costs.** Nothing that was working: a peer with a session it uses
+has spoken by definition, and a peer that has only just connected has sent its
+0-RTT payload or will speak before any keep-alive is due. What it removes is
+keep-alives to sessions that have never said anything, which were never doing
+their job — a NAT mapping the peer is not using does not need holding open.
+
+**A note on where the flag came from.** `spoke` was added to bound a handshake
+flood's memory. It turns out to be the right predicate here too, for the same
+underlying reason: it is the cheapest thing a peer can do that a stranger
+cannot fake. Reaching for it a second time is a sign the original framing was
+right.

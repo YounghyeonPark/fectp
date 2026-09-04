@@ -12,13 +12,16 @@
 //! that wake, report and sleep should not decide on their behalf that a quiet
 //! device is a dead one.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType, PeerId};
+use fectp_core::keys::Keypair;
+use fectp_core::session::{Capabilities, Initiator};
+use rand_core::OsRng;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -195,4 +198,63 @@ fn a_peer_is_kept_indefinitely_when_no_timeout_is_set() {
         "with no timeout configured, nothing may be given up on"
     );
     assert_eq!(server.peers(), 1, "and the session must still be held");
+}
+
+#[test]
+fn a_session_that_never_spoke_is_not_sent_keepalives() {
+    // Reaching the peer table needs nothing but the endpoint's public key,
+    // which is public by design, and one datagram. The source address on that
+    // datagram is whatever the sender wrote — so a session can be filed
+    // pointing at an address that has never sent anything and may never have
+    // heard of this endpoint.
+    //
+    // Keep-alives then aim 38 bytes at it on every interval, for as long as
+    // the session survives eviction. One spoofed datagram in, an unbounded
+    // stream out, at a target of the sender's choosing. The proof that an
+    // address can receive is that something authenticated arrived from it,
+    // which is the flag the eviction order already keeps.
+    let server = Server::spawn(None, Some(Duration::from_millis(100)));
+
+    // A socket that completes a handshake and then says nothing. The state it
+    // leaves behind is the one a spoofed source address produces: a filed
+    // session that has never spoken.
+    let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    sock.connect(server.addr).expect("connect");
+    sock.set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("timeout");
+
+    let mut initiator = Initiator::new(
+        Keypair::generate(&mut OsRng),
+        server.public,
+        0x51_1E_17_00,
+        Capabilities::minimal(1200),
+    )
+    .expect("initiator");
+    let mut wire = vec![0u8; 2048];
+    let n = initiator
+        .write_init(&mut OsRng, b"", &mut wire)
+        .expect("init");
+    sock.send(&wire[..n]).expect("send init");
+
+    // The handshake response is the one datagram this exchange is owed.
+    let answered = sock.recv(&mut wire).is_ok();
+    assert!(answered, "the handshake must have completed for this to mean anything");
+
+    // From here the session exists and has never spoken. Nothing more should
+    // arrive.
+    let watch = Instant::now() + Duration::from_millis(800);
+    let mut unasked_for = 0;
+    while Instant::now() < watch {
+        sock.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        if sock.recv(&mut wire).is_ok() {
+            unasked_for += 1;
+        }
+    }
+
+    assert_eq!(
+        unasked_for, 0,
+        "a session that has never been heard from received {unasked_for} \
+         datagrams it did not ask for; one datagram in must not buy a stream out"
+    );
 }

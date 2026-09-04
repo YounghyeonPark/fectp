@@ -668,7 +668,9 @@ node.set_keepalive(Some(Duration::from_secs(15)));
 
 Nothing is sent while the connection is busy — the interval is measured from
 the last thing sent, whatever it was, so an active session sends no keep-alives
-at all. When it does fire, it is a 38-byte path challenge, which the peer
+at all. Nor to a peer nothing has ever been heard from: completing a handshake
+takes one datagram and its source address is whatever the sender wrote, so a
+session can point somewhere that never asked for it. When it does fire, it is a 38-byte path challenge, which the peer
 answers, so one exchange refreshes the mapping in **both** directions.
 
 **It is off by default, and that is deliberate.** A battery-powered sensor that

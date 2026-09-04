@@ -1204,6 +1204,12 @@ impl Endpoint {
 
     /// Sends a small frame to any peer nothing has been sent to for `every`.
     ///
+    /// Only to peers something authenticated has been heard from. A session
+    /// can be filed pointing at an address that never asked for it — the
+    /// handshake needs one datagram and the source address on it is whatever
+    /// the sender wrote — and keeping such a session alive would aim a steady
+    /// stream at that address.
+    ///
     /// Off by default, and deliberately so: a battery-powered peer that wakes,
     /// reports a reading and sleeps must not be kept awake by the library.
     ///
@@ -1576,7 +1582,20 @@ impl Endpoint {
         let due: Vec<PeerId> = self
             .peers
             .iter()
-            .filter(|(_, e)| now.duration_since(e.last_sent) >= every)
+            // Only peers that have been heard from. Reaching the peer table
+            // needs the endpoint's public key and one datagram, and the source
+            // address on that datagram is whatever the sender wrote — so a
+            // session can be filed pointing at an address that never asked for
+            // anything. Keeping it alive would aim 38 bytes at that address on
+            // every interval for as long as the session survived eviction: one
+            // datagram in, an unbounded stream out, at a target of the
+            // sender's choosing.
+            //
+            // `spoke` is the proof, and it is the proof the eviction order
+            // already relies on: an authenticated frame arrived, which cannot
+            // happen unless the handshake response reached somebody who held
+            // the keys.
+            .filter(|(_, e)| e.spoke && now.duration_since(e.last_sent) >= every)
             .map(|(id, _)| *id)
             .collect();
 
