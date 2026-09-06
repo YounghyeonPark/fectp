@@ -81,7 +81,7 @@ use rand_core::{OsRng, RngCore};
 pub use compress::PayloadType;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 pub use endpoint::{
-    Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_MIGRATIONS_PER_SECOND, MAX_PEERS,
+    Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_MIGRATION_ATTEMPTS_PER_PEER, MAX_PEERS,
     MIN_KEEPALIVE, MIN_PEER_TIMEOUT,
 };
 pub use pipeline::MAX_QUEUED;

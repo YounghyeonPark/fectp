@@ -8,7 +8,7 @@
 //! every session wearing the one it names.
 //!
 //! So the question is what one datagram can be made to cost. The bound that is
-//! meant to answer it, `MAX_MIGRATIONS_PER_SECOND`, counts datagrams; the work
+//! meant to answer it used to count datagrams while the work
 //! is per candidate; and a sequence number forged some generations ahead makes
 //! each candidate several times more expensive than one AEAD verification,
 //! because the key has to be derived before the tag can be checked.
@@ -98,10 +98,22 @@ fn open_with_id(server: SocketAddr, server_public: &[u8; 32], id: u32) -> Option
 
     let mut wire = vec![0u8; 2048];
     let n = initiator.write_init(&mut OsRng, b"", &mut wire).ok()?;
-    sock.send(&wire[..n]).ok()?;
-    let n = sock.recv(&mut wire).ok()?;
+
+    // Send it again if the answer does not come, as `Connection::connect`
+    // does. One datagram each way over loopback is not a certainty, and a
+    // setup step that silently opens eleven sessions instead of twelve makes
+    // the test fail somewhere it is not looking.
     let mut scratch = vec![0u8; 2048];
-    let (session, _) = initiator.read_response(&wire[..n], &mut scratch).ok()?;
+    let mut answered = None;
+    for _ in 0..4 {
+        sock.send(&wire[..n]).ok()?;
+        if let Ok(len) = sock.recv(&mut scratch) {
+            answered = Some(len);
+            break;
+        }
+    }
+    let len = answered?;
+    let (session, _) = initiator.read_response(&scratch[..len], &mut wire).ok()?;
     Some((sock, session))
 }
 
@@ -137,7 +149,15 @@ fn flood(server: SocketAddr, id: u32, stop: Arc<AtomicBool>) -> thread::JoinHand
         // high-water mark, so this is derived towards before it is refused.
         frame[6..14].copy_from_slice(&(4 * REKEY_INTERVAL).to_le_bytes());
         while !stop.load(Ordering::Relaxed) {
-            let _ = sock.send_to(&frame, server);
+            // In bursts with a yield between them. A busy loop here saturates
+            // a core, and `cargo test` runs test binaries in parallel — the
+            // first version of this starved an unrelated test in another
+            // binary into a five-second timeout. Still thousands a second,
+            // which is hundreds of times any budget under test.
+            for _ in 0..16 {
+                let _ = sock.send_to(&frame, server);
+            }
+            thread::sleep(Duration::from_millis(1));
         }
     })
 }
@@ -157,6 +177,9 @@ fn arrives_from_a_new_address(server: SocketAddr, session: &mut Session, seen: &
         if seen.load(Ordering::SeqCst) > before {
             return true;
         }
+        // Yielding rather than spinning: test binaries run in parallel and a
+        // busy wait here is a busy wait for everything else too.
+        thread::sleep(Duration::from_millis(2));
     }
     false
 }
@@ -201,6 +224,49 @@ fn only_the_first_few_sessions_wearing_an_identifier_can_be_found_by_it() {
         !arrives_from_a_new_address(echo.addr, last, &echo.messages),
         "a session filed twelfth under one identifier must not be searched \
          for: the walk is what a crowded identifier makes expensive"
+    );
+}
+
+#[test]
+fn one_peer_flooding_the_lookup_does_not_starve_another_peers_migration() {
+    // The lookup that lets a session follow its peer is rate limited, because
+    // a frame from an unknown address costs an authentication attempt and
+    // anyone can send one. The question is whose attempts the limit spends.
+    //
+    // A budget shared by the whole endpoint is one an attacker can empty: it
+    // needs one session of its own, and frames naming that session's
+    // identifier from a second port. Every other peer's migration then fails
+    // for want of a token — and with `set_peer_timeout` on, which is the
+    // configuration a peer timeout is meant to be paired with, a failed
+    // migration becomes a lost session.
+    let echo = Echo::spawn();
+
+    // The peer that will move. Its identifier is its own.
+    let (_victim_sock, mut victim) =
+        open_with_id(echo.addr, &echo.public, 0x5EED_0001).expect("victim session");
+
+    // The attacker's session, whose identifier it will name.
+    const ATTACKER_ID: u32 = 0x0BAD_F00D;
+    let (_attacker_sock, _attacker) =
+        open_with_id(echo.addr, &echo.public, ATTACKER_ID).expect("attacker session");
+
+    // Flood the lookup, naming a session that exists — an identifier nothing
+    // wears is refused before any budget is touched.
+    let stop = Arc::new(AtomicBool::new(false));
+    let flooder = flood(echo.addr, ATTACKER_ID, Arc::clone(&stop));
+
+    // Give the flood time to empty a shared budget several times over.
+    thread::sleep(Duration::from_millis(300));
+
+    let followed = arrives_from_a_new_address(echo.addr, &mut victim, &echo.messages);
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = flooder.join();
+
+    assert!(
+        followed,
+        "a peer that moved could not be found while another peer flooded the \
+         lookup: the budget must be spent per session, not shared by all of them"
     );
 }
 

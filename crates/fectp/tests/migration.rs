@@ -33,12 +33,12 @@ struct Echo {
 
 impl Echo {
     fn spawn() -> Self {
-        Self::spawn_with_migrations(fectp::MAX_MIGRATIONS_PER_SECOND)
+        Self::spawn_with_migrations(fectp::MAX_MIGRATION_ATTEMPTS_PER_PEER)
     }
 
     fn spawn_with_migrations(rate: u32) -> Self {
         let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
-        server.set_max_migrations_per_second(rate);
+        server.set_max_migration_attempts_per_peer(rate);
         let addr = server.local_addr().expect("addr");
         let public = *server.public_key().expect("identity");
         let stop = Arc::new(AtomicBool::new(false));

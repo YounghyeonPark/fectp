@@ -1958,10 +1958,11 @@ who can address the socket can ask for one by guessing a 32-bit value.
 > sentence below saying "the cost of a collision is one extra verification"
 > was true of one collision and applied to a bound that counted datagrams. An
 > identifier can be worn by as many sessions as its owner chooses. Before
-this change they had to guess the address too. `MAX_MIGRATIONS_PER_SECOND` is
-256 — comfortably above what a real migration produces, since a peer that has
-moved sends a handful of frames rather than hundreds — and
-`set_max_migrations_per_second(0)` declines to follow peers at all, for an
+this change they had to guess the address too. The bound is
+`MAX_MIGRATION_ATTEMPTS_PER_PEER` — see [D56](#d56--a-bound-that-counted-the-wrong-thing)
+and [D58](#d58--a-bound-one-peer-could-spend-on-everybody-elses-behalf) for what
+it counts and whose it is — and setting it to zero declines to follow peers at
+all, for an
 endpoint whose peers never move. [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work)
 bounds the other thing a stranger can make this endpoint spend; leaving this
 one open while writing that record would not have been consistent.
@@ -2469,7 +2470,7 @@ how a bug spreads.
 
 **Found by** the adversarial pass, and reproduced here before being believed.
 
-`MAX_MIGRATIONS_PER_SECOND` was introduced with
+`MAX_MIGRATIONS_PER_SECOND`, as it was then called, was introduced with
 [D47](#d47--a-session-follows-its-peer-but-only-after-being-shown) to bound
 what the identifier lookup can be made to cost. Its comment said "routing on
 the identifier alone costs an AEAD verification", and D47 said "the cost of a
@@ -2564,3 +2565,62 @@ flood's memory. It turns out to be the right predicate here too, for the same
 underlying reason: it is the cheapest thing a peer can do that a stranger
 cannot fake. Reaching for it a second time is a sign the original framing was
 right.
+
+## D58 — A bound one peer could spend on everybody else's behalf
+
+[D56](#d56--a-bound-that-counted-the-wrong-thing) made the migration budget
+count the work it bounds. It did not ask **whose** budget it was, and the
+adversarial pass had already said: one bucket, shared by the endpoint, spent
+before anything authenticates.
+
+**What that buys an attacker.** One session of its own, and frames naming that
+session's identifier from a second port. The bucket empties, `route` returns
+without trying any candidate, and **no peer at this endpoint can migrate at
+all**. Paired with `set_peer_timeout` — the pairing
+[D51](#d51--giving-up-on-a-peer-and-the-bug-that-found) recommends — a
+migration that cannot complete becomes a lost session.
+
+Measured: a peer whose frames arrived from a new address was not found while
+another peer flooded the lookup, and was found once the budget moved.
+
+**D56 made this worse before it was fixed.** Spending a token per candidate
+rather than per datagram is right for bounding work, and it drains a shared
+bucket up to four times faster per datagram. A fix that tightens one bound at
+the expense of another is worth saying out loud.
+
+**Decision**: the budget lives on the session, not the endpoint.
+`MAX_MIGRATION_ATTEMPTS_PER_PEER` is 8 a second, per session, and a session out
+of budget is *skipped* rather than ending the walk — one peer must not be able
+to hide the others behind it.
+
+The total stays bounded: [`MAX_PEERS`] sessions at eight attempts a second,
+each costing a verification and up to four key derivations, is a few percent of
+one core. What changes is who pays. An attacker emptying its own session's
+allowance affects its own session.
+
+**The name went with it.** `MAX_MIGRATIONS_PER_SECOND` on an `Endpoint` reads
+as endpoint-wide, which is exactly what it must not be, so it is now
+`MAX_MIGRATION_ATTEMPTS_PER_PEER` and `set_max_migration_attempts_per_peer`. A
+name that misleads is the thing this review round has been finding all week.
+
+**Three harness lessons, all from the same afternoon.**
+
+The test failed intermittently in its *setup*: `open_with_id` sent one
+handshake datagram and waited once, so eleven of twelve sessions would open and
+the assertion that noticed was the one counting them. `Connection::connect`
+retransmits; the helper did not. A harness that assumes one datagram survives
+is the mistake FIXING-A-BUG.md already records about relays.
+
+Then the whole suite started failing — in `concurrent.rs`, which this change
+does not touch. `cargo test` runs test binaries in parallel, and the flood this
+file spawns was a busy loop that never yielded, so it starved an unrelated test
+in another binary into a five-second timeout. **A test that saturates a core
+is a test that breaks other tests.** It now sends in bursts with a yield
+between them, still thousands a second.
+
+And a new session started with an *empty* budget, refilling at eight a second,
+so a peer that moved within its first eighth of a second could not be found.
+The bucket this replaced started full; the replacement did not, and only the
+parallel run was slow enough to expose it. Sessions now start with a full
+allowance, which is also the right answer on its own terms: a peer that moves
+moments after connecting is not doing anything suspicious.

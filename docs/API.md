@@ -289,7 +289,7 @@ alone otherwise.
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |
 | `MIN_KEEPALIVE` | 100 ms | Floor under `set_keepalive`. A zero interval taken literally sends one datagram per loop pass — measured at 1,123 in 200 ms. |
 | `MIN_PEER_TIMEOUT` | 1 s | Floor under `set_peer_timeout`. Below a second nothing distinguishes a peer that has gone from one that is slow. |
-| `MAX_MIGRATIONS_PER_SECOND` | 256 | Frames a second from unknown addresses that are tried against a session, which is what following a moved peer costs. `set_max_migrations_per_second` overrides it; zero refuses to follow peers at all. |
+| `MAX_MIGRATION_ATTEMPTS_PER_PEER` | 8 | Attempts a second, **per session**, to open a frame from an address that session is not filed under — what following a moved peer costs. Per session so that one peer flooding the lookup cannot stop every other peer migrating. `set_max_migration_attempts_per_peer` overrides it; zero refuses to follow peers at all. |
 
 ---
 

@@ -205,26 +205,29 @@ const HANDSHAKE_REPLIES: u8 = 8;
 /// [`Endpoint::set_max_handshakes_per_second`] overrides it.
 pub const MAX_HANDSHAKES_PER_SECOND: u32 = 512;
 
-/// Frames per second from unknown addresses that will be tried against a
-/// session before the rest are dropped unexamined.
+/// Attempts a second, **per session**, to open a frame that arrived from an
+/// address that session is not filed under.
 ///
-/// Routing on the address costs a hash lookup. Routing on the identifier alone
-/// costs an AEAD verification — and up to [`MAX_REKEY_LOOKAHEAD`] key
-/// derivations before it, since a frame's key follows from a sequence number
-/// that is in the clear. Anyone who can address the socket can ask for that by
-/// guessing a 32-bit value.
+/// This is what following a moved peer costs: the address is unknown, so the
+/// identifier in the clear is all there is to go on, and the frame has to be
+/// tried against the session it names. Anyone who can address the socket can
+/// ask for that.
 ///
-/// This bounds the *attempts*, one token per candidate tried, not one per
-/// datagram: the work is per candidate, and an identifier can be worn by more
-/// than one session. Counting datagrams instead let a crowded identifier
-/// multiply the ceiling by however many sessions shared it.
+/// **Per session, not per endpoint, and the difference is the whole point.** A
+/// budget shared by every peer is one any single peer can empty: it needs one
+/// session of its own and frames naming that session's identifier from a
+/// second port, after which nobody else can migrate at all. With
+/// `set_peer_timeout` on — the pairing a peer timeout is meant to have — a
+/// migration that cannot complete becomes a lost session. Spending each
+/// session's own budget confines the damage to whoever is causing it.
 ///
-/// The rate is comfortably above what a real migration produces — a peer that
-/// has moved sends a handful of frames, not hundreds — and far below what
-/// would cost anything.
+/// The total is still bounded: [`MAX_PEERS`] sessions at this rate, each
+/// attempt costing an AEAD verification and up to four key derivations before
+/// it, is a few percent of one core.
 ///
-/// [`MAX_REKEY_LOOKAHEAD`]: fectp_core::session
-pub const MAX_MIGRATIONS_PER_SECOND: u32 = 256;
+/// Eight a second is far above what a real migration needs — a peer that has
+/// moved sends a handful of frames, and one of them succeeding is enough.
+pub const MAX_MIGRATION_ATTEMPTS_PER_PEER: u32 = 8;
 
 /// The shortest keep-alive interval that will be honoured.
 ///
@@ -340,9 +343,7 @@ pub struct Endpoint {
     handshake_budget: f32,
     handshake_refilled: Instant,
     handshake_rate: u32,
-    /// The same, for frames arriving from an address with no session on it.
-    migration_budget: f32,
-    migration_refilled: Instant,
+    /// The per-session ceiling on attempts from unknown addresses.
     migration_rate: u32,
     max_peers: usize,
     /// Sent in the payload of every handshake response.
@@ -406,6 +407,10 @@ struct PeerEntry {
     /// frame at most a handful of times inside the handshake timeout, so a
     /// small allowance covers every honest case.
     handshake_reply: Option<(Vec<u8>, u8)>,
+    /// Budget for trying this session against frames from addresses it is not
+    /// filed under, refilled over time. See [`MAX_MIGRATION_ATTEMPTS_PER_PEER`].
+    migration_budget: f32,
+    migration_refilled: Instant,
     /// When something that authenticated was last received from this peer.
     ///
     /// Only authenticated frames move it. Anyone can address a UDP socket, and
@@ -474,9 +479,7 @@ impl Endpoint {
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
             handshake_rate: MAX_HANDSHAKES_PER_SECOND,
-            migration_budget: MAX_MIGRATIONS_PER_SECOND as f32,
-            migration_refilled: Instant::now(),
-            migration_rate: MAX_MIGRATIONS_PER_SECOND,
+            migration_rate: MAX_MIGRATION_ATTEMPTS_PER_PEER,
             max_peers: MAX_PEERS,
             handshake_reply: Vec::new(),
             keepalive: None,
@@ -807,8 +810,11 @@ impl Endpoint {
             // and a sequence number forged some generations ahead multiplied
             // it again, since the key has to be derived before the tag can be
             // checked. Spend for each.
-            if !self.may_try_unknown_address() {
-                return Ok(None);
+            // A session out of budget is skipped rather than ending the
+            // walk: the next candidate has its own allowance, and one peer
+            // must not be able to hide the others behind it.
+            if !self.may_try_unknown_address(peer_id) {
+                continue;
             }
 
             // A frame that does not open leaves the session untouched — the
@@ -1247,16 +1253,15 @@ impl Endpoint {
         self.max_peers = limit.max(1);
     }
 
-    /// Sets how many frames a second from unknown addresses may be tried
-    /// against a session.
+    /// Sets how many attempts a second **each session** may spend being tried
+    /// against frames from addresses it is not filed under.
     ///
-    /// The default is [`MAX_MIGRATIONS_PER_SECOND`]. Raise it for an endpoint
-    /// serving many peers on paths that move often; lower it, or set it to
-    /// zero, for one whose peers never move — at zero no session will ever
-    /// follow a peer that changes address.
-    pub fn set_max_migrations_per_second(&mut self, rate: u32) {
+    /// The default is [`MAX_MIGRATION_ATTEMPTS_PER_PEER`]. Raise it for peers
+    /// on paths that move often; lower it, or set it to zero, for an endpoint
+    /// whose peers never move — at zero no session will ever follow a peer
+    /// that changes address.
+    pub fn set_max_migration_attempts_per_peer(&mut self, rate: u32) {
         self.migration_rate = rate;
-        self.migration_budget = self.migration_budget.min(rate as f32);
     }
 
     /// Files the response just sent against the session it established.
@@ -1368,22 +1373,28 @@ impl Endpoint {
     ///
     /// A token bucket rather than a counter per interval, so a burst is
     /// absorbed and a sustained flood is not.
-    /// Whether a frame from an unknown address may be tried against a session.
+    /// Whether this session may be tried against a frame from an address it is
+    /// not filed under.
     ///
-    /// Spends from a budget rather than refusing outright, so a genuine
-    /// migration — a few frames — always gets through, and a flood of guessed
-    /// identifiers cannot buy unbounded verification.
-    fn may_try_unknown_address(&mut self) -> bool {
+    /// Spends from the session's own budget rather than one the endpoint
+    /// shares, so a peer flooding the lookup empties its own allowance and
+    /// nobody else's. Refills over time, so a real migration — a handful of
+    /// frames, one of which needs to land — is never refused.
+    fn may_try_unknown_address(&mut self, peer_id: PeerId) -> bool {
+        let rate = self.migration_rate;
+        let Some(entry) = self.peers.get_mut(&peer_id) else {
+            return false;
+        };
         let now = Instant::now();
-        let elapsed = now.duration_since(self.migration_refilled).as_secs_f32();
-        self.migration_refilled = now;
-        self.migration_budget = (self.migration_budget + elapsed * self.migration_rate as f32)
-            .min(self.migration_rate as f32);
+        let elapsed = now.duration_since(entry.migration_refilled).as_secs_f32();
+        entry.migration_refilled = now;
+        entry.migration_budget =
+            (entry.migration_budget + elapsed * rate as f32).min(rate as f32);
 
-        if self.migration_budget < 1.0 {
+        if entry.migration_budget < 1.0 {
             return false;
         }
-        self.migration_budget -= 1.0;
+        entry.migration_budget -= 1.0;
         true
     }
 
@@ -1460,6 +1471,12 @@ impl Endpoint {
                 addr,
                 session_id,
                 filed: Instant::now(),
+                // Full, like the endpoint-wide bucket this replaced. A peer
+                // that moves moments after connecting is not doing anything
+                // suspicious, and starting empty would make it wait out a
+                // refill before it could be found.
+                migration_budget: MAX_MIGRATION_ATTEMPTS_PER_PEER as f32,
+                migration_refilled: Instant::now(),
                 last_heard: Instant::now(),
                 last_sent: Instant::now(),
                 handshake_reply: None,
