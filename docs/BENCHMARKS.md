@@ -456,16 +456,32 @@ stream of encrypted blobs or random telemetry that had never once compressed.
 
 The send path now counts consecutive failures. After four, it stops attempting
 and retries once every 32 sends, so a stream whose content changes is picked up
-again within a bounded delay. Measured on 1024 incompressible bytes, three runs
-each:
+again within a bounded delay.
+
+**The cost that remains is 11%, not the 3% this section used to say.** The
+cycle is four attempts followed by thirty-two skips, so four sends in
+thirty-six attempt; the older figure divided one by the interval and forgot the
+attempts. At 2.9 µs an attempt on 1 KiB of incompressible data that is about
+0.3 µs on every send — a quarter of what §5's row calls framing and AEAD, which
+is why that row is labelled the way it now is.
 
 | | before | after |
 |---|---|---|
 | `Connection::send`, unencrypted mode | 9.41 µs | **7.45 µs** (−21%) |
 | `Connection::send`, encrypted | 10.83 µs | **9.21 µs** (−15%) |
 
-The first row measured a mode that has since been removed; it is kept because
-it is what the change was measured against at the time.
+**Neither row can be reproduced by the command at the top of this file**, and
+that is worth saying plainly. Nothing in the harness measures this: "before"
+and "after" are different builds, on unstated days, at an unstated compression
+level — which matters, because raising the level makes a failed attempt more
+expensive. The first row also measures a mode that has since been removed.
+
+So the direction is sound and the mechanism is now stated correctly, but the
+two numbers are the one place in this document that rests entirely on absolute
+microseconds compared across days, which is exactly what §5 concluded cannot be
+done. Settling it needs a section in the harness that alternates batches of an
+incompressible stream with the probe interval at its current value and at
+zero, in one run.
 
 Compressible payloads are unaffected: the counter never advances, so coding is
 attempted every time exactly as before.

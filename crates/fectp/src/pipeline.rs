@@ -307,7 +307,12 @@ const CODING_MISS_LIMIT: u8 = 4;
 ///
 /// Compression is attempted again periodically because a stream's content can
 /// change — an opaque channel carrying encrypted blobs may later carry text.
-/// At 32 this costs about 3% of one attempt per send while it is not paying.
+///
+/// The cycle is four attempts and then thirty-two skips, so **four sends in
+/// thirty-six attempt** — about 11%, not the 3% this comment claimed by
+/// dividing one by the interval and forgetting the attempts that precede each
+/// run of skips. At the 2.9 µs an attempt costs on 1 KiB of incompressible
+/// data, that is roughly 0.3 µs on every send.
 const CODING_PROBE_INTERVAL: u8 = 32;
 
 impl Peer {
