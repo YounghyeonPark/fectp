@@ -740,8 +740,8 @@ A 256 KiB message through a rate-limited link with a finite queue.
 |---|---|---|---|---|
 | 10 Mbit/s, 64 KiB queue | 944.26 ms | 0.0% (0/270) | 0.26 MiB/s | 22% |
 | 10 Mbit/s, 32 KiB queue | 927.00 ms | 0.0% (0/265) | 0.27 MiB/s | 23% |
-| 10 Mbit/s, 8 KiB queue | 977.76 ms | 2.7% (7/264) | 0.26 MiB/s | 22% |
-| 1 Mbit/s, 8 KiB queue | 4647.25 ms | 1.5% (4/273) | 0.05 MiB/s | 44% |
+| 10 Mbit/s, 8 KiB queue | 977.76 ms | 2.7% (7/264) | 0.26 MiB/s | 21% |
+| 1 Mbit/s, 8 KiB queue | 4647.25 ms | 1.5% (4/273) | 0.05 MiB/s | 45% |
 
 The overflow column counts drops the sender caused itself: frames offered to a
 queue that was already full, each then paid for by a retransmission timer.
@@ -754,8 +754,8 @@ as acknowledgements arrive, so a sender that has learnt nothing about a path
 does not put a full burst into it (D24).
 
 **The goodput column is the uncomfortable one.** A 256 KiB reliable transfer
-gets about a quarter of a 10 Mbit/s link and about two fifths of a 1 Mbit/s
-one. The bottleneck rate is not what limits this — the send window is, and the
+gets a little over a fifth of a 10 Mbit/s link and not quite half of a
+1 Mbit/s one. The bottleneck rate is not what limits this — the send window is, and the
 faster the link the worse that shows, which is the signature of a window that
 does not grow to fill the bandwidth-delay product. That is a real limitation of
 the current design and not a harness artefact, and it is the strongest argument
@@ -857,7 +857,7 @@ waits for a timer before anyone notices.
 It is worth knowing which direction of a path matters. A link that is lossy
 only on the return leg costs this protocol almost nothing.
 
-### A crowded endpoint spares the median and not the tail
+### A crowded endpoint costs the median a little and the tail a lot
 
 One connection's round trip, measured while other peers work the same endpoint.
 The conditions are interleaved: the whole table is measured in order and then

@@ -1076,8 +1076,8 @@ fn other_things_a_path_does() {
     note("a sender that has learnt nothing about a path does not put a full burst");
     note("into it. What changes is how much of the link is spent on datagrams that");
     note("will be dropped.");
-    note("The goodput column is the uncomfortable one: about a quarter of a");
-    note("10 Mbit/s link, and about a third of a 1 Mbit/s one. The bottleneck rate");
+    note("The goodput column is the uncomfortable one: a little over a fifth of a");
+    note("10 Mbit/s link, and not quite half of a 1 Mbit/s one. The link rate");
     note("is not the bottleneck here — the send window is, and the faster the link");
     note("the worse that shows. This section used to report nearly the full link");
     note("rate, which was the rate limiter failing to limit: it banked a whole");
