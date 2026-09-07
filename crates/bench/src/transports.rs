@@ -481,6 +481,9 @@ impl ReorderingRelay {
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
         thread::spawn(move || {
+            // What to wait for when nothing is being held. Long enough not to
+            // spin, short enough to notice the stop flag.
+            const IDLE: Duration = Duration::from_millis(2);
             let mut buf = [0u8; 65535];
             let mut seen = 0u64;
             let mut held: std::collections::VecDeque<(Vec<u8>, Instant)> =
@@ -496,6 +499,19 @@ impl ReorderingRelay {
                     let _ = back_tx.send(frame);
                     held.pop_front();
                 }
+
+                // Wait only until the next held frame falls due. Blocking for
+                // a fixed timeout instead made this relay apply the socket's
+                // timeout rather than the delay it was asked for, which is not
+                // a small difference: it rounded every delay up to the next
+                // 2 ms tick, and the row that delayed every datagram by 5 ms
+                // took thirty seconds to pass 200 messages.
+                let wait = held.front().map_or(IDLE, |(_, since)| {
+                    delay
+                        .saturating_sub(since.elapsed())
+                        .max(Duration::from_micros(100))
+                });
+                let _ = front_rx.set_read_timeout(Some(wait));
 
                 let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
                     continue;

@@ -928,20 +928,43 @@ fn other_things_a_path_does() {
 
     let mut baseline = 0.0;
     row_header(&["reordering", "200 reliable msgs", "vs in order", "arrived"]);
-    for (label, every, delay) in [
-        ("none", 0u64, Duration::ZERO),
-        ("every one by 2 ms (control)", 1, Duration::from_millis(2)),
-        ("1 in 10 by 2 ms", 10, Duration::from_millis(2)),
-        ("every one by 5 ms (control)", 1, Duration::from_millis(5)),
-        ("1 in 5 by 5 ms", 5, Duration::from_millis(5)),
-    ] {
+
+    // Each reordering row is preceded by a control that adds the same mean
+    // latency and reorders nothing. Delaying one datagram in `every` by `d`
+    // adds `d / every` per datagram on average, so the control delays every
+    // datagram by exactly that. The control used to delay every datagram by
+    // the full `d`, which is `every` times as much latency — it was not a
+    // control for these rows but a much harsher path, and it duly came out
+    // forty times slower than the row it was supposed to bound.
+    let mut rows: Vec<(String, u64, Duration)> =
+        vec![("none".to_string(), 0, Duration::ZERO)];
+    for (every, delay) in [(10u64, Duration::from_millis(2)), (5, Duration::from_millis(5))] {
+        let matched = delay / every as u32;
+        rows.push((
+            format!(
+                "every one by {:.1} ms (control)",
+                matched.as_secs_f64() * 1000.0
+            ),
+            1,
+            matched,
+        ));
+        rows.push((
+            format!(
+                "1 in {every} by {:.0} ms",
+                delay.as_secs_f64() * 1000.0
+            ),
+            every,
+            delay,
+        ));
+    }
+
+    for (label, every, delay) in rows {
         let echo = FectpEcho::public_key();
         let public = echo.public.expect("identity");
         let relay = (every > 0).then(|| ReorderingRelay::spawn(echo.addr, every, delay));
         let addr = relay.as_ref().map_or(echo.addr, |r| r.addr);
 
-        let conn =
-            Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         conn.set_read_timeout(Some(Duration::from_secs(30)))
             .expect("timeout");
 
@@ -964,7 +987,7 @@ fn other_things_a_path_does() {
             baseline = elapsed;
         }
         row(&[
-            label,
+            &label,
             &ms(elapsed),
             &if every == 0 {
                 "—".to_string()
@@ -975,11 +998,25 @@ fn other_things_a_path_does() {
         ]);
     }
     note("Delaying a datagram slows any protocol down, so the reordering rows mean");
-    note("nothing without the control above each of them, which applies the same");
-    note("delay to every datagram and therefore reorders nothing. The difference");
-    note("between a pair is what reordering itself costs; the rest is latency.");
+    note("nothing without the control above each of them. That control adds the");
+    note("same mean latency and reorders nothing: one datagram in N delayed by d");
+    note("is d/N per datagram on average, so the control delays every datagram by");
+    note("d/N. The difference within a pair is what reordering itself costs; the");
+    note("rest is latency, and the pair is only comparable because the latency is");
+    note("the same on both sides of it.");
     note("Delivery is unordered by design — a frame is delivered on arrival rather");
     note("than held for the one before it — so that difference should be small.");
+    note("Read this table as a one-sided bound and no more. The control rows hold");
+    note("and re-time every datagram while the rows below them hold one in N, so");
+    note("the injector does ten times the work on one side of each pair: over");
+    note("seven runs a control row ranged from 112 to 704 ms with nothing changed");
+    note("about it, which is the relay thread being scheduled rather than the");
+    note("protocol. Tightening this needs an injector whose own cost does not");
+    note("depend on the condition, and there is not one here.");
+    note("What it does support: reordering is not expensive. In 12 of those 14");
+    note("pairs the reordering row came in faster than the equal-latency control");
+    note("beside it, and the two that did not were inside the control's own");
+    note("run-to-run band. Every row of every run delivered everything.");
     println!();
 
     // ── a bottleneck ─────────────────────────────────────────────────────

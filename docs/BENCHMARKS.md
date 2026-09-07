@@ -688,30 +688,49 @@ The parts of a real path that are not loss. Each is separated because a
 protocol can be right about one and wrong about another — and two of these
 three are known gaps rather than results.
 
-### Reordering costs nothing
+### Reordering is not expensive, and that is as much as this can say
 
 200 reliable 256-byte messages through a relay that holds some datagrams back.
 
 | | time | vs in order | arrived |
 |---|---|---|---|
-| none | 4.94 ms | — | all |
-| **every one by 2 ms (control)** | **106.20 ms** | 21.5x | all |
-| 1 in 10 by 2 ms | 106.85 ms | 21.6x | all |
-| **every one by 5 ms (control)** | **185.61 ms** | 37.6x | all |
-| 1 in 5 by 5 ms | 104.89 ms | 21.3x | all |
+| none | 5.88 ms | — | all |
+| **every one by 0.2 ms (control)** | **112.47 ms** | 19.1x | all |
+| 1 in 10 by 2 ms | 116.42 ms | 19.8x | all |
+| **every one by 1.0 ms (control)** | **138.82 ms** | 23.6x | all |
+| 1 in 5 by 5 ms | 136.43 ms | 23.2x | all |
 
 **The controls are the measurement.** Delaying a datagram slows any protocol
-down, so a reordering run on its own says nothing. Each control applies the
-same delay to *every* datagram, which reorders nothing; the difference between
-a pair is what reordering itself costs.
+down, so a reordering run on its own says nothing. Each control adds the same
+*mean* latency and reorders nothing: one datagram in N delayed by d is d/N per
+datagram on average, so the control delays every datagram by d/N.
 
-Both reordering rows sit at or below their control, so **reordering costs
-nothing measurable here** and the whole slowdown is latency. That is the design
-working as intended: delivery is unordered, so a frame is handed up on arrival
-rather than held for the one before it, and nothing is left to go wrong when
-they arrive in a different order. (The 5 ms pair is inverted — the reordered run
-came out faster than its control — which is the run-to-run spread, not a
-result.)
+That last point is a correction. The control used to delay every datagram by
+the full d — N times the latency of the row it was supposed to bound — so it
+was not a control at all but a much harsher path, and it duly came out forty
+times slower than the row beneath it. The 5 ms control took **30 seconds** to
+pass 200 messages, which was a second bug: the relay drained its held queue
+only at the top of its loop and then blocked on a socket read timeout, so it
+applied the socket's 2 ms tick rather than the delay it had been asked for.
+
+**Read the result as a one-sided bound.** The control rows hold and re-time
+every datagram while the rows below them hold one in N, so the injector does
+ten times the work on one side of each pair. Over seven runs a control row
+ranged from 112 ms to 704 ms with nothing changed about it — that is the relay
+thread being scheduled, not the protocol. The run reproduced above is one where
+both controls sat at the bottom of that band, which is where the injector is
+not the bottleneck.
+
+What the table does support: **reordering is not expensive.** In 12 of those 14
+pairs the reordering row came in faster than the equal-latency control beside
+it, and the two that did not were inside the control's own run-to-run band.
+Every row of every run delivered everything.
+
+That is the design working as intended: delivery is unordered, so a frame is
+handed up on arrival rather than held for the one before it, and nothing is
+left to go wrong when they arrive in a different order. Saying how *cheap* it
+is would need an injector whose own cost does not depend on the condition, and
+there is not one here.
 
 ### A bottleneck is where congestion control earns its place
 
