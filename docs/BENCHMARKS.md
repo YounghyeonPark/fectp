@@ -38,8 +38,11 @@ packet loss found two bugs that lost messages outright, and §10 is why there is
 congestion control at all.
 
 It has also had to correct itself repeatedly, and those corrections are left in
-rather than tidied away: §2, §5, §9 and §10 each record a measurement that was
-wrong before it was right. A benchmark that only ever confirms what its author
+rather than tidied away: §2, §5, §8, §9, §10 and §11 each record a measurement
+that was wrong before it was right. Three of those were the harness measuring
+itself — a rate limiter that banked a second of credit and so never limited, a
+delay injector that applied its socket's timeout instead of its delay, and a
+control that added N times the latency of the row it was controlling. A benchmark that only ever confirms what its author
 expected is not measuring anything.
 
 ---
