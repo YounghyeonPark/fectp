@@ -566,6 +566,9 @@ impl BottleneckRelay {
         let over = Arc::clone(&overflowed);
         let off = Arc::clone(&offered);
         thread::spawn(move || {
+            // What to wait for when the queue is empty: long enough not to
+            // spin, short enough to notice the stop flag.
+            const IDLE: Duration = Duration::from_millis(2);
             let mut buf = [0u8; 65535];
             let mut queue: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
             let mut queued_bytes = 0usize;
@@ -577,7 +580,16 @@ impl BottleneckRelay {
                 let now = Instant::now();
                 credit += now.duration_since(last).as_secs_f64() * bytes_per_sec as f64;
                 last = now;
-                credit = credit.min(bytes_per_sec as f64);
+                // Cap the burst at a few milliseconds of link time. This used
+                // to bank a whole second of capacity, which the relay earns
+                // while it sits idle through connection setup — so the 256 KiB
+                // that followed went out at once. That is how a 10 Mbit/s row
+                // came to read 21 ms and 11.65 MiB/s, which is 97 Mbit/s: the
+                // link was not limiting anything.
+                //
+                // Not smaller than one datagram, or the loop's 2 ms wake would
+                // throttle the link below its own rate rather than to it.
+                credit = credit.min((bytes_per_sec as f64 * 0.004).max(2048.0));
 
                 while let Some(frame) = queue.front() {
                     if credit < frame.len() as f64 {
@@ -588,6 +600,22 @@ impl BottleneckRelay {
                     let _ = back_tx.send(frame);
                     queue.pop_front();
                 }
+
+                // Wait only until the head of the queue can afford to go. A
+                // fixed timeout here made the relay drain at its own wake
+                // granularity rather than at the link rate: with 226 frames to
+                // pass and a 2 ms tick, that is its own bottleneck on top of
+                // the one being modelled.
+                let wait = queue.front().map_or(IDLE, |frame| {
+                    let owed = frame.len() as f64 - credit;
+                    if owed <= 0.0 {
+                        Duration::from_micros(100)
+                    } else {
+                        Duration::from_secs_f64(owed / bytes_per_sec as f64)
+                            .clamp(Duration::from_micros(100), IDLE)
+                    }
+                });
+                let _ = front_rx.set_read_timeout(Some(wait));
 
                 let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
                     continue;

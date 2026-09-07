@@ -736,12 +736,12 @@ there is not one here.
 
 A 256 KiB message through a rate-limited link with a finite queue.
 
-| bottleneck | time | queue overflow | goodput |
-|---|---|---|---|
-| 10 Mbit/s, 64 KiB queue | 232.72 ms | 0.0% (0/234) | 1.07 MiB/s |
-| 10 Mbit/s, 32 KiB queue | 229.10 ms | 2.1% (5/237) | 1.09 MiB/s |
-| 10 Mbit/s, 8 KiB queue | 263.79 ms | 13.3% (36/271) | 0.95 MiB/s |
-| 1 Mbit/s, 8 KiB queue | 2314.98 ms | 3.9% (10/257) | 0.11 MiB/s |
+| bottleneck | time | queue overflow | goodput | of the link |
+|---|---|---|---|---|
+| 10 Mbit/s, 64 KiB queue | 944.26 ms | 0.0% (0/270) | 0.26 MiB/s | 22% |
+| 10 Mbit/s, 32 KiB queue | 927.00 ms | 0.0% (0/265) | 0.27 MiB/s | 23% |
+| 10 Mbit/s, 8 KiB queue | 977.76 ms | 2.7% (7/264) | 0.26 MiB/s | 22% |
+| 1 Mbit/s, 8 KiB queue | 4647.25 ms | 1.5% (4/273) | 0.05 MiB/s | 44% |
 
 The overflow column counts drops the sender caused itself: frames offered to a
 queue that was already full, each then paid for by a retransmission timer.
@@ -753,16 +753,33 @@ side, and the link carried it anyway. The window now opens at 4 and widens only
 as acknowledgements arrive, so a sender that has learnt nothing about a path
 does not put a full burst into it (D24).
 
-Goodput barely moved, because the bottleneck rate is the bottleneck. What
-changed is how much of the link is spent on datagrams that will be dropped: the
-total offered fell from 469 to 257.
+**The goodput column is the uncomfortable one.** A 256 KiB reliable transfer
+gets about a quarter of a 10 Mbit/s link and about two fifths of a 1 Mbit/s
+one. The bottleneck rate is not what limits this — the send window is, and the
+faster the link the worse that shows, which is the signature of a window that
+does not grow to fill the bandwidth-delay product. That is a real limitation of
+the current design and not a harness artefact, and it is the strongest argument
+this document contains for a window that keeps opening rather than one bounded
+by a constant.
+
+This section previously reported roughly the full link rate, and that was
+wrong. The rate limiter banked a whole second of transmission credit while it
+sat idle through connection setup, so the 256 KiB that followed went out in one
+burst without ever being limited — one 10 Mbit/s row read **21 ms and
+11.65 MiB/s**, which is 97 Mbit/s and should have been caught by reading it.
+The credit is now capped at a few milliseconds of link time, and the relay
+wakes when the head of its queue can afford to go rather than on a fixed tick.
+The second change turned out not to move the numbers, which is worth recording:
+the drain granularity was not what limited the link.
+
+The rows now repeat within about 20% from run to run. The middle two used to
+swing by more than a factor of two, which was the same bug — how much credit
+had been banked depended on how long setup happened to take.
 
 A first draft of this section reasoned that a queue larger than one window —
 32 frames, about 38 KiB — could not be made to overflow. The 64 KiB row
 disproved it: retransmissions are offered *on top of* the window, so the burst
-is not bounded by it. The run-to-run spread on the middle two rows is wide;
-only the 1 Mbit/s row is far enough outside it to lean on, and it holds across
-runs at 2.4-4.7%.
+is not bounded by it.
 
 ### A rebinding NAT no longer ends the session
 

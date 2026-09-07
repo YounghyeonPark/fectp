@@ -1074,11 +1074,18 @@ fn other_things_a_path_does() {
     note("path was doing.");
     note("The window now opens at 4 and widens only as acknowledgements arrive, so");
     note("a sender that has learnt nothing about a path does not put a full burst");
-    note("into it. Goodput barely moves, because the bottleneck rate is the");
-    note("bottleneck — what changes is how much of the link is spent on datagrams");
-    note("that will be dropped.");
-    note("Treat these as one host's figures: the run-to-run spread on the middle");
-    note("rows is wide, and only the last one is far enough outside it to lean on.");
+    note("into it. What changes is how much of the link is spent on datagrams that");
+    note("will be dropped.");
+    note("The goodput column is the uncomfortable one: about a quarter of a");
+    note("10 Mbit/s link, and about a third of a 1 Mbit/s one. The bottleneck rate");
+    note("is not the bottleneck here — the send window is, and the faster the link");
+    note("the worse that shows. This section used to report nearly the full link");
+    note("rate, which was the rate limiter failing to limit: it banked a whole");
+    note("second of capacity while idle through connection setup, so the 256 KiB");
+    note("that followed went out at once. A 10 Mbit/s row read 21 ms and");
+    note("11.65 MiB/s, which is 97 Mbit/s.");
+    note("These rows repeat within about 20% run to run, which they did not");
+    note("before: the middle two used to swing by more than a factor of two.");
     println!();
 
     // ── a rebinding NAT ──────────────────────────────────────────────────
