@@ -573,7 +573,7 @@ These are unimplemented, not overlooked.
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
-| **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. | Measured with 23 busy peers, the median is unchanged and p95 grows about fivefold (BENCHMARKS.md §11). A consequence of D14, not a defect in it. |
+| **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. A consequence of [D14](#d14--many-peers-share-one-socket-through-an-event-loop), not a defect in it. | What a datagram costs no longer grows with the number of peers ([D62](#d62--the-loop-was-charging-every-datagram-for-the-whole-peer-table)), so what is left is the queueing itself. How much that is remains unmeasured here: BENCHMARKS.md §11's table has no same-run control and its conclusion did not reproduce, so it is not evidence either way. |
 | **Counter exhaustion ends a session** | A session ends after 2^64 frames. Keys are replaced along the way ([D50](#d50--one-key-does-not-last-a-whole-session)), but the counter is never reset — it is the nonce. | Not reachable in practice: at a million frames a second it is half a million years. The error path exists (`Error::NonceExhausted`) because a bound with no code behind it is a comment. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
@@ -2796,3 +2796,67 @@ Neither is a mistake in the protocol, and neither would have been found by
 running the benchmark again — it reproduces its own error perfectly. They were
 found by asking what the code being timed actually does, which is a different
 question from what the number says.
+
+## D62 — The loop was charging every datagram for the whole peer table
+
+The last of the adversarial pass's findings, and the only one left that was a
+denial of service rather than a wrong number.
+
+**An `Endpoint` is one socket and one loop.** Every pass of that loop drove the
+retransmissions, the queues, the peer timeouts and the keep-alives, and then
+walked the table three more times to work out when to wake. The loop goes round
+**once per datagram received** — so each arriving datagram cost a walk of the
+whole table, including datagrams rejected at the version check, which need no
+key, no handshake and no session.
+
+Measured, a burst of 4,000 such datagrams against an established peer's round
+trip:
+
+| sessions on file | round trip |
+|---|---|
+| almost none | 279 µs |
+| 64 | **153 ms** |
+
+**548× at 64 sessions**, and the table holds
+[`MAX_PEERS`](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work) —
+1,024 by default, and reachable by anyone holding the endpoint's public key,
+which is public by design.
+
+### The fix, and why it is not a timer wheel
+
+All of that work is **time-driven**: it happens at a moment, not because a
+datagram arrived. So the loop now keeps one `Option<Instant>` — the earliest
+moment anything falls due — and runs the drives only when it has arrived.
+Reading it replaces three table walks; the walk that recomputes it runs after a
+drive pass, which is a few times a second at most.
+
+A heap or a timer wheel would make the recompute `O(log n)` instead of `O(n)`.
+It is not worth it here: the table is bounded at a thousand and the recompute
+is bounded at a handful a second, so the difference is between negligible and
+negligible — and a heap needs an invariant about stale entries when a deadline
+moves, which is a new place for a bug. The cached instant only ever moves
+*earlier* when something is added, and a deadline moving later is safe to
+ignore: the loop wakes once for nothing and recomputes.
+
+### The one drive that could not be gated
+
+Queued fragments move when an acknowledgement frees window space, which is not
+a moment the loop can predict. That pass is skipped in `O(1)` instead, on a
+count of peers with something queued — recounted from the peers themselves at
+the end of each pass, so the gate cannot drift out of step with what is
+actually there.
+
+### Result
+
+| sessions on file | before | after |
+|---|---|---|
+| almost none | 279 µs | 281 µs |
+| 64 | 153 ms | **303 µs** |
+
+548× becomes 1.08×. Removing the gate fails the test.
+
+**What was checked hardest.** Gating timers is exactly the change that makes
+timing tests lie, so the five files that depend on a timer actually
+firing — retransmission, keep-alives, peer timeouts, migration probes, and all
+three together — were run fifteen times each. No failures. That is the evidence
+that the deadlines are still reached, and it is worth more than the speed-up.

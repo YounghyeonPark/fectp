@@ -345,6 +345,28 @@ pub struct Endpoint {
     handshake_rate: u32,
     /// The per-session ceiling on attempts from unknown addresses.
     migration_rate: u32,
+    /// When the earliest time-driven work falls due, or `None` when none is
+    /// pending.
+    ///
+    /// Retransmissions, keep-alives, peer timeouts and unanswered handshakes
+    /// all happen at a moment, not because a datagram arrived. They used to be
+    /// driven on every pass of the poll loop, and that loop goes round once per
+    /// datagram — so each arriving datagram cost a walk of the whole peer table,
+    /// including datagrams rejected at the version check, which anybody can
+    /// send. Measured at 64 sessions, a burst of 4,000 such datagrams took a
+    /// round trip from 280 µs to 153 ms.
+    ///
+    /// Kept as a single instant rather than a queue: the table is bounded at
+    /// [`MAX_PEERS`], and the recompute runs only when something is actually
+    /// due, which is a few times a second at most.
+    next_wake: Option<Instant>,
+    /// Peers with a split message still being fed out.
+    ///
+    /// The queue pass is the one drive that is not purely time-driven — an
+    /// acknowledgement frees window space — so it cannot be gated behind
+    /// `next_wake`. This lets it be skipped in O(1) instead, which is what
+    /// happens whenever nobody is sending a message too large for one frame.
+    queueing: usize,
     max_peers: usize,
     /// Sent in the payload of every handshake response.
     handshake_reply: Vec<u8>,
@@ -480,6 +502,8 @@ impl Endpoint {
             handshake_refilled: Instant::now(),
             handshake_rate: MAX_HANDSHAKES_PER_SECOND,
             migration_rate: MAX_MIGRATION_ATTEMPTS_PER_PEER,
+            next_wake: None,
+            queueing: 0,
             max_peers: MAX_PEERS,
             handshake_reply: Vec::new(),
             keepalive: None,
@@ -605,6 +629,7 @@ impl Endpoint {
                 attempts: 1,
             },
         );
+        self.wake_at(Instant::now() + Duration::from_millis(HANDSHAKE_RETRY_MS));
         Ok(peer_id)
     }
 
@@ -641,53 +666,34 @@ impl Endpoint {
         let deadline = timeout.map(|t| Instant::now() + t);
 
         loop {
-            self.drive_retransmits()?;
-            if let Some(event) = self.drive_handshakes()? {
-                return Ok(event);
+            // Time-driven work runs when it is due, not once per datagram.
+            if self.next_wake.is_some_and(|at| Instant::now() >= at) {
+                self.drive_retransmits()?;
+                if let Some(event) = self.drive_handshakes()? {
+                    return Ok(event);
+                }
+                self.drive_liveness();
+                self.drive_keepalives()?;
+                self.next_wake = self.earliest_deadline();
             }
-            self.drive_queues()?;
-            self.drive_liveness();
-            self.drive_keepalives()?;
+            // The exception: a queue moves when an acknowledgement frees
+            // window space, which is not a moment this loop can predict. It is
+            // skipped in O(1) when nothing is queued, which is the usual case.
+            if self.queueing > 0 {
+                self.drive_queues()?;
+            }
             if let Some(event) = self.events.pop_front() {
                 return Ok(event);
             }
 
-            // Wake for whichever comes first: the caller's timeout or the
-            // nearest retransmission deadline across all peers.
-            let now = self.now_ms();
-            let until_retransmit = self
-                .peers
-                .values()
-                .filter_map(|e| e.peer.retransmit.next_deadline_ms())
-                .min()
-                .map(|at| Duration::from_millis(at.saturating_sub(now)));
-            let until_deadline = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            // An unanswered handshake needs waking for too.
-            let until_retransmit = match self
-                .outbound
-                .values()
-                .map(|o| o.next_attempt)
-                .min()
-                .map(|at| at.saturating_duration_since(Instant::now()))
-            {
-                Some(handshake) => Some(match until_retransmit {
-                    Some(data) => data.min(handshake),
-                    None => handshake,
-                }),
-                None => until_retransmit,
-            };
-            // A keep-alive is a third thing worth waking for. Sleeping past
-            // it would let a NAT mapping lapse while this endpoint sat in
-            // `poll` with nothing else to do.
-            let wait = [
-                until_retransmit,
-                until_deadline,
-                self.next_keepalive(),
-                self.next_liveness_check(),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+            // Wake for whichever comes first: the caller's timeout, or the
+            // moment the next piece of time-driven work falls due. The second
+            // is read rather than recomputed — recomputing it walked the peer
+            // table three times per datagram.
+            let now = Instant::now();
+            let until_deadline = deadline.map(|d| d.saturating_duration_since(now));
+            let until_work = self.next_wake.map(|at| at.saturating_duration_since(now));
+            let wait = [until_deadline, until_work].into_iter().flatten().min();
             // A zero timeout means "block forever" to the socket layer, which
             // is the opposite of what is meant here.
             self.socket
@@ -1197,6 +1203,7 @@ impl Endpoint {
     /// turns it off.
     pub fn set_peer_timeout(&mut self, within: Option<Duration>) {
         self.peer_timeout = within.map(|t| t.max(MIN_PEER_TIMEOUT));
+        self.rescan_wake();
     }
 
     /// Sends a small frame to any peer nothing has been sent to for `every`.
@@ -1229,6 +1236,7 @@ impl Endpoint {
     /// it off.
     pub fn set_keepalive(&mut self, every: Option<Duration>) {
         self.keepalive = every.map(|t| t.max(MIN_KEEPALIVE));
+        self.rescan_wake();
     }
 
     /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
@@ -1476,6 +1484,8 @@ impl Endpoint {
                 datagram_limit,
             },
         );
+        // A new session brings its own keep-alive and timeout deadlines.
+        self.rescan_wake();
     }
 
     /// Feeds queued fragments into whatever send window each peer has free.
@@ -1509,6 +1519,9 @@ impl Endpoint {
                 });
             }
         }
+        // Recounted from the peers themselves rather than tracked, so the gate
+        // cannot drift out of step with what is actually queued.
+        self.queueing = self.peers.values().filter(|e| e.peer.queued() > 0).count();
         Ok(())
     }
 
@@ -1538,6 +1551,51 @@ impl Endpoint {
             send_datagram(&self.socket, &frame, addr)?;
         }
         Ok(None)
+    }
+
+    /// Recomputes the wake from scratch.
+    ///
+    /// For the places that change what is pending rather than add to it — a
+    /// new setting, a peer arriving or leaving. Walks the table, so it belongs
+    /// on those paths and not on the datagram path.
+    fn rescan_wake(&mut self) {
+        self.next_wake = self.earliest_deadline();
+    }
+
+    /// Notes that something falls due at `at`, so the loop wakes for it.
+    ///
+    /// Only ever brings the wake forward. A deadline moving later is safe to
+    /// ignore: the loop wakes once too early, finds nothing due, and recomputes.
+    fn wake_at(&mut self, at: Instant) {
+        self.next_wake = Some(match self.next_wake {
+            Some(existing) => existing.min(at),
+            None => at,
+        });
+    }
+
+    /// The earliest moment any time-driven work falls due.
+    ///
+    /// Walks the peer table, which is why it runs after a drive pass rather
+    /// than before every datagram.
+    fn earliest_deadline(&self) -> Option<Instant> {
+        let now_ms = self.now_ms();
+        let now = Instant::now();
+        let retransmit = self
+            .peers
+            .values()
+            .filter_map(|e| e.peer.retransmit.next_deadline_ms())
+            .min()
+            .map(|at| now + Duration::from_millis(at.saturating_sub(now_ms)));
+        let handshake = self.outbound.values().map(|o| o.next_attempt).min();
+        [
+            retransmit,
+            handshake,
+            self.next_keepalive().map(|d| now + d),
+            self.next_liveness_check().map(|d| now + d),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Releases peers nothing has been heard from inside the timeout.
@@ -1716,13 +1774,25 @@ impl Endpoint {
                 data: data.to_vec(),
                 fragment: None,
             });
+            // A retransmission is now pending, and the loop only wakes for
+            // work it has been told about.
+            let due = entry.peer.retransmit.next_deadline_ms();
+            if let Some(at) = due {
+                let now_ms = self.now_ms();
+                self.wake_at(Instant::now() + Duration::from_millis(at.saturating_sub(now_ms)));
+            }
             return Ok(());
         }
 
         entry.peer.queue_message(data, payload_type, limit)?;
+        // Opens the queue gate; `drive_queues` recounts and closes it again
+        // once everything has gone out.
+        self.queueing += 1;
         // Start it now rather than at the next poll, so a caller that queues
         // and then blocks in poll does not wait a round trip for nothing.
-        self.drive_queues()
+        self.drive_queues()?;
+        self.rescan_wake();
+        Ok(())
     }
 
     /// Reliable messages to one peer still awaiting acknowledgement.
