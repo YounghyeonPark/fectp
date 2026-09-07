@@ -47,16 +47,47 @@ fn main() {
         println!("about 48 times slower. Re-run with --release.");
     }
 
-    connection_setup();
-    round_trip_latency();
-    round_trips_needed();
-    per_message_overhead();
-    crypto_cost();
-    compression();
-    compression_level();
-    under_loss();
-    other_things_a_path_does();
-    jitter_asymmetry_and_crowding();
+    // A section can be named on the command line, because re-measuring one
+    // of them should not cost a full run: two rows in section 10 take a
+    // minute each by construction, so the whole thing is minutes long and
+    // checking whether a figure is stable means running it several times.
+    // No argument runs everything, which is what the documented command does.
+    let wanted: Vec<usize> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
+    let run = |n: usize| wanted.is_empty() || wanted.contains(&n);
+
+    if run(1) {
+        connection_setup();
+    }
+    if run(2) {
+        round_trip_latency();
+    }
+    if run(3) {
+        round_trips_needed();
+    }
+    if run(4) {
+        per_message_overhead();
+    }
+    if run(5) {
+        crypto_cost();
+    }
+    if run(6) {
+        compression();
+    }
+    if run(7) {
+        compression_level();
+    }
+    if run(8) {
+        under_loss();
+    }
+    if run(9) {
+        other_things_a_path_does();
+    }
+    if run(10) {
+        jitter_asymmetry_and_crowding();
+    }
 
     println!("\n{}", "=".repeat(72));
     println!("Absolute times are loopback figures; see the round-trip table for");
@@ -637,65 +668,118 @@ fn under_loss() {
         "loss injected by a relay; the handshake is exempt so this measures data",
     );
 
-    const RATES: &[u32] = &[0, 10, 50, 100];
+    // The trailing 0 is a control: the same measurement as the first row, run
+    // last. Every ratio in this table is against the first, so anything that
+    // drifted over the block would otherwise be charged to loss.
+    const RATES: &[u32] = &[0, 10, 50, 100, 0];
     const MESSAGES: usize = 100;
+    // Each row is measured this many times. One sample per rate could not tell
+    // 1% from 5%: across five runs of the old single-sample table the 1% row
+    // ranged 30x to 63x and the 5% row 31x to 57x, and which of the two was
+    // larger depended on the run. Recovery here is governed by a
+    // retransmission timer, so one badly placed drop moves a row by a factor
+    // of two.
+    const SAMPLES: usize = 5;
 
     row_header(&[
         "loss",
         "100 reliable msgs",
         "vs no loss",
+        "run to run",
         "1 lost costs",
     ]);
 
     let mut baseline = 0.0;
     for &rate in RATES {
-        let echo = FectpEcho::public_key();
-        let relay = LossyRelay::spawn(echo.addr, rate, 0x1234_5678 + u64::from(rate));
-        let public = echo.public.expect("identity");
+        let mut times = Vec::with_capacity(SAMPLES);
+        let mut drops = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let echo = FectpEcho::public_key();
+            // The seed depends on the sample and not on the rate, so the same
+            // sample at two rates draws the same numbers and the higher rate
+            // drops a superset of the lower one's until the two diverge.
+            // Seeding by rate instead gave every row its own unrelated
+            // sequence, which is what made the 10% row of the fragmented table
+            // below finish faster than the 5% row in every run.
+            let relay = LossyRelay::spawn(echo.addr, rate, 0x1234_5678 + sample as u64);
+            let public = echo.public.expect("identity");
 
-        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
-            .expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(30)))
-            .expect("timeout");
+            let conn =
+                Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+            conn.set_read_timeout(Some(Duration::from_secs(30)))
+                .expect("timeout");
 
-        let payload = datasets::incompressible(256);
-        let start = std::time::Instant::now();
-        for _ in 0..MESSAGES {
-            // The window is 32, so this blocks partway through and the send
-            // rate becomes whatever acknowledgements allow.
-            loop {
-                match conn.send_reliable(&payload, PayloadType::Opaque) {
-                    Ok(_) => break,
-                    Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
+            let payload = datasets::incompressible(256);
+            let start = std::time::Instant::now();
+            for _ in 0..MESSAGES {
+                // The window is 32, so this blocks partway through and the send
+                // rate becomes whatever acknowledgements allow.
+                loop {
+                    match conn.send_reliable(&payload, PayloadType::Opaque) {
+                        Ok(_) => break,
+                        Err(_) => conn.flush(Duration::from_secs(30)).expect("flush"),
+                    }
                 }
             }
+            conn.flush(Duration::from_secs(30)).expect("flush");
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+            // Read before the relay goes: it is the only thing that knows.
+            drops.push(relay.dropped());
+            drop(conn);
+            drop(relay);
+            drop(echo);
         }
-        conn.flush(Duration::from_secs(30)).expect("flush");
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        drop(conn);
-        drop(relay);
-        drop(echo);
-
-        if rate == 0 {
-            baseline = elapsed;
+        // Which of the two zero rows this is has to be settled before the
+        // baseline is assigned, or the first row answers to a test written for
+        // the last one and both print as the control.
+        let control = rate == 0 && baseline != 0.0;
+        if rate == 0 && !control {
+            let mut sorted = times.clone();
+            sorted.sort_unstable_by(f64::total_cmp);
+            baseline = sorted[sorted.len() / 2];
         }
-        // Roughly how much each lost datagram added, spread over the ones this
-        // rate should have dropped.
-        let expected_losses = (MESSAGES as f64 * f64::from(rate) / 1000.0).max(1.0);
+        // How much each lost datagram added, over the ones the relay actually
+        // threw away. This used to divide by a count computed from the rate and
+        // the message total, which counts one direction and no retransmissions
+        // — several times too few, so the column read several times too high.
+        //
+        // Each sample is divided by its own drop count before the median is
+        // taken, rather than dividing one median by another: the sample with
+        // the median time need not be the one with the median number of drops.
+        let mut costs: Vec<f64> = times
+            .iter()
+            .zip(&drops)
+            .map(|(t, d)| (t - baseline) / (*d).max(1) as f64)
+            .collect();
+        costs.sort_unstable_by(f64::total_cmp);
         let per_loss = if rate == 0 {
             "—".to_string()
         } else {
-            format!("{:.0} ms", (elapsed - baseline) / expected_losses)
+            format!("{:.1} ms", costs[costs.len() / 2])
         };
 
+        times.sort_unstable_by(f64::total_cmp);
+        let elapsed = times[times.len() / 2];
+
+        let label = if control {
+            "0.0% again (control)".to_string()
+        } else {
+            format!("{:.1}%", f64::from(rate) / 10.0)
+        };
         row(&[
-            &format!("{:.1}%", f64::from(rate) / 10.0),
+            &label,
             &ms(elapsed),
-            &if rate == 0 {
+            // The control keeps its ratio. That number is the drift over the
+            // block, and every other ratio in this table is worth only what it
+            // says: a 1.1x control means a 38x row is 38x give or take a tenth.
+            &if rate == 0 && !control {
                 "—".to_string()
             } else {
                 format!("{:.1}x", elapsed / baseline)
             },
+            // The spread of the samples behind the median, so a reader can see
+            // which differences this table can carry and which it cannot.
+            &format!("{:.1}-{:.1} ms", times[0], times[times.len() - 1]),
             &per_loss,
         ]);
     }
@@ -704,59 +788,108 @@ fn under_loss() {
     note("a 20 ms floor against a loopback round trip of about 30 us. Recovery is");
     note("governed by the timer, not by the path — one loss costs on the order of");
     note("a thousand round trips, and no amount of protocol tuning changes that.");
-    note("The per-loss column divides by an expected count, not a counted one: the");
-    note("relay drops in both directions and drops retransmissions too, so the");
-    note("divisor is low and the column is a model rather than a measurement.");
+    note("Each row is the median of 5 runs and the column beside it is their");
+    note("range. The ranges are wide because one drop landing in the wrong place");
+    note("costs a timeout, but the medians are steady: over ten runs of this");
+    note("table the rows read 6.8-8.4x, 30-49x and 102-160x and never came out");
+    note("of order. That is worth stating because it was not true while each");
+    note("rate drew its own random sequence; the samples are now paired across");
+    note("rates by seed, so a higher rate drops a superset of a lower one's.");
+    note("The per-loss column divides by the drops the relay actually made, in");
+    note("both directions and retransmissions included. It used to divide by a");
+    note("count derived from the rate, which counted one direction and no");
+    note("retransmissions, so it read several times too high.");
+    note("The last row repeats the first. Over ten runs it read 1.0-2.9x, and");
+    note("that spread is not drift in anything measured here: the loss rows");
+    note("wait on a 20 ms retransmission timer for most of their duration, and");
+    note("on a desktop a measurement taken after the process has been idle");
+    note("reads two to three times slow: `cargo run");
+    note("--release --bin idle` shows the same step on a loopback UDP echo with");
+    note("no FECTP in it. Neither a busy spin nor an untimed exchange recovers");
+    note("it. So read the absolute milliseconds in the first column as this");
+    note("host on this day, and the ratios as good to about a factor of two.");
     println!();
 
     // The same again for a fragmented message, where every fragment is a
     // reliable message and one loss stalls the whole thing.
-    row_header(&["loss", "256 KiB fragmented", "vs no loss", "throughput"]);
+    row_header(&[
+        "loss",
+        "256 KiB fragmented",
+        "vs no loss",
+        "run to run",
+        "throughput",
+    ]);
 
     let mut baseline = 0.0;
     for &rate in RATES {
-        let echo = FectpEcho::public_key();
-        let relay = LossyRelay::spawn(echo.addr, rate, 0xABCD_EF01 + u64::from(rate));
-        let public = echo.public.expect("identity");
-
-        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
-            .expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(60)))
-            .expect("timeout");
-
         const SIZE: usize = 256 * 1024;
-        let payload = datasets::incompressible(SIZE);
-        let start = std::time::Instant::now();
-        let outcome = conn.send_reliable(&payload, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(60)));
-        let elapsed = start.elapsed();
-        let ms_taken = elapsed.as_secs_f64() * 1000.0;
-        drop(conn);
-        drop(relay);
-        drop(echo);
+        let mut times = Vec::with_capacity(SAMPLES);
+        let mut gave_up = 0usize;
+        for sample in 0..SAMPLES {
+            let echo = FectpEcho::public_key();
+            let relay = LossyRelay::spawn(echo.addr, rate, 0xABCD_EF01 + sample as u64);
+            let public = echo.public.expect("identity");
 
-        if rate == 0 {
+            let conn =
+                Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+            conn.set_read_timeout(Some(Duration::from_secs(60)))
+                .expect("timeout");
+
+            let payload = datasets::incompressible(SIZE);
+            let start = std::time::Instant::now();
+            let outcome = conn
+                .send_reliable(&payload, PayloadType::Opaque)
+                .and_then(|()| conn.flush(Duration::from_secs(60)));
+            let elapsed = start.elapsed();
+            drop(conn);
+            drop(relay);
+            drop(echo);
+
+            match outcome {
+                Ok(()) => times.push(elapsed.as_secs_f64() * 1000.0),
+                // Every fragment gets MAX_RETRIES attempts; past some loss rate
+                // one of them runs out and the message is lost entire.
+                Err(_) => gave_up += 1,
+            }
+        }
+
+        let control = rate == 0 && baseline != 0.0;
+        let label = if control {
+            "0.0% again (control)".to_string()
+        } else {
+            format!("{:.1}%", f64::from(rate) / 10.0)
+        };
+        if times.is_empty() {
+            row(&[
+                &label,
+                "gave up",
+                "—",
+                "—",
+                &format!("{gave_up} of {SAMPLES}"),
+            ]);
+            continue;
+        }
+        times.sort_unstable_by(f64::total_cmp);
+        let ms_taken = times[times.len() / 2];
+
+        if rate == 0 && !control {
             baseline = ms_taken;
         }
-        let (time, ratio, rate_col) = match outcome {
-            Ok(()) => (
-                ms(ms_taken),
-                if rate == 0 {
-                    "—".to_string()
-                } else {
-                    format!("{:.1}x", ms_taken / baseline)
-                },
-                format!("{:.1} MiB/s", throughput_mib(SIZE, elapsed)),
-            ),
-            // Every fragment gets MAX_RETRIES attempts; past some loss rate one
-            // of them runs out and the message is lost entire.
-            Err(_) => ("gave up".to_string(), "—".to_string(), "—".to_string()),
+        let ratio = if rate == 0 && !control {
+            "—".to_string()
+        } else {
+            format!("{:.1}x", ms_taken / baseline)
         };
-        row(&[
-            &format!("{:.1}%", f64::from(rate) / 10.0),
-            &time,
-            &ratio,
-            &rate_col,
-        ]);
+        let spread = format!("{:.1}-{:.1} ms", times[0], times[times.len() - 1]);
+        let rate_col = if gave_up > 0 {
+            format!("{gave_up} of {SAMPLES} gave up")
+        } else {
+            format!(
+                "{:.1} MiB/s",
+                throughput_mib(SIZE, Duration::from_secs_f64(ms_taken / 1000.0))
+            )
+        };
+        row(&[&label, &ms(ms_taken), &ratio, &spread, &rate_col]);
     }
 
     note("A fragmented message needs every fragment, so its chance of stalling");
@@ -766,6 +899,12 @@ fn under_loss() {
     note("by timer alone. The congestion window does react to these losses — see");
     note("section 9 — but narrowing the window does not make a lost fragment");
     note("arrive any sooner, and the timer is what decides that.");
+    note("This table separates loss from no loss and nothing finer. Over ten");
+    note("runs its rows read 5-22x, 13-28x and 21-63x: every pair overlaps, and");
+    note("5% and 10% came out in the wrong order in two of the ten. Its own");
+    note("baseline is the reason as much as the loss is — that row ranged 5.1");
+    note("to 11.3 ms across the same ten runs, which is the idle effect");
+    note("described above landing on the denominator.");
 }
 
 // ────────────────────────────── 9. reordering, bottlenecks, rebinding ─────

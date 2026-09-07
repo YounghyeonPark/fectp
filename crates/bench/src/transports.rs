@@ -349,6 +349,13 @@ pub fn tls_round_trip(client: &mut TlsClient, payload: &[u8], buf: &mut [u8]) {
 /// delivery, and a dropped handshake would measure connection setup instead.
 pub struct LossyRelay {
     pub addr: SocketAddr,
+    /// Datagrams actually dropped, in both directions.
+    ///
+    /// The section that uses this used to divide by an expected count computed
+    /// from the rate and the number of messages — which counts one direction
+    /// and no retransmissions, so it was several times too low. The relay is
+    /// the only thing that knows, and it was throwing the answer away.
+    dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 }
 
@@ -365,6 +372,7 @@ impl LossyRelay {
         let addr = front.local_addr().expect("addr");
 
         let stop = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicU64::new(0));
         let client: Arc<std::sync::Mutex<Option<SocketAddr>>> =
             Arc::new(std::sync::Mutex::new(None));
 
@@ -372,6 +380,7 @@ impl LossyRelay {
         let back_tx = back.try_clone().expect("clone");
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
+        let counted = Arc::clone(&dropped);
         thread::spawn(move || {
             let mut rng = seed;
             let mut buf = [0u8; 65535];
@@ -383,6 +392,7 @@ impl LossyRelay {
                 *learn.lock().expect("lock") = Some(from);
                 seen += 1;
                 if seen > 1 && drops(&mut rng, per_mille) {
+                    counted.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
                 let _ = back_tx.send(&buf[..n]);
@@ -390,6 +400,7 @@ impl LossyRelay {
         });
 
         let flag = Arc::clone(&stop);
+        let counted = Arc::clone(&dropped);
         thread::spawn(move || {
             let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
             let mut buf = [0u8; 65535];
@@ -400,6 +411,7 @@ impl LossyRelay {
                 };
                 seen += 1;
                 if seen > 1 && drops(&mut rng, per_mille) {
+                    counted.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
                 let Some(dest) = *client.lock().expect("lock") else {
@@ -409,7 +421,18 @@ impl LossyRelay {
             }
         });
 
-        Self { addr, stop }
+        Self {
+            addr,
+            dropped,
+            stop,
+        }
+    }
+}
+
+impl LossyRelay {
+    /// Datagrams this relay has actually thrown away, both directions.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 

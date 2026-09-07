@@ -3,8 +3,16 @@
 Measured against raw UDP, TCP + TLS 1.3, gzip and plain Zstandard.
 
 ```bash
-cargo run -p fectp-bench --release
+cargo run -p fectp-bench --release          # everything
+cargo run -p fectp-bench --release -- 8     # one section, by its own number
 ```
+
+A full run takes several minutes, most of it in two rows of §11 that wait a
+minute each by construction, so re-measuring one section is worth doing on its
+own. The argument is the number the **harness** prints, which is one less than
+this document's from §9 onwards: §7b and §8 here have no counterpart in the
+harness, so `-- 8` runs what this document calls §9, `-- 9` runs §10 and
+`-- 10` runs §11.
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
 Yours will differ, and so will these: re-running §5 on the same machine on one
@@ -504,37 +512,120 @@ stops being paid for on every message.
 Everything above runs over loopback, which never drops anything — so it
 exercises the parts of the protocol that are cheap and leaves the reliability
 layer, the only part with a hard job, untested. Loss here is injected by a
-relay from a seeded generator, so a run is reproducible. The handshake is
-exempt: this measures data delivery, not connection setup.
+relay. The handshake is exempt: this measures data delivery, not connection
+setup.
+
+Each row is the **median of five runs**, with the spread of those runs beside
+it. A single run per row will not do: recovery is governed by a retransmission
+timer, so whether a drop lands on a datagram that is about to be acknowledged
+anyway or on one that stalls the window is worth a factor of ten, and the
+generator being seeded does not make a run repeatable — which datagram is the
+*n*th to reach the relay depends on timing, so the same seed drops a different
+set each time.
+
+The samples are paired across rates: sample *i* draws the same numbers at every
+rate, so a higher rate drops a superset of a lower one's until the two diverge.
+Seeding by rate instead gave every row an unrelated sequence, and that is what
+used to put the 10% row of the second table ahead of the 5% row in every run.
+
+The run reproduced below is one whose control row came out at 1.0x in both
+tables. Across ten runs the first table's control read 1.0x to 2.9x, and a run
+whose control reads 2.9x has its ratios inflated by the host rather than by
+loss — see below for what that is. Choosing among runs by their control, rather
+than by their result, is the only such freedom this document takes.
 
 **100 reliable 256-byte messages, sent and acknowledged:**
 
-| loss | time | vs no loss | per lost message |
-|---|---|---|---|
-| 0% | 3.02 ms | — | — |
-| 1% | 278.66 ms | 92x | 276 ms |
-| 5% | 232.77 ms | 77x | 46 ms |
-| 10% | 297.19 ms | 98x | 29 ms |
+| loss | time | vs no loss | 5 samples behind it | per datagram actually dropped |
+|---|---|---|---|---|
+| 0% | 4.27 ms | — | 4.1–4.4 ms | — |
+| 1% | 31.89 ms | 7.5x | 6.2–34.0 ms | 5.9 ms |
+| 5% | 140.80 ms | 32.9x | 34.0–343.4 ms | 10.5 ms |
+| 10% | 435.42 ms | 101.9x | 182.0–856.7 ms | 14.4 ms |
+| 0% again (control) | 4.39 ms | 1.0x | 4.2–5.0 ms | — |
+
+**This table orders its rates and can be relied on to.** Over ten runs the
+three loss rows read 6.8–8.4x, 30–49x and 102–160x and never came out of order,
+and the absolute 1% figure stayed between 31.1 and 32.8 ms throughout. That was
+not true while each rate drew its own random sequence.
+
+The last column divides by the drops the relay actually made — counted inside
+the relay, both directions, retransmissions included — and each sample is
+divided by its own count before the median is taken. It used to divide by a
+count derived from the rate and the message total, which counts one direction
+and no retransmissions, so it read several times too high: the figures in this
+column were 276, 46 and 29 ms.
 
 **A 256 KiB message, fragmented across 226 frames:**
 
-| loss | time | vs no loss | throughput |
-|---|---|---|---|
-| 0% | 4.14 ms | — | 60.4 MiB/s |
-| 1% | 60.73 ms | 15x | 4.1 MiB/s |
-| 5% | 264.85 ms | 64x | 0.9 MiB/s |
-| 10% | 187.15 ms | 45x | 1.3 MiB/s |
+| loss | time | vs no loss | 5 samples behind it | throughput |
+|---|---|---|---|---|
+| 0% | 5.06 ms | — | 4.7–6.3 ms | 49.5 MiB/s |
+| 1% | 108.86 ms | 21.5x | 30.2–154.6 ms | 2.3 MiB/s |
+| 5% | 138.87 ms | 27.5x | 91.5–370.8 ms | 1.8 MiB/s |
+| 10% | 217.15 ms | 43.0x | 138.6–464.1 ms | 1.2 MiB/s |
+| 0% again (control) | 5.01 ms | 1.0x | 4.9–5.1 ms | 49.9 MiB/s |
 
-**1% loss costs an order of magnitude.** Nothing is resent until a
-retransmission timer fires, and that timer has a 20 ms floor against a loopback
-round trip of about 30 µs — so a single loss costs on the order of a thousand
-round trips. No protocol tuning changes that; only a faster loss signal would,
-and there is none here. The congestion window does narrow on these losses
-(D24), but narrowing it does not make a lost fragment arrive sooner.
+**This table separates loss from no loss and nothing finer, and the row above
+should not be read as though it did.** Over ten runs its rows read 5–22x,
+13–28x and 21–63x. Every pair overlaps, and 5% and 10% came out in the wrong
+order in two of the ten. Its own baseline is as much to blame as the loss is:
+that row ranged from 5.1 to 11.3 ms over the same ten runs, and it is the
+denominator of every ratio beside it.
 
-The loss-free row is about 12% slower than before congestion control, because
-the window now ramps from 4 rather than starting at its memory bound. That is
-the price of the §10 result, and it is stated rather than hidden.
+**1% loss costs between eight- and twentyfold**, depending on whether the
+message is one frame or fragmented across 226. Nothing is resent until a retransmission
+timer fires, and that timer has a 20 ms floor against a loopback round trip of
+about 30 µs — so a single loss costs on the order of a thousand round trips. No
+protocol tuning changes that; only a faster loss signal would, and there is none
+here. The congestion window does narrow on these losses (D24), but narrowing it
+does not make a lost fragment arrive sooner.
+
+### What the control row is telling you, and what it is not
+
+The last row of each table repeats the first with nothing changed. Over ten
+runs the first table's reads 1.0x to 2.9x, and that spread is **not** drift in
+anything this protocol does. The loss rows spend most of their duration waiting
+on a 20 ms timer, and on a desktop a measurement taken after the process has
+been idle reads two to three times slow:
+
+```
+cargo run --release --bin idle
+```
+
+is a loopback UDP echo with no FECTP in it at all, a hundred round trips per
+sample, five samples a second of sleep apart, and it shows the same step:
+
+```
+round 0: median   3.73 ms   range   3.19-  5.63
+round 1: median   3.06 ms   range   2.91-  8.71
+round 2: median   7.59 ms   range   4.55- 13.01
+round 3: median   9.34 ms   range   8.23-  9.86
+round 4: median   7.64 ms   range   6.94-  8.21
+```
+
+Five identical zero-loss rows a second of sleep apart reproduce it inside the
+benchmark too. Neither a busy spin nor an untimed exchange over the same path
+recovers it, and a 300 ms spin made it appear a row earlier rather than later.
+
+Which run you get depends on what the machine was doing beforehand, and it is
+not under the harness's control — the same build, run back to back, gives 1.0x
+once and 2.6x the next time. That is precisely why the control row is there:
+it reports which kind of run this was, so the ratios beside it can be believed
+or discounted rather than guessed at.
+
+So: read the absolute milliseconds as this host on this day, and the ratios as
+good to about a factor of two. The differences this section leans on — 1% loss
+against none, timer-bound recovery against path-bound — are far larger than
+that. Any conclusion needing better than 2x resolution is not available from
+this harness on this machine.
+
+Adding congestion control made the loss-free row about 12% slower, because the
+window now ramps from 4 rather than starting at its memory bound. That was one
+sample against one sample at the time, and this section's baseline has since
+moved for reasons that have nothing to do with it, so the 12% is a record of
+that change and not a figure to recompute from the table above. It is the price
+of the §10 result, and it is stated rather than hidden.
 
 ### The bug this found
 
@@ -577,13 +668,19 @@ while no round trip has been measured, so the maximum only pinned the first
 timeout at 200 ms for the life of the session and made the 20 ms floor
 unreachable exactly where it mattered.
 
-Removing it is the difference between the tables above and these:
+Removing it was worth this, measured at the time on one sample per row:
 
 | | before | after |
 |---|---|---|
 | 100 messages, 1% loss | 463 ms | **279 ms** |
 | 100 messages, 10% loss | 808 ms | **297 ms** |
 | 256 KiB fragmented, 1% loss | 419 ms | **62 ms** |
+
+These are a record of that change and not of the tables above, which have since
+been re-measured with paired seeds and a median of five runs. The "after"
+column is one sample of a quantity now known to range over a factor of ten, so
+read it as the direction it established rather than as a figure to compare
+against the current rows.
 
 ## 10. Reordering, a bottleneck, and a rebinding NAT
 
