@@ -195,6 +195,16 @@ impl Drop for Pusher {
     }
 }
 
+/// How many attempts a test gets when the host stalls under it.
+///
+/// The two tests that assert the NAT dropped *nothing* are statements about
+/// wall-clock time: the client must get to send a keep-alive within every
+/// mapping lifetime, and a thread that is not scheduled for longer than
+/// [`MAPPING`] loses the mapping for a reason that has nothing to do with the
+/// protocol. Under `cargo test --workspace` that happens. An attempt that
+/// stalled is retried rather than believed, and the last one says so.
+const ATTEMPTS: usize = 3;
+
 /// Counts the pushes that arrive over `window`, sending nothing at all.
 fn receive_only(conn: &Connection, window: Duration) -> usize {
     let deadline = Instant::now() + window;
@@ -211,6 +221,64 @@ fn receive_only(conn: &Connection, window: Duration) -> usize {
         }
     }
     arrived
+}
+
+/// Watches how well this process is being scheduled while a test runs.
+///
+/// The tests that assert the NAT dropped *nothing* need the client to get a
+/// keep-alive out within every mapping lifetime. Those go out from inside the
+/// blocking `recv`, so what matters is not how often the test loop iterates
+/// but whether this process ran at all — and under `cargo test --workspace`,
+/// with dozens of binaries at once, it sometimes does not. A mapping that
+/// expires because nothing was running to refresh it is the behaviour under
+/// test working, and asserting through it blames the protocol for the machine.
+///
+/// This cannot be measured from the receive loop itself: that loop blocks for
+/// the whole window, so a long gap there means either a stall or no pushes
+/// arriving, and no-pushes-arriving is the failure being tested for.
+struct Watchdog {
+    longest: Arc<Mutex<Duration>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start() -> Self {
+        let longest = Arc::new(Mutex::new(Duration::ZERO));
+        let stop = Arc::new(AtomicBool::new(false));
+        let record = Arc::clone(&longest);
+        let flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut last = Instant::now();
+            while !flag.load(Ordering::Relaxed) {
+                let gap = last.elapsed();
+                let mut longest = record.lock().expect("lock");
+                *longest = (*longest).max(gap);
+                drop(longest);
+                last = Instant::now();
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        Self {
+            longest,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// The longest this process went without running the watchdog.
+    fn longest_gap(&self) -> Duration {
+        *self.longest.lock().expect("lock")
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 // -------------------------------------------------------------- the tests ---
@@ -256,38 +324,54 @@ fn without_a_keepalive_an_idle_mapping_expires() {
 
 #[test]
 fn a_keepalive_holds_an_idle_mapping_open() {
-    let server = Pusher::spawn();
-    let nat = ExpiringNat::spawn(server.addr, MAPPING);
-    let conn =
-        Connection::connect(nat.addr, &server.public, &Identity::generate()).expect("connect");
-    conn.set_keepalive(Some(KEEPALIVE)).expect("keepalive");
+    let mut stalls = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let server = Pusher::spawn();
+        let nat = ExpiringNat::spawn(server.addr, MAPPING);
+        let conn =
+            Connection::connect(nat.addr, &server.public, &Identity::generate()).expect("connect");
+        conn.set_keepalive(Some(KEEPALIVE)).expect("keepalive");
 
-    conn.set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("timeout");
-    conn.send(b"hello", PayloadType::Opaque).expect("send");
-    let mut buf = vec![0u8; 4096];
-    conn.recv(&mut buf).expect("the path must work first");
+        conn.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        conn.send(b"hello", PayloadType::Opaque).expect("send");
+        let mut buf = vec![0u8; 4096];
+        conn.recv(&mut buf).expect("the path must work first");
 
-    // The same silence, several mapping lifetimes long. The keep-alive is the
-    // only thing the client sends in it.
-    let window = MAPPING * 6;
-    let arrived = receive_only(&conn, window);
-    assert_eq!(
-        nat.dropped(),
-        0,
-        "a keep-alive must stop the mapping expiring at all, but the NAT \
-         dropped {} of {} inbound datagrams",
-        nat.dropped(),
-        nat.dropped() + nat.delivered()
-    );
+        // The same silence, several mapping lifetimes long. The keep-alive is
+        // the only thing the client sends in it.
+        let window = MAPPING * 6;
+        let watchdog = Watchdog::start();
+        let arrived = receive_only(&conn, window);
+        let stalled = watchdog.longest_gap();
+        if stalled >= MAPPING {
+            stalls.push(stalled);
+            continue;
+        }
 
-    // And the pushes must have actually been flowing, or an unreachable server
-    // would satisfy the assertion above by sending nothing.
-    let expected = (window.as_millis() / PUSH.as_millis()) as usize;
-    assert!(
-        arrived >= expected / 2,
-        "{arrived} of about {expected} pushes arrived; the mapping was open \
-         but nothing came through it"
+        assert_eq!(
+            nat.dropped(),
+            0,
+            "a keep-alive must stop the mapping expiring at all, but the NAT \
+             dropped {} of {} inbound datagrams (longest stall {stalled:?}, \
+             inside the {MAPPING:?} mapping, so this is not the machine)",
+            nat.dropped(),
+            nat.dropped() + nat.delivered()
+        );
+
+        // And the pushes must have actually been flowing, or an unreachable
+        // server would satisfy the assertion above by sending nothing.
+        let expected = (window.as_millis() / PUSH.as_millis()) as usize;
+        assert!(
+            arrived >= expected / 2,
+            "{arrived} of about {expected} pushes arrived; the mapping was open \
+             but nothing came through it"
+        );
+        return;
+    }
+    panic!(
+        "every attempt was interrupted for longer than the {MAPPING:?} mapping \
+         lifetime, so this could not be evaluated: {stalls:?}"
     );
 }
 
@@ -297,48 +381,63 @@ fn an_endpoint_that_dialled_out_keeps_its_own_mapping_open() {
     // the side behind the NAT, so it is the side whose keep-alive matters —
     // and its keep-alives have to survive being driven by `poll` rather than
     // by a blocking `recv`.
-    let server = Pusher::spawn();
-    let nat = ExpiringNat::spawn(server.addr, MAPPING);
+    let mut stalls = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let server = Pusher::spawn();
+        let nat = ExpiringNat::spawn(server.addr, MAPPING);
 
-    let mut node = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
-    node.set_keepalive(Some(KEEPALIVE));
-    node.connect(nat.addr, Some(&server.public)).expect("dial");
+        let mut node = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+        node.set_keepalive(Some(KEEPALIVE));
+        node.connect(nat.addr, Some(&server.public)).expect("dial");
 
-    // Settle the handshake, and confirm the path works before anything is
-    // asserted about silence.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut connected = None;
-    while connected.is_none() && Instant::now() < deadline {
-        if let Ok(Event::Connected { peer, .. }) = node.poll(Some(Duration::from_millis(20))) {
-            connected = Some(peer);
+        // Settle the handshake, and confirm the path works before anything is
+        // asserted about silence.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut connected = None;
+        while connected.is_none() && Instant::now() < deadline {
+            if let Ok(Event::Connected { peer, .. }) = node.poll(Some(Duration::from_millis(20))) {
+                connected = Some(peer);
+            }
         }
-    }
-    let peer = connected.expect("the handshake must complete");
-    node.send(peer, b"hello", PayloadType::Opaque).expect("send");
+        let peer = connected.expect("the handshake must complete");
+        node.send(peer, b"hello", PayloadType::Opaque).expect("send");
 
-    // Now poll without sending anything. Only the keep-alive should be going
-    // out, and it is the only thing that can hold the mapping open.
-    let window = MAPPING * 6;
-    let until = Instant::now() + window;
-    let mut arrived = 0;
-    while Instant::now() < until {
-        if let Ok(Event::Message { .. }) = node.poll(Some(Duration::from_millis(20))) {
-            arrived += 1;
+        // Now poll without sending anything. Only the keep-alive should be
+        // going out, and it is the only thing that can hold the mapping open.
+        let window = MAPPING * 6;
+        let until = Instant::now() + window;
+        let mut arrived = 0;
+        let watchdog = Watchdog::start();
+        while Instant::now() < until {
+            if let Ok(Event::Message { .. }) = node.poll(Some(Duration::from_millis(20))) {
+                arrived += 1;
+            }
         }
-    }
+        let stalled = watchdog.longest_gap();
+        if stalled >= MAPPING {
+            stalls.push(stalled);
+            continue;
+        }
 
-    assert_eq!(
-        nat.dropped(),
-        0,
-        "a keep-alive must stop the mapping expiring at all, but the NAT \
-         dropped {} of {} inbound datagrams",
-        nat.dropped(),
-        nat.dropped() + nat.delivered()
-    );
-    let expected = (window.as_millis() / PUSH.as_millis()) as usize;
-    assert!(
-        arrived >= expected / 2,
-        "{arrived} of about {expected} pushes arrived; the mapping was open \
-         but nothing came through it"
+        assert_eq!(
+            nat.dropped(),
+            0,
+            "a keep-alive must stop the mapping expiring at all, but the NAT \
+             dropped {} of {} inbound datagrams (longest stall {stalled:?}, \
+             inside the {MAPPING:?} mapping, so this is not the machine)",
+            nat.dropped(),
+            nat.dropped() + nat.delivered()
+        );
+        let expected = (window.as_millis() / PUSH.as_millis()) as usize;
+        assert!(
+            arrived >= expected / 2,
+            "{arrived} of about {expected} pushes arrived; the mapping was open \
+             but nothing came through it"
+        );
+        return;
+    }
+    panic!(
+        "every attempt was interrupted for longer than the {MAPPING:?} mapping \
+         lifetime, so this could not be evaluated: {stalls:?}"
     );
 }

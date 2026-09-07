@@ -49,6 +49,13 @@ const PEER_TIMEOUT_CONTROL: Duration = Duration::from_secs(2);
 struct Seen {
     lost: Vec<PeerId>,
     peers: usize,
+    /// Why the server loop stopped, if it did.
+    ///
+    /// It exits on any error from `poll`, and then answers nothing while the
+    /// test goes on believing it is there. A round trip that times out three
+    /// times over with no stall and no peer lost looks like a protocol fault
+    /// and may just be this, so the reason is kept and reported.
+    stopped: Option<String>,
     /// The longest the server thread went between two passes of its loop.
     ///
     /// A peer timeout is a statement about wall-clock time, so a server that
@@ -95,7 +102,10 @@ impl Server {
                         record.lock().expect("lock").lost.push(peer);
                     }
                     Ok(_) => {}
-                    Err(_) => break,
+                    Err(e) => {
+                        record.lock().expect("lock").stopped = Some(format!("{e:?}"));
+                        break;
+                    }
                 }
                 record.lock().expect("lock").peers = server.peer_count();
             }
@@ -120,6 +130,11 @@ impl Server {
     /// The longest this server went between two passes of its loop.
     fn longest_gap(&self) -> Duration {
         self.seen.lock().expect("lock").longest_gap
+    }
+
+    /// Why the server loop stopped, if it stopped.
+    fn stopped(&self) -> Option<String> {
+        self.seen.lock().expect("lock").stopped.clone()
     }
 
     /// Waits for a peer to be given up on, or gives up itself.
@@ -265,7 +280,8 @@ fn a_peer_that_keeps_answering_is_not() {
         assert_eq!(
             outcome.unwrap_or_else(|e| panic!(
                 "the session must still work, and nothing stalled: {e:?} \
-                 (longest gap {stalled:?})"
+                 (longest gap {stalled:?}, server loop stopped: {:?})",
+                server.stopped()
             )),
             b"still here"
         );
