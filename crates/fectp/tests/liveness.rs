@@ -26,13 +26,38 @@ use rand_core::OsRng;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the server waits before giving up on a peer.
+///
+/// Raised to [`MIN_PEER_TIMEOUT`] — one second — by `set_peer_timeout`, so
+/// that is the figure the tests below actually run against. It is written as
+/// 400 ms to say what was asked for.
 const PEER_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// The same, for the control that must *not* see a peer given up on.
+///
+/// Wider on purpose. The control asserts a negative over a window of wall
+/// time, so it fails if either thread is descheduled for longer than the
+/// timeout — the server cannot tell "this peer stopped answering" from "I was
+/// not running to hear it". At the one-second floor that made it fail under
+/// `cargo test --workspace`, where dozens of test binaries run at once, while
+/// passing twelve times out of twelve on its own. Two seconds is not a fix for
+/// a real fault; it is the margin the assertion needs to be about the protocol
+/// rather than about the machine.
+const PEER_TIMEOUT_CONTROL: Duration = Duration::from_secs(2);
 
 /// What the server saw, and how many peers it still holds.
 #[derive(Default)]
 struct Seen {
     lost: Vec<PeerId>,
     peers: usize,
+    /// The longest the server thread went between two passes of its loop.
+    ///
+    /// A peer timeout is a statement about wall-clock time, so a server that
+    /// was not scheduled for longer than the timeout cannot tell "this peer
+    /// stopped answering" from "I was not running to hear it". Under
+    /// `cargo test --workspace`, with dozens of test binaries at once, that
+    /// happens. Without this the control below fails on a loaded machine and
+    /// blames the protocol.
+    longest_gap: Duration,
 }
 
 struct Server {
@@ -55,7 +80,13 @@ impl Server {
         let flag = Arc::clone(&stop);
         let record = Arc::clone(&seen);
         let handle = thread::spawn(move || {
+            let mut last = Instant::now();
             while !flag.load(Ordering::Relaxed) {
+                {
+                    let mut seen = record.lock().expect("lock");
+                    seen.longest_gap = seen.longest_gap.max(last.elapsed());
+                }
+                last = Instant::now();
                 match server.poll(Some(Duration::from_millis(20))) {
                     Ok(Event::Message { peer, data }) => {
                         let _ = server.send(peer, &data, PayloadType::Opaque);
@@ -84,6 +115,11 @@ impl Server {
 
     fn peers(&self) -> usize {
         self.seen.lock().expect("lock").peers
+    }
+
+    /// The longest this server went between two passes of its loop.
+    fn longest_gap(&self) -> Duration {
+        self.seen.lock().expect("lock").longest_gap
     }
 
     /// Waits for a peer to be given up on, or gives up itself.
@@ -150,31 +186,96 @@ fn a_peer_that_stops_answering_is_given_up_on() {
 fn a_peer_that_keeps_answering_is_not() {
     // The control. Without it the test above is satisfied by a timeout that
     // fires on everything.
-    let server = Server::spawn(Some(PEER_TIMEOUT), Some(Duration::from_millis(80)));
-    let conn =
-        Connection::connect(server.addr, &server.public, &Identity::generate()).expect("connect");
+    //
+    // This asserts a negative over a window of wall-clock time, which on a
+    // loaded machine is a statement about the scheduler as much as about the
+    // protocol: if either thread stops running for longer than the peer
+    // timeout, the server is right to conclude it heard nothing. Both sides
+    // therefore record the longest they went between passes, and an attempt
+    // that stalled is retried rather than believed. Three stalled attempts
+    // fail the test loudly instead of passing it quietly — a test that can
+    // skip itself in silence is worse than one that is occasionally wrong.
+    const ATTEMPTS: usize = 3;
+    let mut stalls = Vec::new();
 
-    // Sit in `recv` for several timeouts. The client sends nothing of its own;
-    // answering the server's keep-alives is all that keeps it on file, which
-    // is the whole mechanism under test.
-    let deadline = Instant::now() + PEER_TIMEOUT * 5;
-    let mut buf = vec![0u8; 4096];
-    conn.set_keepalive(Some(Duration::from_millis(80)))
-        .expect("keepalive");
-    while Instant::now() < deadline {
-        conn.set_read_timeout(Some(Duration::from_millis(100)))
-            .expect("timeout");
-        let _ = conn.recv(&mut buf);
+    for _ in 0..ATTEMPTS {
+        let server = Server::spawn(
+            Some(PEER_TIMEOUT_CONTROL),
+            Some(Duration::from_millis(80)),
+        );
+        let conn = Connection::connect(server.addr, &server.public, &Identity::generate())
+            .expect("connect");
+
+        // Sit in `recv` while the client's own keep-alives go out. What keeps
+        // this session on file is the client sending them, not the client
+        // answering the server's: `Connection::set_keepalive` is a separate
+        // path from the endpoint's, and disabling the endpoint's leaves this
+        // test passing while disabling the connection's fails it. Both were
+        // checked by breaking them. The endpoint's own keep-alive is covered
+        // by `keepalive.rs` instead.
+        //
+        // Two full timeouts. Without keep-alives the peer would be given up on
+        // after the first, so this is enough to show the mechanism works, and
+        // going wider only buys more chances for the host to stall.
+        let deadline = Instant::now() + PEER_TIMEOUT_CONTROL * 2;
+        let mut buf = vec![0u8; 4096];
+        conn.set_keepalive(Some(Duration::from_millis(80)))
+            .expect("keepalive");
+        let mut longest_client_gap = Duration::ZERO;
+        let mut last = Instant::now();
+        while Instant::now() < deadline {
+            longest_client_gap = longest_client_gap.max(last.elapsed());
+            last = Instant::now();
+            conn.set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("timeout");
+            let _ = conn.recv(&mut buf);
+        }
+
+        // Run the exchange before judging the attempt, so a stall during it is
+        // caught by the same check. `exchange` allows five seconds, and on a
+        // loaded host even that has run out.
+        //
+        // Tried more than once because `exchange` sends unreliably and the
+        // server echoes unreliably, so the round trip rides on two datagrams
+        // that nothing will resend. Loopback drops them when a socket buffer
+        // overflows, which under `cargo test --workspace` it does: this failed
+        // with a longest gap of 111 ms, nothing stalled and no peer lost — one
+        // datagram simply went missing. A lost datagram is not a dead session,
+        // and asserting on a single unreliable round trip says it is.
+        let mut outcome = exchange(&conn, b"still here");
+        for _ in 0..2 {
+            if outcome.is_ok() {
+                break;
+            }
+            outcome = exchange(&conn, b"still here");
+        }
+        let lost = server.lost();
+        let stalled = longest_client_gap.max(server.longest_gap());
+        if stalled >= PEER_TIMEOUT_CONTROL {
+            stalls.push(stalled);
+            continue;
+        }
+
+        assert!(
+            lost.is_empty(),
+            "a peer that answers must not be given up on: {lost:?} (longest gap \
+             {stalled:?}, inside the {PEER_TIMEOUT_CONTROL:?} timeout, so this is \
+             not the machine)"
+        );
+        assert_eq!(
+            outcome.unwrap_or_else(|e| panic!(
+                "the session must still work, and nothing stalled: {e:?} \
+                 (longest gap {stalled:?})"
+            )),
+            b"still here"
+        );
+        return;
     }
 
-    assert!(
-        server.lost().is_empty(),
-        "a peer that answers must not be given up on: {:?}",
-        server.lost()
-    );
-    assert_eq!(
-        exchange(&conn, b"still here").expect("the session must still work"),
-        b"still here"
+    panic!(
+        "no attempt ran without a stall longer than the {PEER_TIMEOUT_CONTROL:?} peer \
+         timeout, so this control could not be evaluated. Longest gap per attempt: \
+         {stalls:?}. The machine was too busy to say anything about the protocol."
     );
 }
 
