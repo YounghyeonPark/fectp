@@ -816,6 +816,8 @@ impl JitterRelay {
         let flag = Arc::clone(&stop);
         let counted = Arc::clone(&forwarded);
         thread::spawn(move || {
+            // What to wait for when nothing is held.
+            const IDLE: Duration = Duration::from_millis(2);
             let mut rng = seed | 1;
             let mut buf = [0u8; 65535];
             let mut held: Vec<(Vec<u8>, Instant)> = Vec::new();
@@ -831,6 +833,21 @@ impl JitterRelay {
                         true
                     }
                 });
+
+                // Wait only until the earliest held frame is due. Blocking for
+                // the socket's fixed timeout instead rounded every delay up to
+                // the next 2 ms tick, which for the 0-2 ms row is the whole
+                // quantity being measured — the same fault the reordering
+                // relay had, where it turned a 5 ms delay into thirty seconds.
+                let wait = held
+                    .iter()
+                    .map(|(_, due)| *due)
+                    .min()
+                    .map_or(IDLE, |due| {
+                        due.saturating_duration_since(Instant::now())
+                            .clamp(Duration::from_micros(100), IDLE)
+                    });
+                let _ = front_rx.set_read_timeout(Some(wait));
 
                 let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
                     continue;

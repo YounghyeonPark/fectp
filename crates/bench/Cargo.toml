@@ -9,6 +9,10 @@ edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
 publish = false
+# Adding a second binary made `cargo run -p fectp-bench --release` ambiguous,
+# and that is the command at the top of docs/BENCHMARKS.md. The benchmark is
+# what this crate is for; `idle` is a diagnostic reached by name.
+default-run = "bench"
 
 [dependencies]
 fectp = { path = "../fectp", features = ["compress"] }

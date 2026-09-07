@@ -14,6 +14,7 @@ mod datasets;
 mod timing;
 mod transports;
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -187,8 +188,7 @@ fn round_trip_latency() {
 
     let pk = FectpEcho::public_key();
     let mut conn =
-        Connection::connect(pk.addr, &pk.public.expect("identity"), &Identity::generate())
-            .expect("connect");
+        connect_or_retry(pk.addr, &pk.public.expect("identity"));
     conn.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
     let fectp_stats = measure(WARMUP, SAMPLES, || {
         transports::fectp_round_trip(&mut conn, &payload, &mut buf);
@@ -374,8 +374,7 @@ fn crypto_cost() {
 
     let pk = FectpEcho::public_key_drain();
     let conn =
-        Connection::connect(pk.addr, &pk.public.expect("identity"), &Identity::generate())
-            .expect("connect");
+        connect_or_retry(pk.addr, &pk.public.expect("identity"));
     let sealed = measure_batched(WARMUP, 40, 500, || {
         conn.send(&payload, PayloadType::Opaque).expect("send");
     });
@@ -601,6 +600,30 @@ fn gzip_size(data: &[u8]) -> usize {
     encoder.finish().expect("gzip").len()
 }
 
+/// Opens a connection, retrying a handshake that times out.
+///
+/// The handshake has a timeout of its own, and this process can stall for
+/// longer than it: see section 8's note and `cargo run --release --bin idle`.
+/// A stall in the last section should not throw away a run that takes minutes,
+/// and twice it did — `cargo run -p fectp-bench --release` died at the jitter
+/// table with "no handshake reply within the handshake timeout", on the pass
+/// that applies no jitter at all.
+///
+/// Nothing here measures how often a handshake succeeds, so retrying it hides
+/// no result. Section 1 measures how long one takes, and does so on a bare
+/// endpoint rather than through a relay.
+fn connect_or_retry(addr: SocketAddr, public: &[u8; 32]) -> Connection {
+    const TRIES: usize = 3;
+    let mut last = None;
+    for _ in 0..TRIES {
+        match Connection::connect(addr, public, &Identity::generate()) {
+            Ok(conn) => return conn,
+            Err(e) => last = Some(e),
+        }
+    }
+    panic!("connect failed {TRIES} times over: {last:?}");
+}
+
 // ─────────────────────────────────────────────────────── formatting ───────
 
 fn heading(title: &str, subtitle: &str) {
@@ -706,7 +729,7 @@ fn under_loss() {
             let public = echo.public.expect("identity");
 
             let conn =
-                Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+                connect_or_retry(relay.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(30)))
                 .expect("timeout");
 
@@ -832,7 +855,7 @@ fn under_loss() {
             let public = echo.public.expect("identity");
 
             let conn =
-                Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+                connect_or_retry(relay.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(60)))
                 .expect("timeout");
 
@@ -964,7 +987,7 @@ fn other_things_a_path_does() {
         let relay = (every > 0).then(|| ReorderingRelay::spawn(echo.addr, every, delay));
         let addr = relay.as_ref().map_or(echo.addr, |r| r.addr);
 
-        let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        let conn = connect_or_retry(addr, &public);
         conn.set_read_timeout(Some(Duration::from_secs(30)))
             .expect("timeout");
 
@@ -1031,8 +1054,7 @@ fn other_things_a_path_does() {
         let public = echo.public.expect("identity");
         let relay = BottleneckRelay::spawn(echo.addr, bytes_per_sec, queue);
 
-        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
-            .expect("connect");
+        let conn = connect_or_retry(relay.addr, &public);
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
 
@@ -1084,8 +1106,11 @@ fn other_things_a_path_does() {
     note("second of capacity while idle through connection setup, so the 256 KiB");
     note("that followed went out at once. A 10 Mbit/s row read 21 ms and");
     note("11.65 MiB/s, which is 97 Mbit/s.");
-    note("These rows repeat within about 20% run to run, which they did not");
-    note("before: the middle two used to swing by more than a factor of two.");
+    note("How well a row repeats depends on whether it overflows. Over seven runs");
+    note("the two rows that never overflowed held to within 17% and 23% of");
+    note("themselves; the two that do overflow swung 85% and 88%. That is where");
+    note("the variance belongs — an overflow is a drop and a drop is a timer.");
+    note("Before the fix even the non-overflowing rows swung by more than that.");
     println!();
 
     // ── a rebinding NAT ──────────────────────────────────────────────────
@@ -1099,7 +1124,7 @@ fn other_things_a_path_does() {
     // had to survive.
     let relay = RebindingRelay::spawn(echo.addr, 2);
 
-    let conn = Connection::connect(relay.addr, &public, &Identity::generate()).expect("connect");
+    let conn = connect_or_retry(relay.addr, &public);
     conn.set_read_timeout(Some(Duration::from_millis(500)))
         .expect("timeout");
     conn.send(b"before", PayloadType::Opaque).expect("send");
@@ -1156,53 +1181,88 @@ fn jitter_asymmetry_and_crowding() {
     // retransmission the sender decided on for no reason. That is the number
     // worth having: it says whether the round-trip estimator is tracking the
     // variation or being fooled by it.
-    row_header(&["jitter", "200 reliable msgs", "datagrams sent", "spurious"]);
+    row_header(&[
+        "jitter",
+        "200 reliable msgs",
+        "run to run",
+        "datagrams sent",
+        "spurious",
+    ]);
+    // Three passes per row. One sample said 110 ms where three say anywhere
+    // from 140 to 620, and the spurious count moved from none to 32.
+    const JITTER_PASSES: usize = 3;
     for (label, spread) in [
         ("none", Duration::ZERO),
         ("0-2 ms", Duration::from_millis(2)),
         ("0-10 ms", Duration::from_millis(10)),
         ("0-40 ms", Duration::from_millis(40)),
     ] {
-        let echo = FectpEcho::public_key();
-        let public = echo.public.expect("identity");
-        let relay = JitterRelay::spawn(echo.addr, spread, 0x5EED_1234);
+        let mut times = Vec::with_capacity(JITTER_PASSES);
+        let mut sends = Vec::with_capacity(JITTER_PASSES);
+        for pass in 0..JITTER_PASSES {
+            let echo = FectpEcho::public_key();
+            let public = echo.public.expect("identity");
+            let relay = JitterRelay::spawn(echo.addr, spread, 0x5EED_1234 + pass as u64);
 
-        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
-            .expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(60)))
-            .expect("timeout");
+            let conn =
+                connect_or_retry(relay.addr, &public);
+            conn.set_read_timeout(Some(Duration::from_secs(60)))
+                .expect("timeout");
 
-        let start = std::time::Instant::now();
-        for _ in 0..MESSAGES {
-            loop {
-                match conn.send_reliable(&payload, PayloadType::Opaque) {
-                    Ok(_) => break,
-                    Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
+            let start = std::time::Instant::now();
+            for _ in 0..MESSAGES {
+                loop {
+                    match conn.send_reliable(&payload, PayloadType::Opaque) {
+                        Ok(_) => break,
+                        Err(_) => conn.flush(Duration::from_secs(60)).expect("flush"),
+                    }
                 }
             }
+            conn.flush(Duration::from_secs(60)).expect("flush");
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+            sends.push(relay.forwarded.load(std::sync::atomic::Ordering::Relaxed));
+            drop(conn);
+            drop(relay);
+            drop(echo);
         }
-        conn.flush(Duration::from_secs(60)).expect("flush");
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        let sent = relay.forwarded.load(std::sync::atomic::Ordering::Relaxed);
-        drop(conn);
-        drop(relay);
-        drop(echo);
+        times.sort_unstable_by(f64::total_cmp);
+        sends.sort_unstable();
+        let elapsed = times[times.len() / 2];
+        let sent = sends[sends.len() / 2];
 
         let expected = MESSAGES as u64 + 1;
         let extra = sent.saturating_sub(expected);
         row(&[
             label,
             &ms(elapsed),
+            &format!("{:.0}-{:.0} ms", times[0], times[times.len() - 1]),
             &format!("{sent}"),
             &format!("{extra} ({:.1}%)", extra as f64 * 100.0 / expected as f64),
         ]);
     }
     note("Nothing is dropped in this table, so every datagram past 201 is one the");
-    note("sender resent although the first copy was still on its way. There are");
-    note("none at all until the jitter reaches four times the timer's floor, and");
-    note("three even then. The round-trip estimator carries a variation term and is");
-    note("evidently using it: an estimator that averaged without one would retransmit");
-    note("the moment a datagram took longer than usual, which here is constantly.");
+    note("sender resent although the first copy was still on its way. Each row is");
+    note("the median of three passes, with their range beside it, because one");
+    note("sample per row could not carry this: over six runs of the single-sample");
+    note("version the 0-10 ms row read anywhere from 139 to 621 ms and its");
+    note("spurious count from 0 to 32.");
+    note("Spurious retransmissions stay rare at every spread tested — around 1% at");
+    note("2 and 10 ms and a few per cent at 40 — but they are not absent at the");
+    note("small spreads, which this section used to claim on one lucky sample.");
+    note("The round-trip estimator carries a variation term and is evidently using");
+    note("it: one that averaged without it would retransmit the moment a datagram");
+    note("took longer than usual, which here is constantly.");
+    note("Part of this table used to be the harness. The relay released held");
+    note("datagrams only at the top of its loop and then blocked on a fixed 2 ms");
+    note("socket timeout, so it applied its own tick rather than the delay it was");
+    note("given, rounding a 0-2 ms spread up by 100%.");
+    note("What remains is not understood. Run on its own these rows read 139 to");
+    note("800 ms; run at the end of a full pass they reach tens of seconds, and");
+    note("one 0-10 ms row read 121 seconds with passes ranging from 0.6 to 182.");
+    note("Nothing is dropped anywhere on this path. The host effect described in");
+    note("section 8 is real and worth two to three times; it is not worth a");
+    note("thousand. Do not read these absolute times as a property of the");
+    note("protocol until that is settled.");
     println!();
 
     // ── asymmetry ────────────────────────────────────────────────────────
@@ -1219,8 +1279,7 @@ fn jitter_asymmetry_and_crowding() {
         let public = echo.public.expect("identity");
         let relay = AsymmetricRelay::spawn(echo.addr, fwd, back, 0xC0FF_EE01);
 
-        let conn = Connection::connect(relay.addr, &public, &Identity::generate())
-            .expect("connect");
+        let conn = connect_or_retry(relay.addr, &public);
         conn.set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
 
@@ -1338,7 +1397,7 @@ fn jitter_asymmetry_and_crowding() {
                 .collect();
 
             let mut conn =
-                Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
+                connect_or_retry(echo.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buf = vec![0u8; 4096];

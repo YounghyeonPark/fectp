@@ -775,9 +775,14 @@ wakes when the head of its queue can afford to go rather than on a fixed tick.
 The second change turned out not to move the numbers, which is worth recording:
 the drain granularity was not what limited the link.
 
-The rows now repeat within about 20% from run to run. The middle two used to
-swing by more than a factor of two, which was the same bug — how much credit
-had been banked depended on how long setup happened to take.
+How well a row repeats now depends on whether it overflows. Over seven runs the
+two rows that never overflowed stayed within 17% and 23% of themselves
+(862–1008 ms and 810–995 ms), while the two that do overflow swung 85% and 88%
+(527–978 ms and 3817–7165 ms). That is where the variance belongs: an overflow
+is a drop, a drop is a retransmission timer, and whether a drop lands on
+something the window was waiting for is worth a factor of two. Before the fix
+even the non-overflowing rows swung by more than that, because how much credit
+had been banked depended on how long connection setup happened to take.
 
 A first draft of this section reasoned that a queue larger than one window —
 32 frames, about 38 KiB — could not be made to overflow. The 64 KiB row
@@ -822,24 +827,61 @@ alone could be pointed at a third party who never asked for it
 
 ## 11. Jitter, an asymmetric path, and a crowded endpoint
 
-### Jitter does not fool the retransmission timer
+### Jitter does not fool the retransmission timer, and something else stalls
 
 200 reliable messages through a relay that delays each datagram by a random
 amount. **Nothing is dropped**, so every datagram past 201 is one the sender
-resent while the first copy was still in flight.
+resent while the first copy was still in flight. Each row is the median of
+three passes with their range beside it.
 
-| jitter | time | datagrams sent | spurious |
+| jitter | time | pass to pass | datagrams sent | spurious |
+|---|---|---|---|---|
+| none | 7.94 ms | 8–8 ms | 201 | 0 (0.0%) |
+| 0–2 ms | 247.21 ms | 139–295 ms | 202 | 1 (0.5%) |
+| 0–10 ms | 140.11 ms | 139–297 ms | 201 | 0 (0.0%) |
+| 0–40 ms | 1697.56 ms | 1284–2800 ms | 210 | 9 (4.5%) |
+
+Spurious retransmissions stay rare at every spread tested — about 1% at 2 and
+10 ms, a few per cent at 40. The estimator carries a variation term (RFC 6298's
+RTTVAR) and is evidently using it: one that averaged round trips without it
+would retransmit every time a datagram took longer than usual, which under this
+much jitter is constantly.
+
+**This section previously claimed no spurious retransmissions at all below
+40 ms, on one sample per row.** Three passes show one or two at 2 ms and up to
+32 at 10 ms depending on the run. Rare is the honest word, not absent.
+
+**These rows are not stable, and it is the largest unexplained thing in this
+document.** The table above was measured by running this section on its own.
+Run under the command at the top of this file — the whole benchmark, this
+section last — the same rows read:
+
+| jitter | time | pass to pass | spurious |
 |---|---|---|---|
-| none | 5.10 ms | 201 | 0 (0.0%) |
-| 0–2 ms | 109.90 ms | 201 | 0 (0.0%) |
-| 0–10 ms | 109.19 ms | 201 | 0 (0.0%) |
-| 0–40 ms | 525.73 ms | 204 | 3 (1.5%) |
+| none | 15.21 ms | 15–16 ms | 0 (0.0%) |
+| 0–2 ms | 1352.67 ms | 611–61439 ms | 12 (6.0%) |
+| 0–10 ms | 121794.37 ms | 593–181711 ms | 21 (10.4%) |
+| 0–40 ms | 63954.67 ms | 4860–64521 ms | 27 (13.4%) |
 
-There are no spurious retransmissions until the jitter reaches twice the
-initial timeout, and three even then. The estimator carries a variation term
-(RFC 6298's RTTVAR) and is evidently using it — one that averaged round trips
-without it would retransmit every time a datagram took longer than usual, which
-under this much jitter is constantly.
+Two minutes for 200 messages, against 140 ms for the same row measured alone —
+with nothing dropped anywhere on the path, and passes within one row ranging
+from 593 ms to 181 seconds. Some of that is the host effect described in §9,
+which is real and worth two to three times. It is not worth a thousand.
+
+So: the thing this section set out to test, it passes. The estimator is not
+fooled by variance — spurious retransmissions stay in single figures per cent
+even at 40 ms of jitter, which a mean-only estimator could not manage. But
+something occasionally stalls a reliable stream under heavy reordering for tens
+of seconds, and neither the protocol nor the harness has been shown to be the
+cause. **Do not read the absolute times in this section as a property of the
+protocol until that is settled.**
+
+The table was also far worse than this before the relay was fixed. It released
+held datagrams only at the top of its loop and then blocked on a fixed 2 ms
+socket timeout, so it applied its own tick rather than the delay it was given:
+that rounds a 0–2 ms spread up by 100%, and it drove two rows into the
+60-second read timeout outright. Rows that read 60,131 ms and 60,861 ms were
+the harness, not the protocol.
 
 ### Losing an acknowledgement is nearly free; losing data is not
 
