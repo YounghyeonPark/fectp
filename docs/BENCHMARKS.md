@@ -140,12 +140,21 @@ secrecy.
 |---|---|---|---|
 | raw UDP | 0 | 28 | 28 |
 | FECTP | 30 | 28 | 58 |
-| TCP + TLS 1.3 | 48 | 40 | 88 |
+| TCP + TLS 1.3 | 26 | 40 | 66 |
 
 TLS was measured at the socket; FECTP's is fixed by its frame format. The
 4-byte length prefix this benchmark adds to TLS is counted against it — a
 datagram protocol gets message boundaries for free. TCP headers are 40 bytes
 against UDP's 28, before any retransmission.
+
+**The gap is eight bytes, and it used to read thirty.** The harness wrote the
+length prefix and the body as two calls, and each becomes its own TLS record —
+a 5-byte header, a content-type byte and a 16-byte tag apiece. So 22 of the 48
+bytes this row charged TLS were the measurement, not the protocol. One write
+now, on both sides, as any real sender would do.
+
+That is worth more than the correction. This section is the one place FECTP
+looked clearly better on a number, and most of the margin was ours.
 
 ## 5. What one send actually costs
 
@@ -386,17 +395,22 @@ time *plus* bytes over the link, so a level that spends `dt` more and saves
 
 | dataset | bytes at −4 | bytes at 1 | level 1 wins below |
 |---|---|---|---|
-| sensor i16 ×4, slow | 8192 | 7296 | 710 Mbps |
-| sensor i16 ×4, fast | 8192 | 7640 | 437 Mbps |
-| counter i32 ×2 | 8192 | 4902 | **2.6 Gbps** |
-| f32 array | 8192 | 7184 | 798 Mbps |
-| JSON log lines | 104 | 61 | 34 Mbps |
+| sensor i16 ×4, slow | 8192 | 7296 | 907 Mbps |
+| sensor i16 ×4, fast | 8192 | 7640 | 417 Mbps |
+| counter i32 ×2 | 8192 | 4902 | **2.9 Gbps** |
+| f32 array | 8192 | 7184 | 938 Mbps |
+| JSON log lines | 104 | 61 | 860 Mbps |
 | random bytes | 8192 | 8192 | never |
 
 Every real network is below those thresholds, so on this data level 1 is the
-faster choice *end to end*, not the slower one. The JSON row is the exception
-worth noting: −4 already found nearly everything, and the extra saving is 43
-bytes, so above 34 Mbps the lower level was right there.
+faster choice *end to end*, not the slower one — on every dataset that
+compresses at all.
+
+**There used to be an exception here, and it was an artefact.** The JSON row
+read 34 Mbps and this paragraph singled it out. The times were measured once,
+on the counters, and applied to every row — so JSON was charged an encode cost
+about fourteen times its own. Timed per dataset it reads 860 Mbps and behaves
+like the rest. A column computed from one row's measurement is not a column.
 
 **The stronger half of the case is the typed column in the table above**, and
 it corrects something an earlier draft of this document got wrong. That draft

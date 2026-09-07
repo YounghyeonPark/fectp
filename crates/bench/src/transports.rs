@@ -256,10 +256,11 @@ impl TlsEcho {
                                 if len > body.len() || tls.read_exact(&mut body[..len]).is_err() {
                                     return;
                                 }
-                                if tls.write_all(&header).is_err()
-                                    || tls.write_all(&body[..len]).is_err()
-                                    || tls.flush().is_err()
-                                {
+                                // One record, as above.
+                                let mut framed = Vec::with_capacity(4 + len);
+                                framed.extend_from_slice(&header);
+                                framed.extend_from_slice(&body[..len]);
+                                if tls.write_all(&framed).is_err() || tls.flush().is_err() {
                                     return;
                                 }
                             }
@@ -318,9 +319,15 @@ pub fn tls_connect(setup: &TlsSetup, addr: SocketAddr) -> TlsClient {
 
 /// One request and its echo over TLS.
 pub fn tls_round_trip(client: &mut TlsClient, payload: &[u8], buf: &mut [u8]) {
-    let header = (payload.len() as u32).to_le_bytes();
-    client.stream.write_all(&header).expect("write header");
-    client.stream.write_all(payload).expect("write body");
+    // One write, not two. Each `write_all` becomes its own TLS record — a
+    // 5-byte header, a content-type byte and a 16-byte tag apiece — so writing
+    // the length prefix separately charged TLS 22 bytes a message that no
+    // sender would pay. §4 counts what goes on the wire, so this decides the
+    // number.
+    let mut framed = Vec::with_capacity(4 + payload.len());
+    framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    framed.extend_from_slice(payload);
+    client.stream.write_all(&framed).expect("write");
     client.stream.flush().expect("flush");
 
     let mut back = [0u8; 4];

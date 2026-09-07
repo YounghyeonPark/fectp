@@ -2751,3 +2751,48 @@ specified it, and no keyword check finds that. It cannot see a claim about
 behaviour, like the compression table that was wrong for typed payloads. It
 covers one class of failure, which is the class that recurred. The rest still
 needs somebody to read.
+
+## D61 — Two benchmark rows that were measuring the harness
+
+The cheap half of [D54](#d54--the-re-measurement-that-needed-re-measuring)'s
+list. Both are small fixes to the harness; both change a published number, and
+one of them changes it in the direction that matters most.
+
+### §4 charged TLS for 22 bytes of our own framing
+
+The row read: TLS adds 48 protocol bytes a message against FECTP's 30, so 88
+on the wire against 58.
+
+The harness wrote the length prefix and the body as two `write_all` calls, and
+rustls makes each one its own TLS record — a 5-byte header, a content-type byte
+and a 16-byte tag apiece. Writing once, as any sender would, gives **26**. The
+total is 66 against FECTP's 58, and **the gap is eight bytes rather than
+thirty**.
+
+This is the one section where FECTP looked clearly better on a number, and most
+of the margin was the measurement. A benchmark's own author is the last person
+who will notice that.
+
+### §7 computed every row's break-even from one row's cost
+
+`level_time` timed compression on `datasets::all()[2]` — the counters — once,
+and the loop applied that pair of times to every dataset's byte counts. So each
+row's "level 1 wins below" was its own byte saving over the *counters'* encode
+cost.
+
+For most rows the two are close enough that the answer was roughly right by
+coincidence. For JSON it was not: JSON encodes about fourteen times faster, and
+the row read **34 Mbps** where timing it properly reads **860 Mbps**. The
+document singled that row out as "the exception worth noting" and reasoned
+about why — an exception that did not exist.
+
+Timed per dataset now. Every row that compresses at all wins at level 1 below
+hundreds of megabits, which is what the section always concluded; it just had
+one row arguing against itself.
+
+### What both have in common
+
+Neither is a mistake in the protocol, and neither would have been found by
+running the benchmark again — it reproduces its own error perfectly. They were
+found by asking what the code being timed actually does, which is a different
+question from what the number says.

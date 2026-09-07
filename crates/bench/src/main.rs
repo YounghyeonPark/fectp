@@ -487,9 +487,13 @@ fn compression_level() {
     println!();
     println!();
     row_header(&["dataset", "-4 bytes", "1 bytes", "1 wins below"]);
-    let t4 = level_time(-4);
-    let t1 = level_time(1);
     for set in datasets::all() {
+        // Timed per dataset. These were once measured once, on the counters,
+        // and applied to every row — so the JSON row reported a break-even
+        // computed from a cost fourteen times its own, and the section singled
+        // it out as the exception on the strength of it.
+        let t4 = level_time_for(&set.bytes, -4);
+        let t1 = level_time_for(&set.bytes, 1);
         let b4 = zstd_size(&set.bytes, -4).min(set.bytes.len());
         let b1 = zstd_size(&set.bytes, 1).min(set.bytes.len());
         let verdict = match break_even_mbps((b4, t4), (b1, t1)) {
@@ -501,9 +505,12 @@ fn compression_level() {
     }
     println!();
     note("A send costs encode time plus bytes over the link, so the higher level wins");
-    note("on any link slower than the figure above — which is every real network for");
-    note("all but the JSON, where -4 already found nearly everything and the extra");
-    note("saving is 43 bytes. That is why the default is now 1.");
+    note("on any link slower than the figure above — which is every real network,");
+    note("for every dataset that compresses at all. That is why the default is 1.");
+    note("The JSON row used to read 29 Mbps and was singled out as the exception:");
+    note("these times were measured once, on the counters, and applied to every");
+    note("row, so JSON was charged a cost fourteen times its own. It is timed per");
+    note("dataset now and behaves like the rest.");
     println!();
     note("Section 6 is the stronger half of the case, and it is about declared types");
     note("rather than opaque bytes: running the transform first does not make the");
@@ -517,8 +524,7 @@ fn compression_level() {
 }
 
 /// Median microseconds to encode the 8 KiB counter dataset at one level.
-fn level_time(level: i32) -> f64 {
-    let sample = &datasets::all()[2].bytes;
+fn level_time_for(sample: &[u8], level: i32) -> f64 {
     measure(20, 200, || {
         let _ = zstd_size(sample, level);
     })
