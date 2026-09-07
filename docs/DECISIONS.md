@@ -2709,3 +2709,45 @@ constants; `spec_conformance.rs` pins the wire format; `check-links.py` follows
 every link. Not one of them can read a sentence. Every finding above is a
 sentence, and the ones that lasted longest were the ones in the places a reader
 starts: the crate root, §3.3, the first table in a how-to.
+
+## D60 — A guard that reads the lists
+
+[D59](#d59--what-the-documents-were-claiming) ended by saying every one of its
+twenty findings was a sentence, and that none of the mechanical guards can read
+one. Two of those findings were the same failure, and it is a failure this
+repository had already written down and then repeated:
+
+> D30: *"'Not built: congestion control' survived three commits after
+> congestion control was built, and no extractor catches that."*
+
+It survived considerably longer than three commits, and address migration
+joined it — both in the crate-level documentation, which is the first paragraph
+docs.rs shows.
+
+**Decision**: `.github/check-claims.py`, beside `check-links.py` in the guards
+job. It reads the three standing lists that say something is absent — README's
+"Not built", SPEC §10, and the gaps table — and refuses an entry when either:
+
+1. README's **Working** list names the same thing. Two curated lists
+   contradicting each other is the failure that actually happened, and seeing
+   it needs no cleverness.
+2. A **public item name** carries the same word. `congestion_window` and
+   `set_max_migration_attempts_per_peer` are exactly the evidence that was
+   sitting there while the lists said otherwise.
+
+The second is fuzzy, so a match must be fixed or written into `ALLOWED` with a
+reason. Silencing it costs a sentence, which is the design: the entries that
+are already there explain why `path` in `PathChallenge` is not path MTU
+discovery, and why `Close` being an assigned frame type does not mean close
+semantics are defined.
+
+**Verified the way anything here is verified.** The two claims that actually
+survived were put back into SPEC §10, and the guard failed on both, by both
+checks. Then they were taken out again.
+
+**What it cannot do, said plainly.** It cannot see a document contradicting
+itself in prose — SPEC §3.3 said address migration was not supported while §5.8
+specified it, and no keyword check finds that. It cannot see a claim about
+behaviour, like the compression table that was wrong for typed payloads. It
+covers one class of failure, which is the class that recurred. The rest still
+needs somebody to read.

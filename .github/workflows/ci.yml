@@ -79,6 +79,11 @@ jobs:
         run: cargo run -p fectp --example tour --features compress
       - name: documentation links resolve
         run: python3 .github/check-links.py
+      # Twice a feature has been built and left in a list of things that are
+      # not built, the second time in the crate documentation docs.rs shows
+      # first. Nothing else here reads prose.
+      - name: the lists of what is absent are still true
+        run: python3 .github/check-claims.py
 
   lint:
     name: clippy
@@ -96,7 +101,7 @@ jobs:
       - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
 
   # `crates/footprint` is deliberately outside the workspace, so nothing above
-  # builds it. It is also the only evidence for the 22 KiB the README claims.
+  # builds it. It is also the only evidence for the 23.1 KiB the README claims.
   footprint:
     name: microcontroller image
     runs-on: ubuntu-latest

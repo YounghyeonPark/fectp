@@ -383,7 +383,7 @@ delivery — plus the caller's buffers.
 
 ## Verification
 
-Five things are checked mechanically, each because trusting it by eye had
+Six things are checked mechanically, each because trusting it by eye had
 already failed somewhere.
 
 | What | How | Why |
@@ -393,6 +393,7 @@ already failed somewhere.
 | The parsers | [`malformed_input.rs`](crates/fectp-core/tests/malformed_input.rs) puts arbitrary bytes through each decoder, and tampers with or truncates real frames | It found the varint decoder accepting overlong encodings, so a value had two spellings |
 | The layers that keep state | [`reliability_model.rs`](crates/fectp-core/tests/reliability_model.rs), [`replay_model.rs`](crates/fectp-core/tests/replay_model.rs) and the reassembly model in [`pipeline.rs`](crates/fectp/src/pipeline.rs) drive each through generated orderings, with directed tests where a generator cannot reach the state | Every operation was individually correct; the bugs were in the sequences |
 | The documentation | [`doc_snippets.rs`](crates/fectp/tests/doc_snippets.rs) extracts every Rust block from this file and [USAGE.md](docs/USAGE.md) and compiles it | A hand-written tour is a *copy*: it compiles happily while the original goes stale, which is how six calls kept passing an argument removed three commits earlier |
+| What is *not* built | [`check-claims.py`](.github/check-claims.py) reads the three lists that say something is absent and refuses any entry the Working list or a public name contradicts | Twice a feature was built and left in such a list — congestion control for three commits, address migration for longer, in the paragraph docs.rs shows first |
 
 All of it runs on every push — [`ci.yml`](.github/workflows/ci.yml) — across
 Linux, macOS and Windows, and in each feature configuration separately. That
