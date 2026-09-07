@@ -14,7 +14,7 @@ FECTP runs over an unreliable, unordered datagram transport that preserves
 datagram boundaries. UDP is the expected substrate.
 
 FECTP provides optional per-message retransmission (§5.5). It does not
-provide ordering, congestion control, or path MTU discovery.
+provide ordering or path MTU discovery.
 
 - All multi-byte integers are **little-endian**.
 - Byte offsets are zero-based and inclusive of the start, exclusive of the end.
@@ -210,8 +210,8 @@ arrives from an address that names no session.
 A server serving many peers on one socket SHOULD key its session table on
 the **pair** `(source address, session_id)`. The identifier alone is chosen
 by the initiator and two initiators may pick the same value; the pair cannot
-collide. A consequence is that a peer changing address loses its session —
-address migration is not supported in version 1.
+collide. A peer that changes address is therefore not found by the pair, and
+§5.8 says what a receiver may do about that.
 
 `session_id` is not a security mechanism; it is a routing hint. Authentication
 comes from the AEAD, so a misrouted frame fails to decrypt rather than
@@ -372,7 +372,7 @@ than 70 bytes. (Noise parsing itself fails below 62.)
 The `HandshakeResponse` header MUST carry the same `session_id` as message 1.
 A receiver MUST reject one that does not.
 
-### 4.6 Split
+#### 4.5.1 Split
 
 After message 2, both peers call `Split()`:
 
@@ -476,7 +476,7 @@ Token processing:
 Total frame size is `70 + len(application_data)`. The header MUST carry the
 same `session_id` as message 1.
 
-`Split()` is as in §4.6 of the full handshake: the initiator sends with `k1`.
+`Split()` is as in §4.5.1 of the full handshake: the initiator sends with `k1`.
 
 ### 4.9 Why resumption is worth a second handshake
 
@@ -1149,14 +1149,8 @@ and `crates/fectp/tests/`.
 These are absent by omission and remain to be defined:
 
 - **Ordering.** Deliberately absent, not merely unspecified; see §5.5.
-- **Congestion control.** A sender may saturate a path. The in-flight bound
-  of §5.5 limits the damage but is not a congestion controller.
-- **Address migration.** A session is bound to its peer's address (§3.3); a
-  peer that moves must handshake again, or resume.
 - **Delayed acknowledgement.** Acknowledgements are sent per message; no
   batching algorithm is defined.
-- **Ticket expiry.** Tickets are bounded in number but carry no lifetime;
-  a responder decides for itself when to forget one.
 - **Path MTU discovery.** Frame size comes from `max_frame_size` alone.
 - **Key distribution.** Obtaining the responder's static public key is out of
   scope. So is distributing the first ticket, which falls out of the full

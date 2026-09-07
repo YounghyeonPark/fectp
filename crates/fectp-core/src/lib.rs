@@ -4,8 +4,10 @@
 //! the `Noise_IK_25519_ChaChaPoly_BLAKE2s` handshake, the framing format,
 //! and the datagram [`Transport`] abstraction.
 //!
-//! This crate deliberately contains no transport implementation and no
-//! compression. Both are supplied from the outside so that the same core
+//! This crate deliberately contains no transport implementation and no entropy
+//! coder. The typed transforms are here — delta, zigzag, varint, transpose —
+//! because they are integer arithmetic with no allocator behind them; what is
+//! supplied from outside is the socket and Zstandard, so that the same core
 //! runs unchanged from a Cortex-M microcontroller to a server.
 //!
 //! ## Profile support

@@ -283,8 +283,7 @@ let conn = Connection::connect_and_send(
 )?;
 ```
 
-The peer receives it as `Event::Connected { zero_rtt, .. }`, or as the second
-element of `accept()`. Anything it sends back arrives through `recv` like any
+The peer receives it as `Event::Connected { zero_rtt, .. }`. Anything it sends back arrives through `recv` like any
 other message.
 
 **When this is worth using.** It saves exactly one round trip, once, per
@@ -470,10 +469,17 @@ skipped whenever it would not pay:
 | Skipped when | Threshold |
 |---|---|
 | the payload is tiny | under **32 bytes**, no transform |
-| it is small | under **1 KiB**, no Zstandard |
-| it already looks compressed | detected, not guessed |
+| it is small **and untyped** | under **1 KiB**, no Zstandard |
+| it already looks compressed **and is untyped** | detected, not guessed |
 | the peer cannot decompress | settled during the handshake |
 | coding has stopped working on this connection | it backs off, then retries periodically |
+
+The two rows marked *untyped* apply to `PayloadType::Opaque`. A declared type
+takes the other path: past 32 bytes the transform runs, and Zstandard runs after
+it whatever the size or the look of the bytes, because the transform has already
+changed them into something an entropy coder may well find structure in. That is
+the intent, not an oversight — but it does mean a 64-byte typed payload is
+compressed and a 64-byte opaque one is not.
 
 And if compression runs and fails to shrink the payload, the original is sent.
 **A bad guess costs CPU, never bytes.**
@@ -550,7 +556,8 @@ possible at all.
 before then. A peer that never answers becomes `Event::ConnectFailed` after a
 few retries — silence is reported, not waited on forever.
 
-In public-key mode `connect` needs the peer's key; in the other two it does not:
+In public-key mode `connect` needs the peer's key; in pre-shared-key mode it
+does not:
 
 ```rust
 node.connect(addr, Some(&their_public))?;   // public-key mode
@@ -603,9 +610,9 @@ server.disconnect(peer);
 `PeerId` handles are never reused, so one belonging to a departed peer stops
 resolving rather than addressing whoever took its place.
 
-**Sessions are bound to the peer's address.** A peer that changes address (a
-phone moving between networks) loses its session and must reconnect — or
-resume, which is cheap.
+**A peer that changes address is followed, but not for free.** The session
+survives, at the cost of a round trip and only after the new address answers a
+challenge — see below. A `Connection` does not follow a *server* that moves.
 
 ## When a peer changes address
 
@@ -821,7 +828,7 @@ Cortex-M4 with 256 KiB of flash that is 9% of it.
 ## The whole list
 
 [API.md](API.md) has every public method grouped by task, the constants with
-their values, and an honest note about the two places the list is untidy. This
+their values. This
 document explains *when* to reach for each; that one is the index.
 
 ## Further reading

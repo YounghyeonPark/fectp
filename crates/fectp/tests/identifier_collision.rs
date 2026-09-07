@@ -7,11 +7,11 @@
 //! identifier alone, and a frame from an unknown address is tried against
 //! every session wearing the one it names.
 //!
-//! So the question is what one datagram can be made to cost. The bound that is
-//! meant to answer it used to count datagrams while the work
-//! is per candidate; and a sequence number forged some generations ahead makes
-//! each candidate several times more expensive than one AEAD verification,
-//! because the key has to be derived before the tag can be checked.
+//! So the question is what one datagram can be made to cost. The bound meant to
+//! answer it counted datagrams while the work was per candidate — and a
+//! sequence number forged some generations ahead makes each candidate several
+//! times more expensive than one AEAD verification, because the key has to be
+//! derived before the tag can be checked.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

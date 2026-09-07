@@ -16,9 +16,9 @@ Two types do the work:
 
 ### Opening one
 
-Four modes. Three of them have a variant that sends data in the very first
-packet, saving the round trip the handshake would otherwise cost. None takes a
-timeout: they all use `HANDSHAKE_TIMEOUT`, and all return `Result<Self>`.
+Three ways in, each with a variant that sends data in the very first packet,
+saving the round trip the handshake would otherwise cost. None takes a timeout:
+they all use `HANDSHAKE_TIMEOUT`, and all return `Result<Self>`.
 
 | | |
 |---|---|
@@ -133,6 +133,18 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 |---|---|
 | `bind(addr, identity)` | Public-key mode. |
 | `bind_psk(addr, secret)` | Pre-shared-key mode. |
+
+### Setting
+
+| | |
+|---|---|
+| `set_keepalive(every)` | See the constants table below. |
+| `set_peer_timeout(within)` | |
+| `set_max_peers(limit)` | |
+| `set_max_handshakes_per_second(rate)` | |
+| `set_max_migration_attempts_per_peer(rate)` | |
+| `set_ticket_lifetime(how_long)` | |
+| `set_handshake_reply(payload)` | A payload carried in the response to every handshake. |
 
 ### The loop
 

@@ -23,10 +23,11 @@ path they are the only thing that matters.
 **Read §3 first.** Sections 1, 2, 4 and 5 measure things that turn out not to
 decide anything.
 
-This benchmark has changed the implementation four times. §7 is why the default
-compression level moved from −4 to 1, §8 is why the send path stopped
-attempting compression on data that has already refused to compress, and §9 is
-where injecting packet loss found a bug that lost messages outright.
+This benchmark has changed the implementation five times. §7 is why the default
+compression level moved from −4 to 1, §8 is why the send path stopped attempting
+compression on data that has already refused to compress, §9 is where injecting
+packet loss found two bugs that lost messages outright, and §10 is why there is
+congestion control at all.
 
 It has also had to correct itself repeatedly, and those corrections are left in
 rather than tidied away: §2, §5, §9 and §10 each record a measurement that was
@@ -359,7 +360,7 @@ what is left. That is a property of the transform, not a tuning problem.
 
 ### Why the default level is now 1
 
-The level is a sender-side choice — `SPEC.md` §7 requires a receiver to accept
+The level is a sender-side choice — `SPEC.md` §6.3 requires a receiver to accept
 any valid frame — so this is an implementation default, not a wire question.
 It was −4, the design note's `--fast=4`, chosen on the reasoning that a
 latency-sensitive transport cannot afford a slow compressor.
@@ -585,7 +586,7 @@ they arrive in a different order. (The 5 ms pair is inverted — the reordered r
 came out faster than its control — which is the run-to-run spread, not a
 result.)
 
-### A bottleneck is where the missing congestion control shows
+### A bottleneck is where congestion control earns its place
 
 A 256 KiB message through a rate-limited link with a finite queue.
 

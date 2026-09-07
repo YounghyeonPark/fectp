@@ -48,12 +48,25 @@
 //! [`Connection::flush`], so one of them must be called for delivery to make
 //! progress.
 //!
-//! ## What this does not do yet
+//! ## What this does not do
 //!
-//! There is no congestion control: a sender may saturate a path. The bound on
-//! unacknowledged messages ([`MAX_UNACKED`]) caps memory but is not a
-//! substitute. Ordering and address migration are also absent, both by
-//! decision rather than oversight.
+//! **Delivery is not ordered**, by decision rather than oversight: holding a
+//! message back for an earlier one is head-of-line blocking, which is the cost
+//! this protocol exists to avoid. An application that needs order sequences its
+//! own payloads.
+//!
+//! Nothing discovers the path MTU. The frame ceiling is a setting
+//! ([`set_max_datagram`]), safe anywhere at its default and reclaimable where
+//! the path is known.
+//!
+//! A `Connection` does not follow a *server* that changes address — its socket
+//! is connected to one — though an [`Endpoint`] follows a peer that does.
+//!
+//! This list has been wrong before. It said there was no congestion control for
+//! three commits after congestion control was built, and said address migration
+//! was absent after it was built too; no extractor catches a sentence. The
+//! standing lists are `README.md` and the gaps table in `docs/DECISIONS.md`,
+//! and this paragraph is the summary of them rather than a separate claim.
 
 #![warn(missing_docs)]
 

@@ -54,9 +54,10 @@ const KNOWN_FLAGS: u8 = FLAG_COMPRESSED | FLAG_RELIABLE | FLAG_PADDED | FLAG_FRA
 
 /// What a frame carries.
 ///
-/// The encrypted and plaintext framings use disjoint type numbers precisely so
-/// that neither can be mistaken for the other. A protocol that lets peers
-/// negotiate their own security level is a protocol that can be downgraded;
+/// The two security modes use disjoint type numbers precisely so that a peer
+/// running one cannot be answered as though it ran the other. A protocol that
+/// lets peers negotiate their own security level is a protocol that can be
+/// downgraded;
 /// here the mode is fixed when the session is built and never appears on the
 /// wire as a choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -494,10 +494,16 @@ considers it.
 A server likewise runs one mode. One that accepted several would let the
 client, or anyone impersonating it, pick the weakest on offer.
 
-`tests/modes.rs` asserts every crossing fails: plaintext to encrypted,
-encrypted to plaintext, public-key client to pre-shared-key server, wrong
-secret. It also checks that codecs and reliable delivery behave identically in
-all three, which is the point of the `Link` abstraction beneath them.
+`tests/modes.rs` asserts the crossings fail: a public-key client against a
+pre-shared-key server, and a wrong secret. It also checks that codecs and
+reliable delivery behave identically in both, which is the point of sharing one
+implementation beneath them.
+
+*As written, this paragraph named four crossings and a `Link` abstraction. Two
+of the crossings and the abstraction went with the plaintext mode
+([D46](#d46--the-mode-that-was-not-encrypted-is-gone)); the banner above scoped
+its supersession to the table and left this standing, which is how a paragraph
+survives the thing it describes.*
 
 ## D16 — One socket, both directions
 
@@ -1607,7 +1613,7 @@ only as whatever `register` happened to refuse. None of the three was asserted
 anywhere.
 
 That is worth something concrete: congestion control took self-inflicted loss on
-a 1 Mbit/s link from 46% of everything sent to about 3% (BENCHMARKS.md §9). A
+a 1 Mbit/s link from 46% of everything sent to about 3% (BENCHMARKS.md §10). A
 window that widened where it should collapse would put that back, and nothing in
 the suite would have failed.
 
@@ -2110,12 +2116,15 @@ the peer that needs a keep-alive most is behind a NAT and receive-only, which
 is exactly `Connection`-shaped, and `pump` already computed a wake time as the
 minimum of several deadlines — adding a third cost almost nothing.
 
-**Not done, and worth stating.** This does not detect a dead peer. An
-unanswered keep-alive is not acted on, and a session with a peer that has gone
-away stays in the table until eviction or `disconnect` removes it. An idle
-timeout is a separate decision with its own trade — how long to wait before
-declaring a peer gone is not something a transport can pick for an application
-— and is not made here.
+**Not done here, and made later.** This does not itself detect a dead peer: an
+unanswered keep-alive is not acted on, and a session with a departed peer stays
+in the table until eviction or `disconnect` removes it. An idle timeout is a
+separate decision with its own trade — how long to wait before declaring a peer
+gone is not something a transport can pick for an application.
+
+> **Superseded in part by [D51](#d51--giving-up-on-a-peer-and-the-bug-that-found).**
+> `set_peer_timeout` makes that decision configurable, and D51 explains why it
+> means little without the keep-alives decided here.
 
 ## D50 — One key does not last a whole session
 
@@ -2624,3 +2633,79 @@ The bucket this replaced started full; the replacement did not, and only the
 parallel run was slow enough to expose it. Sessions now start with a full
 allowance, which is also the right answer on its own terms: a peer that moves
 moments after connecting is not doing anything suspicious.
+
+## D59 — What the documents were claiming
+
+An audit of every document against the code, run as the third of
+[D54](#d54--the-re-measurement-that-needed-re-measuring)'s review passes. It
+found twenty things. Most were one line. Three were not.
+
+### The front page said three features were absent, and two of them existed
+
+The crate-level documentation — the first paragraph a reader sees on docs.rs —
+said there was no congestion control and that address migration was absent.
+Both had been built, one of them in this repository's own D24 and D41, the
+other in D47.
+
+This is the failure D30 already named in writing: *"'Not built: congestion
+control' survived three commits after congestion control was built, and no
+extractor catches that."* It was still there, having also collected a second
+wrong entry since. The paragraph now says what is genuinely absent, points at
+the two standing lists rather than being a third one, and says out loud that it
+has been wrong before.
+
+### The specification contradicted itself about the thing it had just specified
+
+§3.3 said, normatively, *"address migration is not supported in version 1"*,
+while §5.8 of the same document specified it in full with MUST and SHOULD.
+§3.3 is what an implementer reads when deciding how to key a session table, so
+the wrong half was the half that gets acted on. §10's "not specified in version
+1" list carried the same claim, plus congestion control and ticket expiry —
+three entries describing sections of the document they appear in. All date from
+the initial commit; the sections that contradict them were added later and
+nothing looked back.
+
+`docs/USAGE.md` had the same defect in miniature: *"Sessions are bound to the
+peer's address… loses its session and must reconnect"*, four lines above the
+section headed "When a peer changes address" that explains how it is followed.
+
+### A documented behaviour that was never true for half its inputs
+
+The table of when compression is skipped said "under 1 KiB, no Zstandard" and
+"already looks compressed — detected, not guessed". Both are consulted only in
+the branch taken when *no transform is usable*. A declared `PayloadType` takes
+the other branch, where the entropy stage runs whatever the size or the look of
+the bytes. So a 64-byte typed payload is compressed and a 64-byte opaque one is
+not, and the table said otherwise for as long as it has existed. Now stated as
+what it is, including that it is the intent rather than an oversight.
+
+### The rest
+
+Two sections numbered §4.6, both cited by number. A test count 26 low, now
+written with the command that produces it. "Four things are checked
+mechanically" over a table of five. "Four modes" where there are three. "The
+other two" where there is one other. `max_payload` quoted as 1186, which is the
+plaintext-era figure — the current number is 1170 and `USAGE.md` had it right,
+so two documents disagreed. A reference to `accept()`, which went with
+`Listener` in D14. Two cross-references pointing at the wrong section, which
+`check-links.py` cannot see because they are prose. A heading calling
+congestion control missing over a body explaining why it exists. D49 saying an
+idle timeout "is not made here" with no marker that D51 makes it. D15
+describing a `Link` abstraction deleted in D46 and crossings that no longer
+exist — its supersession banner scoped itself to a table and left the paragraph
+standing.
+
+And a doc comment I broke this week: `set_peer_timeout` had `set_max_peers`'s
+whole documentation block above it, so rustdoc said the timeout sets a peer
+limit and that "a limit of zero is treated as one". Inserting a method above an
+existing one's documentation is invisible to `missing_docs`, because the item
+*is* documented — with somebody else's words.
+
+### What this says about the guards
+
+The mechanical checks are good at what they cover and blind to prose.
+`doc_snippets.rs` compiles every fenced Rust block; `api_reference.rs` pins the
+constants; `spec_conformance.rs` pins the wire format; `check-links.py` follows
+every link. Not one of them can read a sentence. Every finding above is a
+sentence, and the ones that lasted longest were the ones in the places a reader
+starts: the crate root, §3.3, the first table in a how-to.

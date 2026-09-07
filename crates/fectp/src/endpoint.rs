@@ -1175,15 +1175,6 @@ impl Endpoint {
         }
     }
 
-    /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
-    ///
-    /// Above the limit, the peer that has been quiet longest is dropped to make
-    /// room — see [`MAX_PEERS`] for why the alternative is unbounded memory.
-    /// Sessions already held are not dropped by lowering it; the new limit
-    /// applies as peers arrive.
-    ///
-    /// A limit of zero is treated as one, because an endpoint that can hold no
-    /// sessions cannot do anything.
     /// Releases a peer nothing has been heard from for `within`.
     ///
     /// The session is dropped and [`Event::PeerLost`] is raised. Only frames
