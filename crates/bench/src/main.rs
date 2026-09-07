@@ -14,6 +14,7 @@ mod datasets;
 mod timing;
 mod transports;
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use datasets::Shape;
@@ -1223,76 +1224,160 @@ fn jitter_asymmetry_and_crowding() {
     // peer, and reported the per-peer figure *falling* as peers were added —
     // which was the batching amortising the syscall, not the endpoint getting
     // faster. The question is what one peer waits for, so only one is timed.
-    row_header(&["other peers busy", "round trip", "vs idle", "p95"]);
-    let mut baseline = 0.0;
-    for others in [0usize, 7, 23] {
-        let echo = FectpEcho::public_key();
-        let public = echo.public.expect("identity");
+    row_header(&[
+        "other peers busy",
+        "round trip",
+        "vs idle",
+        "pass to pass",
+        "p95",
+        "load offered",
+    ]);
 
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let load: Vec<std::thread::JoinHandle<()>> = (0..others)
-            .map(|_| {
-                let addr = echo.addr;
-                let flag = std::sync::Arc::clone(&stop);
-                std::thread::spawn(move || {
-                    let Ok(conn) =
-                        Connection::connect(addr, &public, &Identity::generate())
-                    else {
-                        return;
-                    };
-                    let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
-                    let filler = vec![0x22u8; 256];
-                    let mut buf = vec![0u8; 4096];
-                    // Paced rather than a spin loop. Unpaced, thirty-one of
-                    // these saturate every core and the table measures CPU
-                    // starvation on a shared machine instead of what a peer
-                    // waits for at the endpoint.
-                    while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        if conn.send(&filler, PayloadType::Opaque).is_err() {
-                            break;
+    // The last entry repeats the first: a control with no neighbours at all,
+    // run at the end of every pass.
+    const CROWDS: [usize; 4] = [0, 7, 23, 0];
+    // Whole passes rather than more samples inside a row. The noise here is
+    // not between one round trip and the next — 150 samples settle that — it
+    // is between one row and the next, and a single pass of this table gave a
+    // control anywhere from 0.57x to 1.77x over five runs, a wider band than
+    // the crowding it was meant to validate. Interleaving the conditions and
+    // taking the median across passes is what that calls for.
+    const PASSES: usize = 3;
+
+    let mut medians: Vec<Vec<f64>> = vec![Vec::new(); CROWDS.len()];
+    let mut tails: Vec<Vec<f64>> = vec![Vec::new(); CROWDS.len()];
+    let mut joins: Vec<usize> = vec![0; CROWDS.len()];
+    let mut trips: Vec<u64> = vec![0; CROWDS.len()];
+
+    for _pass in 0..PASSES {
+        for (index, others) in CROWDS.into_iter().enumerate() {
+            let echo = FectpEcho::public_key();
+            let public = echo.public.expect("identity");
+
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // A load thread whose connect fails returns without a word, so the
+            // row would report on however many peers happened to get in. Both
+            // counters are printed: the row is only worth reading if the load
+            // it claims actually happened.
+            let joined = std::sync::Arc::new(AtomicUsize::new(0));
+            let offered = std::sync::Arc::new(AtomicU64::new(0));
+            let load: Vec<std::thread::JoinHandle<()>> = (0..others)
+                .map(|_| {
+                    let addr = echo.addr;
+                    let flag = std::sync::Arc::clone(&stop);
+                    let joined = std::sync::Arc::clone(&joined);
+                    let offered = std::sync::Arc::clone(&offered);
+                    std::thread::spawn(move || {
+                        let Ok(conn) = Connection::connect(addr, &public, &Identity::generate())
+                        else {
+                            return;
+                        };
+                        joined.fetch_add(1, Ordering::Relaxed);
+                        let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
+                        let filler = vec![0x22u8; 256];
+                        let mut buf = vec![0u8; 4096];
+                        // Paced rather than a spin loop. Unpaced, thirty-one
+                        // of these saturate every core and the table measures
+                        // CPU starvation on a shared machine instead of what a
+                        // peer waits for at the endpoint.
+                        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            if conn.send(&filler, PayloadType::Opaque).is_err() {
+                                break;
+                            }
+                            if conn.recv(&mut buf).is_ok() {
+                                offered.fetch_add(1, Ordering::Relaxed);
+                            }
+                            std::thread::sleep(Duration::from_micros(200));
                         }
-                        let _ = conn.recv(&mut buf);
-                        std::thread::sleep(Duration::from_micros(200));
-                    }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        let mut conn =
-            Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("timeout");
-        let mut buf = vec![0u8; 4096];
-        let stats = measure(20, 150, || {
-            transports::fectp_round_trip(&mut conn, &payload, &mut buf);
-        });
+            let mut conn =
+                Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
+            conn.set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("timeout");
+            let mut buf = vec![0u8; 4096];
+            let stats = measure(20, 150, || {
+                transports::fectp_round_trip(&mut conn, &payload, &mut buf);
+            });
 
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        drop(conn);
-        for handle in load {
-            let _ = handle.join();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            drop(conn);
+            for handle in load {
+                let _ = handle.join();
+            }
+            drop(echo);
+
+            medians[index].push(stats.median_us());
+            tails[index].push(stats.p95.as_secs_f64() * 1e6);
+            joins[index] += joined.load(Ordering::Relaxed);
+            trips[index] += offered.load(Ordering::Relaxed);
         }
-        drop(echo);
+    }
 
-        if others == 0 {
-            baseline = stats.median_us();
-        }
+    let mid = |values: &mut Vec<f64>| {
+        values.sort_unstable_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+    let baseline = mid(&mut medians[0]);
+    for (index, others) in CROWDS.into_iter().enumerate() {
+        let control = index > 0 && others == 0;
+        let median = mid(&mut medians[index]);
+        // `mid` sorted them, so the ends are the extremes of the passes.
+        let spread = format!(
+            "{:.0}-{:.0} us",
+            medians[index][0],
+            medians[index][medians[index].len() - 1]
+        );
         row(&[
-            &format!("{others}"),
-            &us(stats.median_us()),
+            &if control {
+                "0 again (control)".to_string()
+            } else {
+                format!("{others}")
+            },
+            &us(median),
+            &if index == 0 {
+                "—".to_string()
+            } else {
+                format!("{:.2}x", median / baseline)
+            },
+            &spread,
+            &us(mid(&mut tails[index])),
             &if others == 0 {
                 "—".to_string()
             } else {
-                format!("{:.2}x", stats.median_us() / baseline)
+                format!(
+                    "{} up, {:.1}k rt",
+                    joins[index] / PASSES,
+                    trips[index] as f64 / 1000.0
+                )
             },
-            &us(stats.p95.as_secs_f64() * 1e6),
         ]);
     }
-    note("Read the p95 column, not the median. The median barely moves, so a typical");
-    note("request is unaffected by two dozen busy neighbours — but the tail grows");
-    note("about fivefold, because one socket and one loop serve everyone and a");
-    note("request that arrives behind a burst waits for it. That is the shape of a");
-    note("single-threaded event loop, and it is the cost of the design in D14.");
-    note("Client and server share this machine's cores, so the load threads compete");
-    note("for CPU as well as for the endpoint: treat this as an upper bound.");
+
+    note("Every row is the median of three passes over the whole table, taken in");
+    note("order and repeated, rather than three times as many samples inside one");
+    note("row. The noise here is between rows and not between round trips: a");
+    note("single pass gave a control anywhere from 0.57x to 1.77x over five runs,");
+    note("which is a wider band than the crowding it was there to validate.");
+    note("The last column is what the neighbours actually did: how many opened a");
+    note("session at all, and how many round trips they completed while the");
+    note("measured peer was being timed, summed over the passes. A load thread");
+    note("whose connect fails returns silently, so without it a row could report");
+    note("two dozen busy peers and mean four.");
+    note("Check the control row before reading anything else. When it lands near");
+    note("1.00x the table is crisp and repeatable — two such runs gave 1.02x and");
+    note("1.00x for the control, 1.46x and 1.47x for the median at 23 peers, and");
+    note("p95 of 293 and 280 us against 41 and 43 us idle. When it lands at 0.45x");
+    note("or 0.61x, as it also did, the host was moving underneath the run and");
+    note("nothing here is worth reading. That is the whole reason the row exists.");
+    note("On a run the control validates: two dozen busy neighbours cost the");
+    note("median about half again, and the tail about sevenfold. The tail is");
+    note("where crowding shows, because one socket and one loop serve everyone");
+    note("and a request arriving behind a burst waits for it. That is the shape");
+    note("of a single-threaded event loop and the cost of the design in D14.");
+    note("Client and server share this machine's cores, so the load threads");
+    note("compete for CPU as well as for the endpoint: treat this as an upper");
+    note("bound on what the endpoint itself imposes.");
 }

@@ -824,21 +824,43 @@ only on the return leg costs this protocol almost nothing.
 ### A crowded endpoint spares the median and not the tail
 
 One connection's round trip, measured while other peers work the same endpoint.
+The conditions are interleaved: the whole table is measured in order and then
+repeated, three times, and each row is the median of its three passes. That is
+not the same as taking three times as many samples inside a row, and the
+difference decides whether this table says anything. The noise here is not
+between one round trip and the next — 150 samples settle that — it is between
+one row and the next, and a single pass gave a control anywhere from 0.57x to
+1.77x, a wider band than the crowding it was there to validate.
 
-| other peers busy | round trip | vs idle | p95 |
-|---|---|---|---|
-| 0 | 30.0 µs | — | 43.6 µs |
-| 7 | 31.6 µs | 1.05x | 107.6 µs |
-| 23 | 30.5 µs | 1.02x | **232.0 µs** |
+| other peers busy | round trip | vs idle | pass to pass | p95 | load offered |
+|---|---|---|---|---|---|
+| 0 | 35.5 µs | — | 35–38 µs | 42.7 µs | — |
+| 7 | 36.3 µs | 1.02x | 35–37 µs | 101.1 µs | 7 up, 0.3k round trips |
+| 23 | 52.2 µs | 1.47x | 46–59 µs | **279.9 µs** | 23 up, 1.7k round trips |
+| 0 again (control) | 35.5 µs | 1.00x | 34–36 µs | 58.4 µs | — |
 
-**Read the p95 column.** The median barely moves, so a typical request is
-unaffected by two dozen busy neighbours — but the tail grows about fivefold,
-because one socket and one event loop serve everyone and a request arriving
-behind a burst waits for it. That is the shape of a single-threaded loop, and
-it is the price of the one-socket design (D14) rather than a defect in it.
+**Read the p95 column.** Two dozen busy neighbours cost the median about half
+again, and the tail about sevenfold, because one socket and one event loop
+serve everyone and a request arriving behind a burst waits for it. That is the
+shape of a single-threaded loop, and it is the price of the one-socket design
+(D14) rather than a defect in it.
 
-Client and server share this machine's cores here, so the load threads compete
-for CPU as well as for the endpoint. Treat the figures as an upper bound.
+The last column is what the neighbours actually did — how many of them opened a
+session at all, and how many round trips they completed while the measured peer
+was being timed. A load thread whose connect fails returns without a word, so
+before this column a row could report two dozen busy peers and mean four.
+
+**Check the control row before reading anything else.** The run above is one
+where it landed at 1.00x; a second such run gave 1.02x for the control, 1.46x
+for the median at 23 peers and a p95 of 293 µs against 41 µs idle, which is the
+same table. Other runs gave controls of 0.45x and 0.61x, and on those the host
+was moving underneath the measurement and none of the rows meant anything. As
+in §9, choosing which run to reproduce by its control rather than by its result
+is the only such freedom taken here.
+
+Client and server share this machine's cores, so the load threads compete for
+CPU as well as for the endpoint. Treat the figures as an upper bound on what
+the endpoint itself imposes.
 
 An earlier version of this table sent to every peer and then read from every
 peer, and reported per-peer latency *falling* as peers were added — which was
