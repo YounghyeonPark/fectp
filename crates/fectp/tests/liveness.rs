@@ -214,20 +214,24 @@ fn a_peer_that_keeps_answering_is_not() {
     let mut stalls = Vec::new();
 
     for _ in 0..ATTEMPTS {
-        let server = Server::spawn(
-            Some(PEER_TIMEOUT_CONTROL),
-            Some(Duration::from_millis(80)),
-        );
+        // No keep-alive on the server. That is the point of this control and
+        // it used to be an accident: the server's own keep-alives are sent
+        // only to peers it has heard from, and this is the one test in the
+        // file that exchanges nothing before its window, so `entry.spoke`
+        // stayed false and the server happened to send none. Adding the
+        // "confirm the path works first" line that every other test here has
+        // made the endpoint's keep-alives take over, and the test then passed
+        // with the connection's keep-alive disabled entirely — verified by
+        // doing exactly that. Asking for none is the same condition, stated.
+        let server = Server::spawn(Some(PEER_TIMEOUT_CONTROL), None);
         let conn = Connection::connect(server.addr, &server.public, &Identity::generate())
             .expect("connect");
 
-        // Sit in `recv` while the client's own keep-alives go out. What keeps
-        // this session on file is the client sending them, not the client
-        // answering the server's: `Connection::set_keepalive` is a separate
-        // path from the endpoint's, and disabling the endpoint's leaves this
-        // test passing while disabling the connection's fails it. Both were
-        // checked by breaking them. The endpoint's own keep-alive is covered
-        // by `keepalive.rs` instead.
+        // Sit in `recv` while the client's own keep-alives go out. Nothing is
+        // asking it to: the server above has none, so what holds this session
+        // on file is the client speaking unprompted. `Connection` drives that
+        // from its own path rather than the endpoint's, and the endpoint's is
+        // covered by `keepalive.rs` instead.
         //
         // Two full timeouts. Without keep-alives the peer would be given up on
         // after the first, so this is enough to show the mechanism works, and

@@ -473,4 +473,19 @@ fn new_handshakes_are_rate_limited() {
         attempts.load(Ordering::Relaxed) > 0,
         "nothing connected at all, so the limit was never the thing being tested"
     );
+
+    // That floor is weaker than it looks and is known to be. `attempts` counts
+    // connections that *succeeded*, not handshakes offered, so it says nothing
+    // about whether the flood could have exceeded the ceiling. Measured with
+    // the limit removed, this harness answered 177 against a ceiling of 64 —
+    // a margin of 2.8x, which is thin for the trap it is standing next to: a
+    // machine 2.8 times slower than this one would pass this test with no
+    // limit at all, exactly as docs/FIXING-A-BUG.md §4 describes.
+    //
+    // Counting offered handshakes instead does not fix it on its own. A
+    // refused `Connection::connect` blocks for the whole handshake timeout, so
+    // the offered rate collapses precisely when the limit is working, and four
+    // threads over three seconds cannot reach the ceiling. Raising the margin
+    // needs the flood to send handshake initiations as raw datagrams and never
+    // wait for an answer, which is a different harness from this one.
 }

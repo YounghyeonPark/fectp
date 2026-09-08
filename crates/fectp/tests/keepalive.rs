@@ -198,87 +198,82 @@ impl Drop for Pusher {
 /// How many attempts a test gets when the host stalls under it.
 ///
 /// The two tests that assert the NAT dropped *nothing* are statements about
-/// wall-clock time: the client must get to send a keep-alive within every
-/// mapping lifetime, and a thread that is not scheduled for longer than
-/// [`MAPPING`] loses the mapping for a reason that has nothing to do with the
-/// protocol. Under `cargo test --workspace` that happens. An attempt that
-/// stalled is retried rather than believed, and the last one says so.
+/// wall-clock time: the client must get a datagram out within every mapping
+/// lifetime, and one that is not scheduled for that long loses the mapping for
+/// a reason that has nothing to do with the protocol. Under
+/// `cargo test --workspace` that happens. An attempt that stalled is retried
+/// rather than believed, and the last one says so.
+///
+/// The premise comes from [`ExpiringNat::longest_gap`] — the actual interval
+/// between the client's outbound datagrams, read at the point the mapping is
+/// refreshed from. It was measured by a watchdog thread first, which was the
+/// wrong instrument: the keep-alive leaves from the thread inside `recv`, and
+/// a watchdog running beside it reported a 24 ms stall while that thread was
+/// being held up for 900 ms — nearly twice `MAPPING`. The test then failed and
+/// printed "so this is not the machine", which was false. Verified by stalling
+/// `Connection::pump` deliberately.
 const ATTEMPTS: usize = 3;
+
+/// The longest this process may go unscheduled and still be judged.
+///
+/// Not `MAPPING`. A keep-alive goes out every `KEEPALIVE`, so after a stall of
+/// `S` the mapping has gone unrefreshed for up to `S + KEEPALIVE` — the stall,
+/// plus the wait for the next one to fall due. It survives only while that is
+/// under `MAPPING`, which puts the real headroom at `MAPPING - KEEPALIVE`.
+/// Filtering at `MAPPING` admitted stalls between 350 and 500 ms that expire
+/// the mapping honestly, and then blamed the protocol for them.
+const HEADROOM: Duration = Duration::from_millis(
+    MAPPING.as_millis() as u64 - KEEPALIVE.as_millis() as u64,
+);
 
 /// Counts the pushes that arrive over `window`, sending nothing at all.
 fn receive_only(conn: &Connection, window: Duration) -> usize {
+    receive_only_watching(conn, window).0
+}
+
+/// As [`receive_only`], and also the longest this loop went between passes.
+///
+/// That gap is the premise of the two tests asserting the NAT dropped nothing.
+/// A keep-alive leaves from inside `recv`, on **this** thread, so what decides
+/// whether the mapping survives is whether this loop is running — and a loop
+/// that is not scheduled for longer than `MAPPING` loses the mapping for a
+/// reason the protocol had no part in.
+///
+/// Two earlier attempts measured the wrong thing. A watchdog on its own thread
+/// reported a 24 ms stall while this one was held up for 900 ms. Reading the
+/// interval between the client's outbound datagrams at the NAT is exact when
+/// it fires, but it only updates when a datagram *arrives*, so a client that
+/// goes silent to the end of the window never has that silence measured — it
+/// read 41 ms against a keep-alive that had been disabled outright.
+///
+/// The read timeout is therefore short and fixed rather than the whole
+/// remaining window: this loop has to come round often enough to time itself.
+/// A timeout is the normal outcome and is not an error.
+fn receive_only_watching(conn: &Connection, window: Duration) -> (usize, Duration) {
+    /// Short enough that a stall worth catching cannot hide inside one pass.
+    const SLICE: Duration = Duration::from_millis(50);
+
     let deadline = Instant::now() + window;
     let mut buf = vec![0u8; 4096];
     let mut arrived = 0;
+    let mut longest = Duration::ZERO;
+    let mut last = Instant::now();
     while Instant::now() < deadline {
-        let left = deadline.saturating_duration_since(Instant::now());
+        longest = longest.max(last.elapsed());
+        last = Instant::now();
+        let left = deadline.saturating_duration_since(Instant::now()).min(SLICE);
         if conn.set_read_timeout(Some(left)).is_err() {
             break;
         }
         match conn.recv(&mut buf) {
             Ok(_) => arrived += 1,
+            // Expected once a slice passes with no push due; anything else
+            // ends the loop, as it always has.
+            Err(fectp::Error::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
     }
-    arrived
-}
-
-/// Watches how well this process is being scheduled while a test runs.
-///
-/// The tests that assert the NAT dropped *nothing* need the client to get a
-/// keep-alive out within every mapping lifetime. Those go out from inside the
-/// blocking `recv`, so what matters is not how often the test loop iterates
-/// but whether this process ran at all — and under `cargo test --workspace`,
-/// with dozens of binaries at once, it sometimes does not. A mapping that
-/// expires because nothing was running to refresh it is the behaviour under
-/// test working, and asserting through it blames the protocol for the machine.
-///
-/// This cannot be measured from the receive loop itself: that loop blocks for
-/// the whole window, so a long gap there means either a stall or no pushes
-/// arriving, and no-pushes-arriving is the failure being tested for.
-struct Watchdog {
-    longest: Arc<Mutex<Duration>>,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl Watchdog {
-    fn start() -> Self {
-        let longest = Arc::new(Mutex::new(Duration::ZERO));
-        let stop = Arc::new(AtomicBool::new(false));
-        let record = Arc::clone(&longest);
-        let flag = Arc::clone(&stop);
-        let handle = thread::spawn(move || {
-            let mut last = Instant::now();
-            while !flag.load(Ordering::Relaxed) {
-                let gap = last.elapsed();
-                let mut longest = record.lock().expect("lock");
-                *longest = (*longest).max(gap);
-                drop(longest);
-                last = Instant::now();
-                thread::sleep(Duration::from_millis(20));
-            }
-        });
-        Self {
-            longest,
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    /// The longest this process went without running the watchdog.
-    fn longest_gap(&self) -> Duration {
-        *self.longest.lock().expect("lock")
-    }
-}
-
-impl Drop for Watchdog {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
+    (arrived, longest.max(last.elapsed()))
 }
 
 // -------------------------------------------------------------- the tests ---
@@ -341,10 +336,8 @@ fn a_keepalive_holds_an_idle_mapping_open() {
         // The same silence, several mapping lifetimes long. The keep-alive is
         // the only thing the client sends in it.
         let window = MAPPING * 6;
-        let watchdog = Watchdog::start();
-        let arrived = receive_only(&conn, window);
-        let stalled = watchdog.longest_gap();
-        if stalled >= MAPPING {
+        let (arrived, stalled) = receive_only_watching(&conn, window);
+        if stalled >= HEADROOM {
             stalls.push(stalled);
             continue;
         }
@@ -354,7 +347,8 @@ fn a_keepalive_holds_an_idle_mapping_open() {
             0,
             "a keep-alive must stop the mapping expiring at all, but the NAT \
              dropped {} of {} inbound datagrams (longest stall {stalled:?}, \
-             inside the {MAPPING:?} mapping, so this is not the machine)",
+             under the {HEADROOM:?} it has to stay inside, so this is \
+             not the machine)",
             nat.dropped(),
             nat.dropped() + nat.delivered()
         );
@@ -407,14 +401,19 @@ fn an_endpoint_that_dialled_out_keeps_its_own_mapping_open() {
         let window = MAPPING * 6;
         let until = Instant::now() + window;
         let mut arrived = 0;
-        let watchdog = Watchdog::start();
+        // The same self-timing as `receive_only_watching`: this loop is the
+        // one the endpoint's keep-alive goes out from.
+        let mut stalled = Duration::ZERO;
+        let mut last = Instant::now();
         while Instant::now() < until {
+            stalled = stalled.max(last.elapsed());
+            last = Instant::now();
             if let Ok(Event::Message { .. }) = node.poll(Some(Duration::from_millis(20))) {
                 arrived += 1;
             }
         }
-        let stalled = watchdog.longest_gap();
-        if stalled >= MAPPING {
+        let stalled = stalled.max(last.elapsed());
+        if stalled >= HEADROOM {
             stalls.push(stalled);
             continue;
         }
@@ -424,7 +423,8 @@ fn an_endpoint_that_dialled_out_keeps_its_own_mapping_open() {
             0,
             "a keep-alive must stop the mapping expiring at all, but the NAT \
              dropped {} of {} inbound datagrams (longest stall {stalled:?}, \
-             inside the {MAPPING:?} mapping, so this is not the machine)",
+             under the {HEADROOM:?} it has to stay inside, so this is \
+             not the machine)",
             nat.dropped(),
             nat.dropped() + nat.delivered()
         );

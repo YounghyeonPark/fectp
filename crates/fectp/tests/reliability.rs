@@ -287,7 +287,25 @@ fn flush_reports_a_single_message_that_exhausted_its_retries() {
     let took = started.elapsed();
     assert!(
         matches!(outcome, Err(fectp::Error::Unacknowledged { .. })),
-        "a message the sender gave up on must be reported. Returning success          for a message that never arrived is the one answer a reliable send          must never give: {outcome:?}"
+        "a message the sender gave up on must be reported. Returning success \
+         for a message that never arrived is the one answer a reliable send \
+         must never give: {outcome:?}"
+    );
+
+    // The error alone does not pin down which branch produced it: `flush`
+    // also reports `Unacknowledged` when its own deadline expires with the
+    // message still in flight, with the same count of 1. That is a different
+    // answer to a different question, and it is the one the test above gives.
+    // Made `flush` ignore its argument and use 300 ms, and this test passed in
+    // 0.37 s on a build where the fix was absent. What separates them is what
+    // is left outstanding: the sender has given up and dropped the message, so
+    // nothing remains; a flush that merely ran out of time still holds it.
+    assert_eq!(
+        client.unacknowledged(),
+        0,
+        "flush reported a failure, but the message is still outstanding, so it \
+         gave up on its own deadline rather than on the message. That is \
+         the answer it gave before the fix was made."
     );
 
     // And it must say so when it knows, not when its budget runs out. The
@@ -299,7 +317,8 @@ fn flush_reports_a_single_message_that_exhausted_its_retries() {
     // from the deadline it used to sleep out.
     assert!(
         took < Duration::from_secs(60),
-        "flush knew the message was gone after the retry schedule, about 11          seconds, but took {took:?} of its 120-second budget to say so"
+        "flush knew the message was gone after the retry schedule, about 11 \
+         seconds, but took {took:?} of its 120-second budget to say so"
     );
 }
 
