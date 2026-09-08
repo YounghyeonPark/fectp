@@ -1256,13 +1256,19 @@ fn jitter_asymmetry_and_crowding() {
     note("datagrams only at the top of its loop and then blocked on a fixed 2 ms");
     note("socket timeout, so it applied its own tick rather than the delay it was");
     note("given, rounding a 0-2 ms spread up by 100%.");
-    note("What remains is not understood. Run on its own these rows read 139 to");
-    note("800 ms; run at the end of a full pass they reach tens of seconds, and");
-    note("one 0-10 ms row read 121 seconds with passes ranging from 0.6 to 182.");
-    note("Nothing is dropped anywhere on this path. The host effect described in");
-    note("section 8 is real and worth two to three times; it is not worth a");
-    note("thousand. Do not read these absolute times as a property of the");
-    note("protocol until that is settled.");
+    note("Rows here used to read 60 and 121 seconds against 140 ms for the same");
+    note("row on a good run, on a path that drops nothing. That was two faults in");
+    note("the sender, both now fixed: `flush` returned success for a message it");
+    note("had given up on, because `drive_queue` struck the record off before");
+    note("flush could read it, and it then sat out its whole budget before saying");
+    note("so, because `pump` blocked on the caller's deadline with nothing left");
+    note("to wait for. The 60 seconds was this harness's flush budget.");
+    note("A message is still occasionally abandoned when the host is loaded, and");
+    note("after 1.3 seconds rather than the 11 the retry schedule suggests: the");
+    note("timeout is tuned to the path it has seen, so near the 20 ms floor five");
+    note("retries are spent in 40+80+160+320+640 ms. Whether MAX_RETRIES of 5 is");
+    note("the right budget on a fast path is a protocol decision, not a bug, and");
+    note("it is now reported rather than silently swallowed.");
     println!();
 
     // ── asymmetry ────────────────────────────────────────────────────────

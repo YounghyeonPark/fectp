@@ -827,7 +827,7 @@ alone could be pointed at a third party who never asked for it
 
 ## 11. Jitter, an asymmetric path, and a crowded endpoint
 
-### Jitter does not fool the retransmission timer, and something else stalls
+### Jitter does not fool the retransmission timer
 
 200 reliable messages through a relay that delays each datagram by a random
 amount. **Nothing is dropped**, so every datagram past 201 is one the sender
@@ -836,52 +836,59 @@ three passes with their range beside it.
 
 | jitter | time | pass to pass | datagrams sent | spurious |
 |---|---|---|---|---|
-| none | 7.94 ms | 8–8 ms | 201 | 0 (0.0%) |
-| 0–2 ms | 247.21 ms | 139–295 ms | 202 | 1 (0.5%) |
-| 0–10 ms | 140.11 ms | 139–297 ms | 201 | 0 (0.0%) |
-| 0–40 ms | 1697.56 ms | 1284–2800 ms | 210 | 9 (4.5%) |
+| none | 13.65 ms | 11–14 ms | 201 | 0 (0.0%) |
+| 0–2 ms | 138.27 ms | 137–140 ms | 201 | 0 (0.0%) |
+| 0–10 ms | 247.34 ms | 141–435 ms | 202 | 1 (0.5%) |
+| 0–40 ms | 1618.46 ms | 404–2671 ms | 211 | 10 (5.0%) |
 
-Spurious retransmissions stay rare at every spread tested — about 1% at 2 and
-10 ms, a few per cent at 40. The estimator carries a variation term (RFC 6298's
-RTTVAR) and is evidently using it: one that averaged round trips without it
-would retransmit every time a datagram took longer than usual, which under this
-much jitter is constantly.
+Spurious retransmissions stay in low single figures per cent at every spread
+tested. The estimator carries a variation term (RFC 6298's RTTVAR) and is
+evidently using it: one that averaged round trips without it would retransmit
+every time a datagram took longer than usual, which under this much jitter is
+constantly. Across three runs the rows read 0–5.5%, 0.5–4% and 2.5–5%.
 
 **This section previously claimed no spurious retransmissions at all below
 40 ms, on one sample per row.** Three passes show one or two at 2 ms and up to
 32 at 10 ms depending on the run. Rare is the honest word, not absent.
 
-**These rows are not stable, and it is the largest unexplained thing in this
-document.** The table above was measured by running this section on its own.
-Run under the command at the top of this file — the whole benchmark, this
-section last — the same rows read:
+### The two bugs this table found
 
-| jitter | time | pass to pass | spurious |
-|---|---|---|---|
-| none | 15.21 ms | 15–16 ms | 0 (0.0%) |
-| 0–2 ms | 1352.67 ms | 611–61439 ms | 12 (6.0%) |
-| 0–10 ms | 121794.37 ms | 593–181711 ms | 21 (10.4%) |
-| 0–40 ms | 63954.67 ms | 4860–64521 ms | 27 (13.4%) |
+Rows here used to read **60 and 121 seconds** for 200 messages, on a path that
+drops nothing, against 140 ms for the same row on a good run. Chasing that
+found two faults in the sender, both now fixed and both covered by
+`flush_reports_a_single_message_that_exhausted_its_retries`.
 
-Two minutes for 200 messages, against 140 ms for the same row measured alone —
-with nothing dropped anywhere on the path, and passes within one row ranging
-from 593 ms to 181 seconds. Some of that is the host effect described in §9,
-which is real and worth two to three times. It is not worth a thousand.
+**`flush` returned success for a message it had given up on.** The list of
+abandoned message identifiers was drained by `drive_queue` on every call, on
+the stated grounds that nothing else read it — but `flush` reads it, and calls
+`drive_queue` first, so the record was struck off before flush could look. A
+fragmented message escaped this because its queue was not empty, and the two
+tests that existed missed the gap between them: one gives up after 300 ms and
+leaves by its own deadline while the message is still in flight, the other is
+the fragmented case. What was uncovered was exactly the middle — one small
+message, nothing queued behind it, retries exhausted. **A reliable send
+reported delivery for a message that never arrived.**
 
-So: the thing this section set out to test, it passes. The estimator is not
-fooled by variance — spurious retransmissions stay in single figures per cent
-even at 40 ms of jitter, which a mean-only estimator could not manage. But
-something occasionally stalls a reliable stream under heavy reordering for tens
-of seconds, and neither the protocol nor the harness has been shown to be the
-cause. **Do not read the absolute times in this section as a property of the
-protocol until that is settled.**
+**And it sat out its whole budget before saying so.** The verdict is reached
+inside `pump`, which then had nothing left to wait for and blocked on the
+caller's remaining deadline anyway; `flush` cannot re-check its exit condition
+until that returns. That is where the 60 seconds came from — it is the
+harness's flush budget, not any property of the path. Three of them in one run
+made 181 seconds.
 
-The table was also far worse than this before the relay was fixed. It released
-held datagrams only at the top of its loop and then blocked on a fixed 2 ms
-socket timeout, so it applied its own tick rather than the delay it was given:
-that rounds a 0–2 ms spread up by 100%, and it drove two rows into the
-60-second read timeout outright. Rows that read 60,131 ms and 60,861 ms were
-the harness, not the protocol.
+With both fixed the worst round of a 40-round reproducer went from 181 seconds
+to 1.3, and under three concurrent copies from 61 seconds to 2.2.
+
+**What remains is a design question rather than a defect.** A message is still
+occasionally abandoned — about once in 180 rounds of 200 messages, only when
+the host is loaded. It happens after 1.3 seconds, not the 11 the retry schedule
+suggests, because the timeout is tuned to the path it has seen: with a smoothed
+round trip near the 20 ms floor, five retries with exponential backoff are
+spent in 40 + 80 + 160 + 320 + 640 ms. So a sender that is not scheduled for
+1.3 seconds gives up on a message that a slower estimate would still be
+retrying. Whether `MAX_RETRIES` of 5 is the right budget on a fast path is a
+protocol decision and is left alone here; it is now at least reported rather
+than silently swallowed.
 
 ### Losing an acknowledgement is nearly free; losing data is not
 

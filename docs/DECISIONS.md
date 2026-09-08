@@ -2860,3 +2860,80 @@ timing tests lie, so the five files that depend on a timer actually
 firing — retransmission, keep-alives, peer timeouts, migration probes, and all
 three together — were run fifteen times each. No failures. That is the evidence
 that the deadlines are still reached, and it is worth more than the speed-up.
+
+## D63 — A reliable send that reported delivery for a message it had given up on
+
+Found by chasing a benchmark row, which is the second time injecting a network
+condition has found a bug that lost messages while the suite was green.
+
+**Problem.** Section 11's jitter table read **60 and 121 seconds** for 200
+reliable messages, against 140 ms for the same row on a good run, on a path
+that drops nothing. Chasing that found two faults in the sender.
+
+The first is the one that matters. `Peer::drive_queue` drained the list of
+abandoned message identifiers on every call, on the stated grounds that
+"nothing else reads this". `Connection::flush` reads it — and calls
+`drive_queue` first, so the record was struck off before flush could look.
+**A reliable message that exhausted its retries was reported as delivered.**
+
+Two tests covered the neighbourhood and neither covered this:
+`flush_reports_messages_that_were_never_delivered` gives up after 300 ms and
+leaves by its own deadline while the message is still in flight, which is a
+different question with the same shape of answer; and
+`a_fragmented_message_whose_fragment_never_arrives_is_reported` passes because
+a queued message keeps the queue non-empty, so `drive_queue` reaches the branch
+that uses the list rather than the one that returns early. What was uncovered
+was exactly the middle: one unfragmented message, nothing queued behind it,
+retries exhausted.
+
+The second fault is why it took a minute to say anything at all. The verdict is
+reached inside `pump`, which then had nothing left to wait for and blocked on
+the caller's remaining deadline anyway; `flush` cannot re-check its own exit
+condition until `pump` returns. The 60 seconds was the benchmark's flush
+budget, not a property of the path. Three of them in one run made 181 seconds.
+
+**Decision.** The identifiers stay where they are and keep being drained by
+`drive_queue`, because that is the only thing that needs them — a caller
+feeding out fragments has to know *which* piece went. What a caller needs to
+**hear** is a count, so `Peer::abandoned_count` is kept separately, cleared by
+`flush` at entry and read at exit.
+
+The alternative was to stop draining the list and let `flush` consume it. That
+was rejected because nothing else drains it: `Endpoint` never reads
+`peer.abandoned` at all, so an endpoint that kept losing messages would have
+grown the list for the life of the peer. That unbounded growth is the real
+concern the original comment was reaching for, and it was right about the
+concern and wrong about who reads the list. A `u32` cannot grow.
+
+`pump` now returns as soon as a flush has nothing outstanding.
+
+**What it costs.** Four bytes per peer, and one more piece of state that has to
+be cleared in the right place — `flush` clears the count at entry, so two
+concurrent flushes on one connection would confuse each other's counts. That
+was already true of the list it replaces.
+
+**What is still open.** A message is still occasionally abandoned on this
+lossless path — about once in 180 rounds of 200 messages, and only when the
+host is loaded. It happens after **1.3 seconds**, not the 11 the retry schedule
+suggests, because the timeout is tuned to the path it has seen: with a smoothed
+round trip near the [20 ms floor](#d24--the-send-window-answers-to-the-path-not-just-to-memory), five
+retries with exponential backoff are spent in 40 + 80 + 160 + 320 + 640 ms. A
+sender that is not scheduled for 1.3 seconds gives up on a message that a
+slower estimate would still be retrying.
+
+**The `Endpoint` front end still does not report this at all.** `Event::Sent`
+is raised only from a finished queue, so it fires for a message that needed
+splitting and never for a single one — an `Endpoint` caller cannot learn that a
+one-frame reliable message was abandoned. That is the same failure this entry
+is about, on the other front end, and §5.5 of the specification now requires
+otherwise. It is left open deliberately: the fix changes what `Event::Sent`
+means, and emitting it only for single messages that *fail* while emitting it
+for split messages either way is an asymmetry worth choosing on purpose rather
+than as a side effect of a bug fix.
+
+Whether `MAX_RETRIES` of 5 is the right budget on a fast path is a protocol
+decision and is not taken here. It is worth stating what the current answer
+means: **on a fast path this protocol abandons a reliable message after about
+one and a third seconds of not being able to reach the peer.** That is a
+reasonable answer for a sensor that will retry at the application layer and a
+poor one for a file transfer, and the constant is not currently configurable.

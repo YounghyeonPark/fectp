@@ -656,6 +656,22 @@ observable by a conforming receiver, and this specification does not fix an
 algorithm for point 8. Point 4 is not — a receiver conforming to
 rules 2 and 3 will silently fail to deliver what a sender violating it sends.
 
+Point 5 has a corollary that is not observable on the wire either, and is worth
+stating because an implementation of this document got it wrong: **a sender
+that abandons a message MUST report that to its application.** Abandoning is
+the one outcome that turns a reliable send into an unreliable one, and an
+application that is not told has been given a guarantee that was quietly
+withdrawn — it cannot retry what it does not know was lost. A sender whose
+"flush" or equivalent reports success for an abandoned message is worse than
+one with no reliability at all, which at least does not promise. The
+implementation here reported it for a fragmented message and not for a single
+one, because the record was consumed by an unrelated path before the reporting
+one read it; see D63. Its `Connection` front end now satisfies this. Its
+`Endpoint` front end does not yet: `Event::Sent` is raised only for a message
+that needed splitting, so a single abandoned message is still not reported
+there. That is a known non-conformance, recorded in D63 rather than left to be
+discovered.
+
 ### 5.6 Fragmented messages
 
 A message larger than the frame limit MAY be split across several frames. The
