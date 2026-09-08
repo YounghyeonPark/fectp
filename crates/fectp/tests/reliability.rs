@@ -261,6 +261,49 @@ fn flush_reports_messages_that_were_never_delivered() {
 }
 
 #[test]
+fn flush_reports_a_single_message_that_exhausted_its_retries() {
+    // The test above gives up after 300 ms, while the message is still in
+    // flight, so it leaves by the deadline branch and never reaches the one
+    // that matters: what `flush` says once the sender has actually abandoned
+    // the message. The fragmented case is covered too, and passes — a queued
+    // message keeps the queue non-empty. This is the case in between: one
+    // small message, nothing queued behind it, retries exhausted.
+    let echo = server();
+    let relay = spawn_relay(echo.addr(), (1..500).collect(), vec![]);
+
+    let client =
+        Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
+    client
+        .send_reliable(b"into the void", PayloadType::Opaque)
+        .expect("send");
+
+    // One long flush, not `flush_until_settled`. That helper returns on the
+    // first `Unacknowledged`, and a short flush produces one from its own
+    // deadline while the message is still in flight — which is a different
+    // answer to a different question. A budget longer than the retry schedule
+    // means the sender reaches its own verdict inside this call.
+    let started = std::time::Instant::now();
+    let outcome = client.flush(Duration::from_secs(120));
+    let took = started.elapsed();
+    assert!(
+        matches!(outcome, Err(fectp::Error::Unacknowledged { .. })),
+        "a message the sender gave up on must be reported. Returning success          for a message that never arrived is the one answer a reliable send          must never give: {outcome:?}"
+    );
+
+    // And it must say so when it knows, not when its budget runs out. The
+    // verdict is reached inside `pump`, which then had nothing left to wait
+    // for and blocked on the caller's whole remaining deadline anyway; `flush`
+    // cannot re-check its own exit condition until that returns. The retry
+    // schedule is about 11 seconds here, so a budget of two minutes leaves
+    // room for this host to stall two or three times over and still be far
+    // from the deadline it used to sleep out.
+    assert!(
+        took < Duration::from_secs(60),
+        "flush knew the message was gone after the retry schedule, about 11          seconds, but took {took:?} of its 120-second budget to say so"
+    );
+}
+
+#[test]
 fn a_round_trip_estimate_is_learned() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), vec![], vec![]);

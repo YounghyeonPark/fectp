@@ -278,8 +278,23 @@ pub(crate) struct Peer {
     ///
     /// Identifiers rather than a count, because a caller feeding a large
     /// message out fragment by fragment has to know *which* piece was given up
-    /// to know that the message is beyond saving.
+    /// to know that the message is beyond saving. Drained by `drive_queue`
+    /// once it has read them, so this does not grow for a peer that keeps
+    /// losing messages.
     pub abandoned: Vec<MessageId>,
+
+    /// How many messages have been abandoned since a caller last cleared this.
+    ///
+    /// Separate from the list above because the two are read by different
+    /// things at different times. `drive_queue` consumes the identifiers as
+    /// soon as it has matched them against the message being fragmented, and
+    /// `Connection::flush` calls `drive_queue` before it looks — so a single
+    /// unfragmented message that exhausted its retries was struck off the
+    /// record before flush could report it, and flush returned success for a
+    /// message that never arrived. A fragmented one survived only because its
+    /// queue was not empty. A count is what flush actually needs, and unlike
+    /// the list it costs nothing to keep until someone asks.
+    pub abandoned_count: u32,
 
     /// Partly-arrived fragmented messages.
     pub reassembly: Reassembly,
@@ -323,6 +338,7 @@ impl Peer {
             pending: Vec::new(),
             dedup: DedupWindow::new(),
             abandoned: Vec::new(),
+            abandoned_count: 0,
             reassembly: Reassembly::new(),
             next_message: 0,
             queue: VecDeque::new(),
@@ -546,8 +562,10 @@ impl Peer {
     where
         F: FnMut(&[u8]) -> Result<()>,
     {
-        // Drained whether or not anything is queued: nothing else reads this,
-        // so leaving it would grow for the life of a peer that loses messages.
+        // Drained whether or not anything is queued: these identifiers are of
+        // no use to anything else, and leaving them would grow for the life of
+        // a peer that loses messages. What a caller needs to *hear* about an
+        // abandoned message is `abandoned_count`, which is not touched here.
         let lost = core::mem::take(&mut self.abandoned);
         if self.queue.is_empty() {
             return Ok(None);
@@ -788,6 +806,7 @@ impl Peer {
                 Due::GaveUp(id) => {
                     self.pending.retain(|p| p.id != id);
                     self.abandoned.push(id);
+                    self.abandoned_count = self.abandoned_count.saturating_add(1);
                 }
             }
         }

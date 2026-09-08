@@ -1159,7 +1159,7 @@ impl Connection {
     /// exhausting its retries, or if the timeout expires first.
     pub fn flush(&self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        self.core()?.peer.abandoned.clear();
+        self.core()?.peer.abandoned_count = 0;
 
         loop {
             // Queued fragments are part of what "unflushed" means, so this has
@@ -1172,14 +1172,15 @@ impl Connection {
                 }
                 if Instant::now() >= deadline {
                     return Err(Error::Unacknowledged {
-                        count: core.peer.retransmit.in_flight() + core.peer.abandoned.len(),
+                        count: core.peer.retransmit.in_flight()
+                            + core.peer.abandoned_count as usize,
                     });
                 }
             }
             self.pump(Some(deadline), None)?;
         }
 
-        let abandoned = self.core()?.peer.abandoned.len();
+        let abandoned = self.core()?.peer.abandoned_count as usize;
         if abandoned > 0 {
             return Err(Error::Unacknowledged { count: abandoned });
         }
@@ -1198,6 +1199,18 @@ impl Connection {
         let wait = {
             let mut core = self.core()?;
             core.drive_retransmits()?;
+            // A flush waits for outstanding work to finish, and the line above
+            // can finish it — by giving up on the last message rather than by
+            // delivering it. Blocking after that sleeps out the caller's whole
+            // remaining deadline with nothing left to wait for, and `flush`
+            // cannot re-check its own exit condition until this returns.
+            // Measured at 58 seconds, three times in one run of 200 messages.
+            if out.is_none()
+                && core.peer.retransmit.in_flight() == 0
+                && core.peer.queued() == 0
+            {
+                return Ok(None);
+            }
             // Before working out how long to sleep, say something if it has
             // been too long since anything was said.
             if core
