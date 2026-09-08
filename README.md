@@ -371,10 +371,11 @@ each with its consequence under [Limitations](#limitations).
 independent Noise implementation, and has a conformance suite pinning every
 normative constant — none of which is a substitute for review by someone who
 breaks protocols for a living. Injecting packet loss found a bug that lost
-messages outright while 179 tests passed, which is the honest measure of what
-testing alone catches.
+messages outright while 179 tests passed, and injecting jitter later found
+another that reported *success* for a message it had given up on, while 304
+did. That is the honest measure of what testing alone catches.
 
-`cargo test --workspace` runs 303 of them and they pass. Linked for
+`cargo test --workspace` runs 305 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.1 KiB of flash** and needs 358 bytes of session state — 1,406 with reliable
 delivery — plus the caller's buffers.
