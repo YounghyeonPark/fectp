@@ -104,11 +104,22 @@ pub enum Event {
         /// The handle [`Endpoint::connect`] returned.
         peer: PeerId,
     },
-    /// A message that had to be split across frames finished.
+    /// A reliable message reached a verdict.
     ///
-    /// Arrives once every fragment has been acknowledged, or once one has been
+    /// For a message that had to be split across frames, this arrives either
+    /// way: once every fragment has been acknowledged, or once one has been
     /// abandoned — a fragmented message missing a piece is not partially
-    /// delivered, it is not delivered.
+    /// delivered, it is not delivered. It arrives **once** per message, not
+    /// once per fragment.
+    ///
+    /// For a message that fitted in one frame, it arrives only when the sender
+    /// gave up on it, with `delivered` false. Success is not reported: this
+    /// queue is unbounded, and an event for every reliable send would let a
+    /// fast sender grow it without limit, while failures are bounded by what
+    /// can be outstanding at once. So for a single message, no event is the
+    /// good news. The specification requires only that the failure is never
+    /// silent (`SPEC.md` §5.5), and this is the cheaper way to satisfy it —
+    /// the reasoning is in D63.
     ///
     /// **Not raised for a message still queued when its peer goes away.**
     /// [`Event::PeerLost`] and [`Endpoint::disconnect`] end the session and
@@ -1713,6 +1724,18 @@ impl Endpoint {
                     *stamp = Instant::now();
                     Ok(())
                 })?;
+
+            // Anything given up on above that no queue is waiting for. A
+            // fragmented message reports itself when its queue finishes; this
+            // is the single unfragmented send, which reported nothing at all
+            // until SPEC.md §5.5 was written down and found to be unmet here.
+            let unreported = core::mem::take(&mut entry.peer.abandoned_unqueued);
+            for _ in 0..unreported {
+                self.events.push_back(Event::Sent {
+                    peer: id,
+                    delivered: false,
+                });
+            }
         }
         Ok(())
     }

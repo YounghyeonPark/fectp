@@ -392,8 +392,13 @@ Compression is per fragment, so each frame is self-describing. That costs ratio
 — the compressor sees one fragment of context rather than the whole message —
 so data that compresses well is better compressed by your own code first.
 
-On an `Endpoint` it is the same call. There is nothing to block on there, so a
-message that had to be split reports its outcome as `Event::Sent { delivered }`.
+On an `Endpoint` it is the same call. There is nothing to block on there, so
+the outcome arrives as `Event::Sent { delivered }`. A message that had to be
+split reports either way, once for the whole message. A message that fitted in
+one frame reports only when the sender gave up on it, with `delivered` false —
+success is silent, because an event for every reliable send would grow the
+event queue without limit on a busy endpoint. So no news is good news for a
+small message, and bad news always arrives.
 
 ## Typed payloads
 

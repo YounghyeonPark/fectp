@@ -666,11 +666,13 @@ withdrawn — it cannot retry what it does not know was lost. A sender whose
 one with no reliability at all, which at least does not promise. The
 implementation here reported it for a fragmented message and not for a single
 one, because the record was consumed by an unrelated path before the reporting
-one read it; see D63. Its `Connection` front end now satisfies this. Its
-`Endpoint` front end does not yet: `Event::Sent` is raised only for a message
-that needed splitting, so a single abandoned message is still not reported
-there. That is a known non-conformance, recorded in D63 rather than left to be
-discovered.
+one read it; see D63. Both of its front ends satisfy this now: `Connection`
+reports through `flush`, and `Endpoint` raises `Event::Sent` with `delivered`
+false. Success is reported only for a message that needed splitting — an
+endpoint's event queue is unbounded, and one event per reliable send would let
+a fast sender grow it without limit — so for a single message the absence of an
+event is the success. What this section requires is that the *failure* is never
+silent, and it is not.
 
 ### 5.6 Fragmented messages
 

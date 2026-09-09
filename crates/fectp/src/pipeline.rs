@@ -283,6 +283,16 @@ pub(crate) struct Peer {
     /// losing messages.
     pub abandoned: Vec<MessageId>,
 
+    /// Messages abandoned that no queued job was waiting on.
+    ///
+    /// An `Endpoint` has no `flush` to ask, so it reports an abandoned message
+    /// as an event — and a fragment of a queued message is already reported by
+    /// that queue finishing, so counting it here too would tell the caller
+    /// about one message once per fragment. This counts the rest: the single
+    /// unfragmented sends, which had no report at all before. Drained by the
+    /// endpoint as it raises the events.
+    pub abandoned_unqueued: u32,
+
     /// How many messages have been abandoned since a caller last cleared this.
     ///
     /// Separate from the list above because the two are read by different
@@ -338,6 +348,7 @@ impl Peer {
             pending: Vec::new(),
             dedup: DedupWindow::new(),
             abandoned: Vec::new(),
+            abandoned_unqueued: 0,
             abandoned_count: 0,
             reassembly: Reassembly::new(),
             next_message: 0,
@@ -805,6 +816,12 @@ impl Peer {
                 }
                 Due::GaveUp(id) => {
                     self.pending.retain(|p| p.id != id);
+                    // Checked before the identifier reaches the queue, which
+                    // consumes it: a fragment belongs to a job that reports
+                    // the whole message itself.
+                    if !self.queue.iter().any(|job| job.outstanding.contains(&id)) {
+                        self.abandoned_unqueued = self.abandoned_unqueued.saturating_add(1);
+                    }
                     self.abandoned.push(id);
                     self.abandoned_count = self.abandoned_count.saturating_add(1);
                 }

@@ -327,3 +327,180 @@ fn garbage_and_stray_datagrams_are_ignored() {
         "noise must not create phantom sessions"
     );
 }
+
+#[test]
+fn an_abandoned_single_message_is_reported() {
+    // The `Connection` half of this is
+    // `flush_reports_a_single_message_that_exhausted_its_retries` in
+    // reliability.rs. An `Endpoint` has no `flush` to ask, so the report has to
+    // arrive as an event — and until this test it did not arrive at all.
+    // `Event::Sent` was raised only from a finished queue, so a message that
+    // needed splitting reported its outcome and a single one never did. SPEC.md
+    // §5.5 requires otherwise: a sender that abandons a message must say so, or
+    // the caller has been given a guarantee that was quietly withdrawn.
+    let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let addr = server.local_addr().expect("addr");
+    let public = *server.public_key().expect("identity");
+
+    // Connect from another thread: `connect` blocks for the reply, and the
+    // reply only happens inside `poll` on this one.
+    let dial = thread::spawn(move || {
+        Connection::connect(addr, &public, &Identity::generate()).expect("connect")
+    });
+
+    // Learn the peer, then take the client away. Nothing will acknowledge
+    // anything from here on.
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut peer = None;
+    while peer.is_none() && std::time::Instant::now() < deadline {
+        if let Ok(Event::Connected { peer: id, .. }) = server.poll(Some(POLL)) {
+            peer = Some(id);
+        }
+    }
+    let peer = peer.expect("the handshake must complete");
+    drop(dial.join().expect("dial"));
+
+    // One frame's worth, so this takes the unfragmented path. The fragmented
+    // one already reports, which is what made the gap easy to miss.
+    server
+        .send_reliable(peer, b"nobody is listening", PayloadType::Opaque)
+        .expect("send");
+
+    // Five retries with exponential backoff from the initial 200 ms is about
+    // eleven seconds, and the peer timeout is off by default, so nothing else
+    // ends this.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut reported = None;
+    while reported.is_none() && std::time::Instant::now() < deadline {
+        match server.poll(Some(POLL)) {
+            Ok(Event::Sent { peer: id, delivered }) => reported = Some((id, delivered)),
+            Ok(_) => {}
+            Err(e) => panic!("poll failed: {e:?}"),
+        }
+    }
+
+    let (id, delivered) = reported.expect(
+        "a reliable message the sender gave up on must be reported. Without it \
+         an Endpoint caller cannot tell a delivered message from a lost one, \
+         and has been given a reliability guarantee that was withdrawn in \
+         silence",
+    );
+    assert_eq!(id, peer, "reported against the wrong peer");
+    assert!(
+        !delivered,
+        "the message was never acknowledged, so it must not report delivery"
+    );
+}
+
+#[test]
+fn a_delivered_single_message_is_not_reported() {
+    // The other half of the choice made in D63, asserted so it cannot drift
+    // into an event per reliable message. `Event::Sent` stays a report of
+    // failure for unfragmented messages: the endpoint's event queue is
+    // unbounded, and one event per reliable send would let a fast sender grow
+    // it without limit. Absence of an event is success.
+    let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let addr = server.local_addr().expect("addr");
+    let public = *server.public_key().expect("identity");
+
+    let dial = thread::spawn(move || {
+        let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+        conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
+        conn
+    });
+
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut peer = None;
+    while peer.is_none() && std::time::Instant::now() < deadline {
+        if let Ok(Event::Connected { peer: id, .. }) = server.poll(Some(POLL)) {
+            peer = Some(id);
+        }
+    }
+    let peer = peer.expect("the handshake must complete");
+    let client = dial.join().expect("dial");
+
+    server
+        .send_reliable(peer, b"this one lands", PayloadType::Opaque)
+        .expect("send");
+
+    // Read it and let the acknowledgement go back.
+    let mut buf = vec![0u8; 4096];
+    let n = client.recv(&mut buf).expect("the message must arrive");
+    assert_eq!(&buf[..n], b"this one lands");
+
+    // Drive both sides long enough for the acknowledgement to be applied, and
+    // well past the point where a retransmission would have fired.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Event::Sent { delivered, .. }) = server.poll(Some(Duration::from_millis(20))) {
+            panic!("a delivered single message raised Sent(delivered: {delivered})");
+        }
+        client.set_read_timeout(Some(Duration::from_millis(20))).expect("timeout");
+        let _ = client.recv(&mut buf);
+    }
+}
+#[test]
+fn an_abandoned_fragmented_message_is_reported_once() {
+    // The guard on the other side of the choice above. A fragment that is
+    // given up on is already reported by its queue finishing, so counting it
+    // again as an unqueued abandonment would tell the caller a single message
+    // failed several times — once per fragment. Without this test that guard
+    // is decoration: removing it leaves every other test passing, which is how
+    // it was found.
+    let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let addr = server.local_addr().expect("addr");
+    let public = *server.public_key().expect("identity");
+
+    let dial = thread::spawn(move || {
+        Connection::connect(addr, &public, &Identity::generate()).expect("connect")
+    });
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut peer = None;
+    while peer.is_none() && std::time::Instant::now() < deadline {
+        if let Ok(Event::Connected { peer: id, .. }) = server.poll(Some(POLL)) {
+            peer = Some(id);
+        }
+    }
+    let peer = peer.expect("the handshake must complete");
+    drop(dial.join().expect("dial"));
+
+    // Several frames' worth, so this takes the queued path. An xorshift fill
+    // rather than a constant: with the `compress` feature a repetitive payload
+    // codes down to one frame and this would quietly test the case above.
+    let mut fill = vec![0u8; 8192];
+    let mut x: u32 = 0x1234_5678;
+    for b in fill.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *b = x as u8;
+    }
+    server
+        .send_reliable(peer, &fill, PayloadType::Opaque)
+        .expect("send");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let mut reports = 0usize;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Event::Sent { delivered, .. }) = server.poll(Some(POLL)) {
+            assert!(!delivered, "nothing was acknowledged, so nothing was delivered");
+            reports += 1;
+            // Keep polling briefly: a second report is the failure being
+            // tested for, and returning on the first would never see it.
+            let settle = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < settle {
+                if let Ok(Event::Sent { .. }) = server.poll(Some(POLL)) {
+                    reports += 1;
+                }
+            }
+            break;
+        }
+    }
+
+    assert_eq!(
+        reports, 1,
+        "one message was given up on, so the caller must hear once. \
+         Hearing once per fragment turns a single failed message into \
+         a storm"
+    );
+}

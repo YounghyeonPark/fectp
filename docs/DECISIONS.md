@@ -2921,15 +2921,25 @@ retries with exponential backoff are spent in 40 + 80 + 160 + 320 + 640 ms. A
 sender that is not scheduled for 1.3 seconds gives up on a message that a
 slower estimate would still be retrying.
 
-**The `Endpoint` front end still does not report this at all.** `Event::Sent`
-is raised only from a finished queue, so it fires for a message that needed
-splitting and never for a single one — an `Endpoint` caller cannot learn that a
-one-frame reliable message was abandoned. That is the same failure this entry
-is about, on the other front end, and §5.5 of the specification now requires
-otherwise. It is left open deliberately: the fix changes what `Event::Sent`
-means, and emitting it only for single messages that *fail* while emitting it
-for split messages either way is an asymmetry worth choosing on purpose rather
-than as a side effect of a bug fix.
+**Since closed, and the asymmetry chosen deliberately.** `Event::Sent` was
+raised only from a finished queue, so it fired for a message that needed
+splitting and never for a single one. It now also fires, with `delivered`
+false, for a single message the sender gave up on.
+
+It does **not** fire for a single message that succeeded. The symmetric design
+— an event per reliable message either way — was considered and rejected on
+cost: `Endpoint::events` is an unbounded `VecDeque`, so a sender at rate whose
+caller polls slowly would grow it without limit, and bounding it would mean
+choosing which reports to drop. Failures are bounded by the number of messages
+that can be outstanding; successes are not. So for a single message the absence
+of an event is the success, and §5.5 asks only that the failure is never
+silent.
+
+A fragment that is given up on is deliberately not counted here, because its
+queue reports the whole message when it finishes. Without that guard one failed
+message becomes one report per fragment — measured at five reports for a
+four-fragment message, and `an_abandoned_fragmented_message_is_reported_once`
+exists because every other test passed with the guard removed.
 
 Whether `MAX_RETRIES` of 5 is the right budget on a fast path is a protocol
 decision and is not taken here. It is worth stating what the current answer

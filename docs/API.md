@@ -157,7 +157,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::Connected { peer, zero_rtt, resumed, initiated } => {}
     Event::Message { peer, data } => {}
-    Event::Sent { peer, delivered } => {}      // a split message finished
+    Event::Sent { peer, delivered } => {}      // a reliable message settled
     Event::ConnectFailed { peer } => {}
     Event::PeerMoved { peer, from, to } => {}  // the peer changed address
     Event::PeerLost { peer } => {}             // gave up on the peer
@@ -196,8 +196,11 @@ The same two calls as `Connection`, with a `PeerId` first:
 | `send(peer, data, shape)` | one frame | Fire and forget. |
 | `send_reliable(peer, data, shape)` | **any** | Resent until acknowledged. |
 
-A message that had to be split reports its outcome as `Event::Sent`, since
-there is nothing here to block on. Progress happens inside `poll`.
+The outcome arrives as `Event::Sent`, since there is nothing here to block on.
+A split message reports either way, once for the whole message; a message that
+fitted in one frame reports only failure, with `delivered` false. Success for a
+small message is silent — one event per reliable send would grow this queue
+without limit. Progress happens inside `poll`.
 
 ### Asking
 
