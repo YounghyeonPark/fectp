@@ -63,7 +63,7 @@ use rand_core::{OsRng, RngCore};
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
-    PayloadType, Result,
+    PayloadType, Result, MAX_RETRIES,
 };
 
 /// A stable handle to one connected peer.
@@ -384,6 +384,8 @@ pub struct Endpoint {
     /// How long a peer may go without being sent anything, or `None` to say
     /// nothing when there is nothing to say.
     keepalive: Option<Duration>,
+    /// Attempts before a reliable message is abandoned, applied to every peer.
+    max_retries: u8,
     /// How long a peer may go unheard from before its session is released.
     peer_timeout: Option<Duration>,
     next_id: u64,
@@ -509,6 +511,7 @@ impl Endpoint {
             routes: HashMap::new(),
             by_session: HashMap::new(),
             events: VecDeque::new(),
+            max_retries: MAX_RETRIES,
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
             handshake_rate: MAX_HANDSHAKES_PER_SECOND,
@@ -1250,6 +1253,29 @@ impl Endpoint {
         self.rescan_wake();
     }
 
+    /// Sets how many times a reliable message is resent before it is given up
+    /// on, replacing [`MAX_RETRIES`] for every peer on this endpoint.
+    ///
+    /// Applies to the sessions already open as well as the ones still to
+    /// arrive, so a program does not have to set it before its first peer.
+    ///
+    /// The default of five is a count, and what an application usually wants
+    /// is a span of time. They are not the same thing: the budget a count buys
+    /// is roughly twice the last backoff interval, and that interval comes
+    /// from the round trip measured on that peer's path. Near the 20 ms floor
+    /// five attempts are spent in about 1.3 seconds; from a cold start they
+    /// last about eleven. A sender descheduled for longer than that gives up
+    /// on a message a slower estimate would still be retrying.
+    ///
+    /// Zero is raised to one. Past five the backoff stops doubling, so each
+    /// further attempt adds at most five seconds rather than twice the last.
+    pub fn set_max_retries(&mut self, attempts: u8) {
+        self.max_retries = attempts.max(1);
+        for entry in self.peers.values_mut() {
+            entry.peer.retransmit.set_max_retries(self.max_retries);
+        }
+    }
+
     /// Sets how many sessions this endpoint will hold, replacing [`MAX_PEERS`].
     ///
     /// Above the limit, the peer that has been quiet longest is dropped to make
@@ -1477,7 +1503,11 @@ impl Endpoint {
         self.peers.insert(
             peer_id,
             PeerEntry {
-                peer: Peer::new(link, max_datagram()),
+                peer: {
+                    let mut peer = Peer::new(link, max_datagram());
+                    peer.retransmit.set_max_retries(self.max_retries);
+                    peer
+                },
                 addr,
                 session_id,
                 filed: Instant::now(),

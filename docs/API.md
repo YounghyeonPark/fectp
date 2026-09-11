@@ -120,6 +120,7 @@ its retries, or if the timeout expires.
 | `set_read_timeout(t)` | How long `recv` waits before reporting a timeout. |
 | `set_padding(on)` | Pads frames to 64 bytes to mask payload lengths. Off by default. |
 | `set_keepalive(every)` | Send a 38-byte frame whenever nothing has been sent for `every`, so a NAT mapping does not lapse in a quiet period. Off by default, and only runs while a call is inside `recv` or `flush`. |
+| `set_max_retries(n)` | How many times a reliable message is resent before it is given up on, replacing `MAX_RETRIES`. A count, not a duration: five attempts are about 1.3 seconds once the round-trip estimate settles near the 20 ms floor, and about eleven from a cold start. A long `flush` timeout does not buy more attempts. |
 
 ---
 
@@ -141,6 +142,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 | `set_keepalive(every)` | See the constants table below. |
 | `set_peer_timeout(within)` | |
 | `set_max_peers(limit)` | |
+| `set_max_retries(n)` | As on `Connection`, applied to every peer — those already open as well as those still to arrive. |
 | `set_max_handshakes_per_second(rate)` | |
 | `set_max_migration_attempts_per_peer(rate)` | |
 | `set_ticket_lifetime(how_long)` | |
@@ -291,7 +293,7 @@ alone otherwise.
 | `MAX_UNACKED` | 32 | Reliable messages outstanding — the memory bound. |
 | `INITIAL_CWND` | 4 | Where the congestion window opens. |
 | `MIN_CWND` | 2 | Where it collapses to on loss. |
-| `MAX_RETRIES` | 5 | Attempts before a message is abandoned. |
+| `MAX_RETRIES` | 5 | Attempts before a message is abandoned. `set_max_retries` replaces it. |
 | `MAX_MESSAGE_LEN` | 1 MiB | Largest `send_reliable`. |
 | `MAX_FRAGMENTS` | 4096 | Pieces one message may be cut into. |
 | `MAX_QUEUED` | 4 | Split messages queued per peer. |

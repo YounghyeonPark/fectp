@@ -340,6 +340,17 @@ pub const MIN_CWND: usize = 2;
 pub struct RetransmitQueue {
     slots: [Option<InFlight>; MAX_IN_FLIGHT],
     rto: Rto,
+    /// Attempts before a message is abandoned, [`MAX_RETRIES`] by default.
+    ///
+    /// A count rather than a duration, because a duration would need a first-
+    /// sent instant on every slot and this structure is sized to fit on a
+    /// microcontroller. The wall-clock budget it buys is roughly twice the
+    /// last backoff interval, and that interval comes from the measured round
+    /// trip — so the same count is worth about 1.3 seconds on a path whose
+    /// estimate has settled near [`MIN_RTO_MS`] and about eleven from a cold
+    /// [`INITIAL_RTO_MS`]. An application that needs longer than the path's
+    /// own speed allows has to be able to say so.
+    max_retries: u8,
     next_id: MessageId,
     /// Congestion window in messages, scaled by [`CWND_SCALE`].
     cwnd: u32,
@@ -353,10 +364,30 @@ impl RetransmitQueue {
         Self {
             slots: [None; MAX_IN_FLIGHT],
             rto: Rto::new(),
+            max_retries: MAX_RETRIES,
             next_id: 0,
             cwnd: INITIAL_CWND as u32 * CWND_SCALE,
             ssthresh: MAX_IN_FLIGHT as u32 * CWND_SCALE,
         }
+    }
+
+    /// Sets how many times a message is retransmitted before being abandoned.
+    ///
+    /// Zero is raised to one: by the time this is consulted the message has
+    /// already gone out once, so refusing every retry would abandon it without
+    /// the attempt ever having a chance to be answered.
+    ///
+    /// Beyond five the backoff no longer doubles — the shift is capped so the
+    /// interval cannot run away — so each further attempt adds at most
+    /// [`MAX_RTO_MS`] rather than twice the last. Twelve attempts is therefore
+    /// about half a minute on a fast path, not hours.
+    pub fn set_max_retries(&mut self, attempts: u8) {
+        self.max_retries = attempts.max(1);
+    }
+
+    /// How many times a message is retransmitted before being abandoned.
+    pub fn max_retries(&self) -> u8 {
+        self.max_retries
     }
 
     /// Forgets what was learned about the path, keeping what is in flight.
@@ -553,7 +584,7 @@ impl RetransmitQueue {
             if count >= out.len() {
                 break;
             }
-            if entry.retries >= MAX_RETRIES {
+            if entry.retries >= self.max_retries {
                 out[count] = Due::GaveUp(entry.id);
                 *slot = None;
             } else {

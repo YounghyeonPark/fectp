@@ -2941,9 +2941,57 @@ message becomes one report per fragment — measured at five reports for a
 four-fragment message, and `an_abandoned_fragmented_message_is_reported_once`
 exists because every other test passed with the guard removed.
 
-Whether `MAX_RETRIES` of 5 is the right budget on a fast path is a protocol
-decision and is not taken here. It is worth stating what the current answer
+Whether `MAX_RETRIES` of 5 is the right budget on a fast path is answered in
+[D64](#d64--the-retry-budget-is-a-count-and-what-a-caller-wants-is-a-span-of-time):
+the default stands, and it can now be replaced. It is worth stating what the current answer
 means: **on a fast path this protocol abandons a reliable message after about
 one and a third seconds of not being able to reach the peer.** That is a
 reasonable answer for a sensor that will retry at the application layer and a
 poor one for a file transfer, and the constant is not currently configurable.
+
+## D64 — The retry budget is a count, and what a caller wants is a span of time
+
+**Problem.** `MAX_RETRIES` is 5, and five attempts buy wildly different amounts
+of time depending on the path. Exponential backoff means the total is about
+twice the last interval, and the last interval comes from the measured round
+trip: near the 20 ms floor the whole budget is spent in **1.3 seconds**, while
+from a cold `INITIAL_RTO_MS` of 200 it lasts about **eleven**. So the faster
+the path a sender has learnt, the sooner it abandons a message — measured in
+D63, where a loaded host lost one message in 180 rounds because it was not
+scheduled for 1.3 seconds.
+
+Worse, the knob a caller reaches for does not help. `flush(Duration)` says how
+long *this call* will wait; it does not buy more attempts, so a sixty-second
+flush still reports failure after 1.3 seconds of trying. Nothing in the API
+could change that.
+
+**Decision.** The count becomes settable — `Connection::set_max_retries` and
+`Endpoint::set_max_retries`, the latter applying to peers already open as well
+as those still to arrive. The default does not move.
+
+A count rather than a duration, which is the more obvious API. A duration needs
+a first-sent instant on every in-flight slot: eight bytes times
+[`MAX_IN_FLIGHT`](#d24--the-send-window-answers-to-the-path-not-just-to-memory) is 256 bytes against a
+session state of 1,406 with reliable delivery — nearly a fifth, for a knob most
+callers will never touch. The count costs one byte per session. The
+documentation carries the conversion instead, on both setters and in API.md,
+because the conversion is the part that surprised us.
+
+The default stands because changing it would alter the behaviour of every
+existing caller silently, and because 1.3 seconds is a defensible answer for
+the sensor case this protocol is built around — a device that will retry at the
+application layer would rather hear quickly.
+
+**What it costs.** One `u8` per session, and a second way to say the same
+thing: `MAX_RETRIES` remains a public constant and is now only the default.
+`api_reference.rs` still pins it at 5, which is right — it is what an
+implementation gets if it says nothing.
+
+**What is still open.** Past five attempts the backoff stops doubling, because
+the shift is capped so the interval cannot run away. Each further attempt
+therefore adds at most `MAX_RTO_MS` — five seconds — rather than twice the
+last, so twelve attempts is about half a minute on a fast path and not hours.
+That is a reasonable shape, but it means the setting is not linear in time and
+a caller reasoning about it has to know the cap. A duration-based budget would
+not have that wrinkle, and remains the better API for anyone willing to spend
+the 256 bytes.

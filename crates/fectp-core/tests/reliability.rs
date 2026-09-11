@@ -204,6 +204,54 @@ fn an_unacknowledged_message_is_retransmitted_after_the_timeout() {
     );
 }
 
+/// Counts attempts until the queue gives up, at a chosen retry budget.
+fn attempts_before_giving_up(budget: Option<u8>) -> u8 {
+    let mut queue = RetransmitQueue::new();
+    if let Some(budget) = budget {
+        queue.set_max_retries(budget);
+    }
+    let id = queue.register(0).expect("register");
+
+    let mut now = 0u64;
+    let mut retransmits = 0u8;
+    for _ in 0..64 {
+        now += u64::from(MAX_RTO_MS) + 1;
+        match drain(&mut queue, now).as_slice() {
+            [Due::Retransmit(got)] if *got == id => retransmits += 1,
+            [Due::GaveUp(got)] if *got == id => return retransmits,
+            other => panic!("unexpected poll result: {other:?}"),
+        }
+    }
+    panic!("the queue never gave up");
+}
+
+#[test]
+fn the_retry_budget_can_be_set() {
+    // Five retries is a count, and what an application cares about is time.
+    // The two are not the same thing here: the budget is roughly twice the
+    // last backoff interval, and that interval is derived from the measured
+    // round trip. Near the 20 ms floor five retries are spent in about 1.3
+    // seconds; from a cold 200 ms they last about eleven. An application that
+    // wants to keep trying for longer than the path's own speed allows has to
+    // be able to say so, which it could not.
+    assert_eq!(
+        attempts_before_giving_up(None),
+        MAX_RETRIES,
+        "the default must not move"
+    );
+    assert_eq!(attempts_before_giving_up(Some(1)), 1, "a budget of one");
+    assert_eq!(attempts_before_giving_up(Some(12)), 12, "a longer budget");
+}
+
+#[test]
+fn a_retry_budget_of_zero_still_sends_once() {
+    // Zero is a request to abandon a message that has already gone out once,
+    // not to refuse to send it: `register` has happened by then. Clamped to
+    // one so that a caller cannot ask for a message that is sent and given up
+    // on in the same breath, which reads as a lost message with no attempt.
+    assert_eq!(attempts_before_giving_up(Some(0)), 1);
+}
+
 #[test]
 fn retransmission_backs_off_and_eventually_gives_up() {
     let mut queue = RetransmitQueue::new();

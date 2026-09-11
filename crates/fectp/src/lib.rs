@@ -1123,6 +1123,29 @@ impl Connection {
         Ok(())
     }
 
+    /// Sets how many times a reliable message is resent before it is given up
+    /// on, replacing [`MAX_RETRIES`].
+    ///
+    /// The default of five is a count, and what an application usually wants
+    /// is a span of time. They are not the same thing: the budget a count buys
+    /// is roughly twice the last backoff interval, and that interval is
+    /// derived from the round trip this connection has measured. On a path
+    /// whose estimate has settled near the 20 ms floor, five attempts are
+    /// spent in about 1.3 seconds; from a cold start they last about eleven.
+    /// A sender descheduled for longer than that gives up on a message a
+    /// slower estimate would still be retrying.
+    ///
+    /// So a caller passing a long timeout to [`flush`](Self::flush) is not
+    /// thereby asking for more attempts, and will not get them.
+    ///
+    /// Zero is raised to one. Past five the backoff stops doubling, so each
+    /// further attempt adds at most five seconds rather than twice the last:
+    /// twelve is about half a minute on a fast path, not hours.
+    pub fn set_max_retries(&self, attempts: u8) -> Result<()> {
+        self.core()?.peer.retransmit.set_max_retries(attempts);
+        Ok(())
+    }
+
     /// Receives the next authentic datagram, writing its payload to `out`.
     ///
     /// Frames that fail to authenticate, that replay a sequence number already

@@ -886,9 +886,8 @@ suggests, because the timeout is tuned to the path it has seen: with a smoothed
 round trip near the 20 ms floor, five retries with exponential backoff are
 spent in 40 + 80 + 160 + 320 + 640 ms. So a sender that is not scheduled for
 1.3 seconds gives up on a message that a slower estimate would still be
-retrying. Whether `MAX_RETRIES` of 5 is the right budget on a fast path is a
-protocol decision and is left alone here; it is now at least reported rather
-than silently swallowed.
+retrying. Whether `MAX_RETRIES` of 5 is the right budget on a fast path is answered
+in D64: the default stands, and `set_max_retries` can replace it.
 
 ### Losing an acknowledgement is nearly free; losing data is not
 

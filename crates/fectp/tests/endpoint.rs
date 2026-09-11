@@ -504,3 +504,72 @@ fn an_abandoned_fragmented_message_is_reported_once() {
          a storm"
     );
 }
+/// Opens one peer, takes the client away, sends a single reliable message, and
+/// returns how long the endpoint took to report giving up on it.
+///
+/// The budget can be set before the peer exists or after, because those are
+/// two different paths: one reaches the peer as it is filed, the other has to
+/// walk the peers already open.
+fn time_to_give_up(before_connect: Option<u8>, after_connect: Option<u8>) -> Duration {
+    let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    if let Some(n) = before_connect {
+        server.set_max_retries(n);
+    }
+    let addr = server.local_addr().expect("addr");
+    let public = *server.public_key().expect("identity");
+
+    let dial = thread::spawn(move || {
+        Connection::connect(addr, &public, &Identity::generate()).expect("connect")
+    });
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut peer = None;
+    while peer.is_none() && std::time::Instant::now() < deadline {
+        if let Ok(Event::Connected { peer: id, .. }) = server.poll(Some(POLL)) {
+            peer = Some(id);
+        }
+    }
+    let peer = peer.expect("the handshake must complete");
+    drop(dial.join().expect("dial"));
+
+    if let Some(n) = after_connect {
+        server.set_max_retries(n);
+    }
+    server
+        .send_reliable(peer, b"nobody is listening", PayloadType::Opaque)
+        .expect("send");
+
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_secs(40);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Event::Sent { delivered, .. }) = server.poll(Some(Duration::from_millis(20))) {
+            assert!(!delivered, "nothing acknowledged it");
+            return started.elapsed();
+        }
+    }
+    panic!("the endpoint never reported giving up");
+}
+
+#[test]
+fn the_retry_budget_reaches_a_peer_filed_after_it_was_set() {
+    // One attempt from a cold 200 ms timeout is under a second. The default of
+    // five is about eleven, so anything near that means the setting never
+    // reached the peer — which is the whole of what this checks, since the
+    // count itself is pinned in fectp-core.
+    let took = time_to_give_up(Some(1), None);
+    assert!(
+        took < Duration::from_secs(5),
+        "a budget of one attempt must be spent in about a second, not {took:?}"
+    );
+}
+
+#[test]
+fn the_retry_budget_reaches_a_peer_that_was_already_open() {
+    // The other path. A program that opens peers before it configures itself
+    // would otherwise find the setting silently ignored for everything already
+    // connected, which is the kind of thing that is discovered in production.
+    let took = time_to_give_up(None, Some(1));
+    assert!(
+        took < Duration::from_secs(5),
+        "setting the budget must apply to peers already open, but this took          {took:?} — the default of five attempts takes about eleven seconds"
+    );
+}

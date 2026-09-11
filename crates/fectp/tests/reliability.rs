@@ -323,6 +323,43 @@ fn flush_reports_a_single_message_that_exhausted_its_retries() {
 }
 
 #[test]
+fn a_longer_retry_budget_is_actually_spent() {
+    // The core test pins the count; this pins that the setting reaches the
+    // wire. A budget of one gives up almost at once, the default takes about
+    // eleven seconds from a cold start, and the difference has to be visible
+    // in how long `flush` waits before reporting.
+    let echo = server();
+    let relay = spawn_relay(echo.addr(), (1..500).collect(), vec![]);
+
+    let client =
+        Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
+    client.set_max_retries(1).expect("retries");
+    client
+        .send_reliable(b"one attempt only", PayloadType::Opaque)
+        .expect("send");
+
+    let started = std::time::Instant::now();
+    let outcome = client.flush(Duration::from_secs(60));
+    let took = started.elapsed();
+
+    assert!(
+        matches!(outcome, Err(fectp::Error::Unacknowledged { .. })),
+        "it still has to be reported: {outcome:?}"
+    );
+    assert_eq!(
+        client.unacknowledged(),
+        0,
+        "reported because the sender gave up, not because flush ran out"
+    );
+    // One retry from a cold 200 ms is under a second. The default of five is
+    // about eleven, so anything near that means the setting was ignored.
+    assert!(
+        took < Duration::from_secs(5),
+        "a budget of one attempt must be spent in about a second, not {took:?}          — the default of five takes eleven"
+    );
+}
+
+#[test]
 fn a_round_trip_estimate_is_learned() {
     let echo = server();
     let relay = spawn_relay(echo.addr(), vec![], vec![]);
