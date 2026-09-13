@@ -117,7 +117,7 @@ for a connection that opens once and streams.
 [**BENCHMARKS.md**](docs/BENCHMARKS.md) has the full comparison — setup cost,
 per-message overhead, compression against gzip and Zstandard, and behaviour
 under packet loss, reordering, jitter, a bottleneck, a rebinding NAT and a
-crowded endpoint. It changed the implementation five times, and it records the
+crowded endpoint. It changed the implementation seven times, and it records the
 measurements it got wrong before it got them right.
 
 ---
@@ -341,7 +341,7 @@ records what each one would cost to change.
 | **A silent peer must be told to speak** | A NAT forgets an idle mapping — thirty seconds on plenty of equipment — after which inbound datagrams have nowhere to go, with both ends still holding a good session. `set_keepalive` sends a 38-byte frame through the quiet, and is off by default so a sleeping sensor is not woken by its own transport. |
 | **Silence is not evidence of death** | `set_peer_timeout` releases a peer nothing authenticated has been heard from, but a quiet peer and a departed one look identical unless keep-alives are on to make the silence mean something. Both are off by default, and turning on the timeout alone will drop peers that are merely asleep. |
 | **No path MTU discovery** | Nothing probes the path. The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame; `set_max_datagram` reclaims it where the path is known, and silently loses datagrams where it is not. |
-| **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median is unchanged and p95 grows about fivefold. |
+| **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median grows about half again and p95 about sevenfold — 280 µs against 43 idle. |
 
 ### Scope
 
@@ -377,7 +377,7 @@ did. That is the honest measure of what testing alone catches.
 
 `cargo test --workspace` runs 313 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
-**23.1 KiB of flash** and needs 358 bytes of session state — 1,406 with reliable
+**23.1 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.
 
 ---
@@ -448,4 +448,4 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 
 ## Licence
 
-MIT OR Apache-2.0.
+BSD 3-Clause. See [LICENSE](LICENSE).

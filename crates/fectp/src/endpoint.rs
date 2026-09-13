@@ -1267,8 +1267,10 @@ impl Endpoint {
     /// last about eleven. A sender descheduled for longer than that gives up
     /// on a message a slower estimate would still be retrying.
     ///
-    /// Zero is raised to one. Past five the backoff stops doubling, so each
-    /// further attempt adds at most five seconds rather than twice the last.
+    /// Zero is raised to one. Past five the backoff stops doubling: each
+    /// further attempt repeats the fifth interval. On a fast path that is
+    /// 640 ms, so twelve attempts come to 5.7 seconds; from a cold start it is
+    /// five seconds and twelve attempts are 46.
     pub fn set_max_retries(&mut self, attempts: u8) {
         self.max_retries = attempts.max(1);
         for entry in self.peers.values_mut() {

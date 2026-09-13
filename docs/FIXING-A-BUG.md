@@ -25,9 +25,15 @@ ahead where the failure begins at 64.
 **Remove the thing you are about to add, and watch the test fail.** Then put it
 back and confirm `git status --short` is clean.
 
-This step exists because tests here have passed without testing anything at
-least five separate times, and every one was found by accident. If you do only
-one thing on this page, do this one.
+This step exists because tests here have passed without testing anything
+eighteen separate times — the table below is the list — and for a long while
+every one was found by accident. That is no longer true, and the difference is
+the argument for this page: the last six were found on purpose, four of them by
+`test-adversary` reverting the thing under test and watching what did not fail.
+Three of those were tests written in the same sitting by the author, who had
+already verified them. The other two are ways the verification itself failed,
+which is worse and is why they are in the list. If you do only one thing on
+this page, do this one.
 
 The ways they failed, each from this repository:
 
@@ -45,6 +51,12 @@ The ways they failed, each from this repository:
 | **A harness that keeps the old path alive** | A migration test rebound the client to a second source port but let the *first* port keep carrying replies. The server could then answer on the address it was supposed to have left, so the exchange after the rebind succeeded whether or not anything migrated — and the only assertion that noticed was a count, which raced and passed locally 40 times before failing on CI. Model what actually goes away, not just what appears. This one was found in the benchmark relay first and left in the test relay, which is its own lesson: fix a harness flaw in every harness that has it. |
 | **A test that saturates a core** | `cargo test` runs test binaries in parallel. A flood thread written as a busy loop starved an unrelated test in another binary into a five-second timeout — and the failure named a file the change had not touched, which is a long way from the cause. Send in bursts with a yield; wait on a condition with a sleep, not a spin. |
 | **Assuming a relay is lossless** | A test with a relay between two peers is testing over a network, and networks drop datagrams — loopback included. A single unreliable `send` at the end of such a test asserts your property *and* that nothing was lost, and the second one fails on its own schedule: once in about thirty runs, here. Retry against a deadline where the outcome must be success; keep the single attempt where the outcome being measured is a failure. |
+| **A break that never applied** | Step 2 is only worth what the break is worth. Two reverts here were a `s.replace(old, new)` whose `old` did not match, so the source was untouched and the test passing proved nothing — twice, in one sitting, while checking a fix for a bug about silent failure. Assert the match. `assert old in s` found both immediately. |
+| **Reverting more than the break** | `git checkout -- src/a.rs src/b.rs` after an experiment reverts the diagnostics *and* the uncommitted fix, and the next run verifies a build that no longer contains it. Twice, here. Commit the fix before you start breaking things. |
+| **Two assertions that only exclude the wrong answer together** | A test asserted an error kind and a duration. The error had two sources with the same shape — the message was abandoned, or the call timed out with it still in flight — and neither assertion separated them alone. On a build where `flush` ignored its argument it passed in 0.37 s, against the fix being absent. Assert the state that distinguishes them: what is still outstanding. |
+| **A premise checked on the wrong thread** | A test that retries when the host stalled has to measure the stall where it matters. A watchdog thread reported 24 ms while the thread that actually sends keep-alives was held up for 900 ms, nearly twice the timeout being filtered — so the test failed and printed "so this is not the machine". Measure the loop that does the work, and give it a read timeout short enough to come round and time itself. |
+| **Discriminating by accident** | A control test passed for a reason its comment did not name: it was the only test in its file that exchanged nothing before its window, so a `spoke` flag stayed false and the server sent no keep-alives. Adding the one line every other test there has — "confirm the path works first" — made it pass with the mechanism under test disabled outright. State the condition the test depends on; do not inherit it. |
+| **A defence whose test cannot outrun it** | A flood that opens real connections blocks on the handshake timeout for every refusal, so the offered rate collapses exactly when the limit works. Measured: 177 answered against a ceiling of 64 with the limiter removed, a margin of 2.8x, so a machine that much slower passes with no limit at all. Offer load that does not wait for an answer, count what you offered, and assert that count. |
 
 If the test still passes with the fix removed, you have not found the bug's
 cause, or the test is not aimed at it. Both are worth knowing before you commit.

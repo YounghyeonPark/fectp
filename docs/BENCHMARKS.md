@@ -7,12 +7,17 @@ cargo run -p fectp-bench --release          # everything
 cargo run -p fectp-bench --release -- 8     # one section, by its own number
 ```
 
-A full run takes several minutes, most of it in two rows of §11 that wait a
-minute each by construction, so re-measuring one section is worth doing on its
-own. The argument is the number the **harness** prints, which is one less than
-this document's from §9 onwards: §7b and §8 here have no counterpart in the
-harness, so `-- 8` runs what this document calls §9, `-- 9` runs §10 and
-`-- 10` runs §11.
+A full run takes a few minutes, so re-measuring one section is worth doing on
+its own. It used to take far longer, and this sentence used to say two rows of
+§11 waited a minute each "by construction" — they did wait a minute, and it was
+not by construction but two bugs in the sender, which §11 now describes.
+
+The argument is the number the **harness** prints, and it does not line up with
+this document's headings: §6 and §7b have no harness section, §7 here is two of
+them, and §8 is discussion rather than a measurement. From §9 onwards the
+offset is a steady one — `-- 8` runs what this document calls §9, `-- 9` runs
+§10, `-- 10` runs §11 — but `-- 7` gives the compression-level table rather
+than §7's ratio table.
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
 Yours will differ, and so will these: re-running §5 on the same machine on one
@@ -31,11 +36,12 @@ path they are the only thing that matters.
 **Read §3 first.** Sections 1, 2, 4 and 5 measure things that turn out not to
 decide anything.
 
-This benchmark has changed the implementation five times. §7 is why the default
+This benchmark has changed the implementation seven times. §7 is why the default
 compression level moved from −4 to 1, §8 is why the send path stopped attempting
 compression on data that has already refused to compress, §9 is where injecting
-packet loss found two bugs that lost messages outright, and §10 is why there is
-congestion control at all.
+packet loss found two bugs that lost messages outright, §10 is why there is
+congestion control at all, and §11 is where injecting jitter found two more —
+one of them a reliable send reporting success for a message it had abandoned.
 
 It has also had to correct itself repeatedly, and those corrections are left in
 rather than tidied away: §2, §5, §8, §9, §10 and §11 each record a measurement
@@ -240,8 +246,11 @@ cost were 0 or 0.5 µs.
 
 The rule that survives is narrower, and is still worth having: **compare
 against a control measured in the same run, not against a figure from another
-one.** §2, §10's asymmetry table and §10's rebinding row do that; most of this
-file does not.
+one.** That was once true of §2 and two tables in §10 and §11 only. It is now
+true of most of this file: §9's two loss tables, §10's reordering table and
+rebinding row, and §11's asymmetry and crowded-endpoint tables all carry one.
+§5 itself, and §8, still do not — which is why both say plainly that they are
+not measuring what they describe.
 
 ### A claim that was withdrawn
 

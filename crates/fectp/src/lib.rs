@@ -1138,9 +1138,11 @@ impl Connection {
     /// So a caller passing a long timeout to [`flush`](Self::flush) is not
     /// thereby asking for more attempts, and will not get them.
     ///
-    /// Zero is raised to one. Past five the backoff stops doubling, so each
-    /// further attempt adds at most five seconds rather than twice the last:
-    /// twelve is about half a minute on a fast path, not hours.
+    /// Zero is raised to one. Past five the backoff stops doubling: each
+    /// further attempt repeats the fifth interval rather than twice the last.
+    /// That interval is the measured timeout shifted five times, so on a fast
+    /// path it is 640 ms and twelve attempts come to 5.7 seconds; from a cold
+    /// start it is the five-second ceiling and twelve attempts are 46.
     pub fn set_max_retries(&self, attempts: u8) -> Result<()> {
         self.core()?.peer.retransmit.set_max_retries(attempts);
         Ok(())

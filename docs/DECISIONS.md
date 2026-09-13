@@ -787,7 +787,7 @@ nothing that matters is discarded.
 | **FECTP** | **23,608 bytes (23.1 KiB)** |
 
 The estimate was five times too pessimistic. RAM is smaller still: 358 bytes of
-session state, or 1,406 with the reliable-delivery queue, plus whatever buffers
+session state, or 1,414 with the reliable-delivery queue, plus whatever buffers
 the caller supplies — about 3.7 KiB for a full-duplex reliable session at the
 default frame size (`cargo run -p fectp-core --example sizes`).
 
@@ -1187,8 +1187,8 @@ degrades while established ones do not.
 it. A microcontroller wants far fewer and a large server may want more, and
 neither is served by one number compiled in.
 
-**How the tests were wrong first**, twice, because it is the same mistake both
-times. The first version asserted only that an established peer still worked
+**How the tests were wrong first**, three times, because it is the same mistake
+each time. The first version asserted only that an established peer still worked
 after a flood — true before any of this existed. The second stopped the flood
 on reaching the limit and then asserted the limit had not been exceeded, which
 is true by construction. The third counted how often the honest peer was
@@ -1201,6 +1201,18 @@ And then the fourth was flaky, about one run in six, for a reason that had
 nothing to do with the code under test: the honest peer sits in `recv` while
 the loop that answers it has already stopped, times out, and reports being
 evicted when it was only abandoned. The loop drains before joining now.
+
+And a fourth kind of wrong, found later still, in the rate-limit test beside it.
+Its flood opened real `Connection`s, and a refused handshake blocks for the
+whole handshake timeout — so the offered rate collapsed exactly when the limit
+was working, and the flood could barely reach the ceiling it was meant to
+overrun. With the limiter removed it answered 177 against a ceiling of 64: a
+margin of 2.8x, meaning a machine that much slower would have passed with no
+limit at all. Its floor assertion counted connections that *succeeded*, so
+nothing in it could have noticed. It now writes initiations directly and sends
+them as raw datagrams, counts what it offered, and asserts that count — and the
+configured limit was dropped from 8/s to 2/s, because the ceiling scales with
+it while what an unlimited server answers does not. The margin is 14.6x.
 
 It came back when [D44](#d44--the-responders-half-of-0-rtt) and
 [D43](#d43--a-ticket-stops-being-worth-stealing) added several second-long
@@ -2916,7 +2928,7 @@ was already true of the list it replaces.
 lossless path — about once in 180 rounds of 200 messages, and only when the
 host is loaded. It happens after **1.3 seconds**, not the 11 the retry schedule
 suggests, because the timeout is tuned to the path it has seen: with a smoothed
-round trip near the [20 ms floor](#d24--the-send-window-answers-to-the-path-not-just-to-memory), five
+round trip near the [20 ms floor](#d21--the-first-retransmission-uses-the-measured-timeout), five
 retries with exponential backoff are spent in 40 + 80 + 160 + 320 + 640 ms. A
 sender that is not scheduled for 1.3 seconds gives up on a message that a
 slower estimate would still be retrying.
@@ -2947,7 +2959,9 @@ the default stands, and it can now be replaced. It is worth stating what the cur
 means: **on a fast path this protocol abandons a reliable message after about
 one and a third seconds of not being able to reach the peer.** That is a
 reasonable answer for a sensor that will retry at the application layer and a
-poor one for a file transfer, and the constant is not currently configurable.
+poor one for a file transfer. D64 made it configurable; the default is
+unchanged, so that sentence still describes what an application gets if it says
+nothing.
 
 ## D64 — The retry budget is a count, and what a caller wants is a span of time
 
@@ -2972,8 +2986,13 @@ as those still to arrive. The default does not move.
 A count rather than a duration, which is the more obvious API. A duration needs
 a first-sent instant on every in-flight slot: eight bytes times
 [`MAX_IN_FLIGHT`](#d24--the-send-window-answers-to-the-path-not-just-to-memory) is 256 bytes against a
-session state of 1,406 with reliable delivery — nearly a fifth, for a knob most
-callers will never touch. The count costs one byte per session. The
+session state of 1,414 with reliable delivery — nearly a fifth, for a knob most
+callers will never touch. The count costs **eight** bytes per session, not the
+one it looks like: `RetransmitQueue` is eight-byte aligned, so a `u8` field
+pulls seven bytes of padding after it — measured at 1,048 before and 1,056
+after. Still thirty-two times cheaper than the alternative, and "nearly a
+fifth" still holds, but an entry about counting a memory cost carefully should
+not have guessed at its own. The
 documentation carries the conversion instead, on both setters and in API.md,
 because the conversion is the part that surprised us.
 
@@ -2982,7 +3001,8 @@ existing caller silently, and because 1.3 seconds is a defensible answer for
 the sensor case this protocol is built around — a device that will retry at the
 application layer would rather hear quickly.
 
-**What it costs.** One `u8` per session, and a second way to say the same
+**What it costs.** Eight bytes per session — a `u8` and the padding after it —
+and a second way to say the same
 thing: `MAX_RETRIES` remains a public constant and is now only the default.
 `api_reference.rs` still pins it at 5, which is right — it is what an
 implementation gets if it says nothing.
@@ -2990,7 +3010,13 @@ implementation gets if it says nothing.
 **What is still open.** Past five attempts the backoff stops doubling, because
 the shift is capped so the interval cannot run away. Each further attempt
 therefore adds at most `MAX_RTO_MS` — five seconds — rather than twice the
-last, so twelve attempts is about half a minute on a fast path and not hours.
+last. That makes the setting distinctly non-linear, and in the direction
+opposite to the one this entry first claimed: on a fast path the backoff
+saturates at `MIN_RTO_MS` shifted five times, 640 ms, nowhere near the five
+second cap, so twelve attempts is **5.7 seconds** rather than the half a minute
+stated here at first. Half a minute is what a cold path gives — 46 seconds,
+because there the cap does bind. Measured by driving the queue to its verdict:
+1,260 ms and 5,740 ms near the floor, 11,200 ms and 46,200 ms from cold.
 That is a reasonable shape, but it means the setting is not linear in time and
 a caller reasoning about it has to know the cap. A duration-based budget would
 not have that wrinkle, and remains the better API for anyone willing to spend

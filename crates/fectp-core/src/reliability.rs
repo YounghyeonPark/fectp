@@ -378,9 +378,13 @@ impl RetransmitQueue {
     /// the attempt ever having a chance to be answered.
     ///
     /// Beyond five the backoff no longer doubles — the shift is capped so the
-    /// interval cannot run away — so each further attempt adds at most
-    /// [`MAX_RTO_MS`] rather than twice the last. Twelve attempts is therefore
-    /// about half a minute on a fast path, not hours.
+    /// interval cannot run away — so each further attempt repeats the fifth
+    /// interval rather than doubling again. That interval is [`current`] shifted
+    /// five times, which on a fast path is 640 ms and not the [`MAX_RTO_MS`]
+    /// ceiling: twelve attempts come to 5.7 seconds near the floor and 46 from
+    /// a cold [`INITIAL_RTO_MS`].
+    ///
+    /// [`current`]: Rto::current
     pub fn set_max_retries(&mut self, attempts: u8) {
         self.max_retries = attempts.max(1);
     }
