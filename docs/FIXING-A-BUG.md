@@ -26,7 +26,7 @@ ahead where the failure begins at 64.
 back and confirm `git status --short` is clean.
 
 This step exists because tests here have passed without testing anything
-eighteen separate times — the table below is the list — and for a long while
+nineteen separate times — the table below is the list — and for a long while
 every one was found by accident. That is no longer true, and the difference is
 the argument for this page: the last six were found on purpose, four of them by
 `test-adversary` reverting the thing under test and watching what did not fail.
@@ -57,6 +57,7 @@ The ways they failed, each from this repository:
 | **A premise checked on the wrong thread** | A test that retries when the host stalled has to measure the stall where it matters. A watchdog thread reported 24 ms while the thread that actually sends keep-alives was held up for 900 ms, nearly twice the timeout being filtered — so the test failed and printed "so this is not the machine". Measure the loop that does the work, and give it a read timeout short enough to come round and time itself. |
 | **Discriminating by accident** | A control test passed for a reason its comment did not name: it was the only test in its file that exchanged nothing before its window, so a `spoke` flag stayed false and the server sent no keep-alives. Adding the one line every other test there has — "confirm the path works first" — made it pass with the mechanism under test disabled outright. State the condition the test depends on; do not inherit it. |
 | **A defence whose test cannot outrun it** | A flood that opens real connections blocks on the handshake timeout for every refusal, so the offered rate collapses exactly when the limit works. Measured: 177 answered against a ceiling of 64 with the limiter removed, a margin of 2.8x, so a machine that much slower passes with no limit at all. Offer load that does not wait for an answer, count what you offered, and assert that count. |
+| **A check that cannot fail the step it guards** | `cargo test ...; echo "tests clean"; git commit ...` prints the reassurance whatever the tests did and commits either way. Two tests were red on screen and the commit went out regardless — the failure was in the shell, not the judgement. Gate on the exit status, or run the check as its own step and read it.
 
 If the test still passes with the fix removed, you have not found the bug's
 cause, or the test is not aimed at it. Both are worth knowing before you commit.

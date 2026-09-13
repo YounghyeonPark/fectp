@@ -226,7 +226,7 @@ that cannot authenticate a frame drops it silently — there is no reply and no
 error on the wire — so a handshake aimed at an unreachable address or the wrong
 key has nothing at all to wait for, and without a deadline would wait for ever.
 
-The opening frame is resent while that timeout runs — linear backoff from 250 ms — so a lost handshake datagram costs a retry rather than the whole connection. Five seconds is the budget for the attempt, not for one packet.
+The opening frame is resent while that timeout runs — linear backoff from 250 ms — so a lost handshake datagram costs a retry rather than the whole connection. Ten seconds is the budget for the attempt, not for one packet, and three lost opening frames spend about 1.5 of it. An `Endpoint` gives up by a count instead, `set_handshake_attempts`, because nothing there blocks on a clock.
 
 **`recv` blocks** until something arrives, unless you say otherwise:
 

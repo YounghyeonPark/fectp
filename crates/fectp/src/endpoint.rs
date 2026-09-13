@@ -165,7 +165,14 @@ pub enum Event {
 const HANDSHAKE_RETRY_MS: u64 = 250;
 
 /// How many times to send an opening frame before giving up.
-const HANDSHAKE_ATTEMPTS: u8 = 4;
+///
+/// The endpoint's handshake budget is this count on the linear backoff above,
+/// not a deadline: four attempts at 250 ms, 500 and 750 give up a little after
+/// 1.5 s. [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is `Connection`'s
+/// equivalent and is a clock, because there the call blocks and something has
+/// to end it. Replaced per endpoint by
+/// [`set_handshake_attempts`](Endpoint::set_handshake_attempts).
+pub const HANDSHAKE_ATTEMPTS: u8 = 4;
 
 /// The most sessions one endpoint will hold at once, unless told otherwise.
 ///
@@ -384,6 +391,8 @@ pub struct Endpoint {
     /// How long a peer may go without being sent anything, or `None` to say
     /// nothing when there is nothing to say.
     keepalive: Option<Duration>,
+    /// Opening frames sent before a connect attempt is given up on.
+    handshake_attempts: u8,
     /// Attempts before a reliable message is abandoned, applied to every peer.
     max_retries: u8,
     /// How long a peer may go unheard from before its session is released.
@@ -511,6 +520,7 @@ impl Endpoint {
             routes: HashMap::new(),
             by_session: HashMap::new(),
             events: VecDeque::new(),
+            handshake_attempts: HANDSHAKE_ATTEMPTS,
             max_retries: MAX_RETRIES,
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
@@ -1253,6 +1263,37 @@ impl Endpoint {
         self.rescan_wake();
     }
 
+    /// Sets how many opening frames are sent before a connect attempt is given
+    /// up on, replacing [`HANDSHAKE_ATTEMPTS`].
+    ///
+    /// A count rather than a duration, because that is what the endpoint
+    /// actually does: it stops after this many attempts on a linear 250 ms
+    /// backoff, and no deadline is consulted. A `Duration` here would be
+    /// converted into a count and then report a budget nothing honours.
+    /// `Connection` is the other way round — its handshake blocks, so a clock
+    /// ends it, and [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is that
+    /// clock. It has no setter because the handshake is over before there is a
+    /// `Connection` to call one on.
+    ///
+    /// The wall-clock budget this buys is the sum of the intervals, which grow
+    /// linearly: four attempts give up a little after 1.5 seconds, eight after
+    /// 7. Raise it for a path that loses opening frames, or for a host too
+    /// busy to keep to the schedule — a desktop that has been idle runs two to
+    /// three times slow, which is measurable with no protocol in it at all
+    /// (`cargo run --release --bin idle`).
+    ///
+    /// Zero is raised to one. Taken literally it would mean never sending the
+    /// opening frame, so the peer would be reported unreachable without one
+    /// datagram having been aimed at it.
+    pub fn set_handshake_attempts(&mut self, attempts: u8) {
+        self.handshake_attempts = attempts.max(1);
+    }
+
+    /// How many opening frames are sent before a connect attempt is given up on.
+    pub fn handshake_attempts(&self) -> u8 {
+        self.handshake_attempts
+    }
+
     /// Sets how many times a reliable message is resent before it is given up
     /// on, replacing [`MAX_RETRIES`] for every peer on this endpoint.
     ///
@@ -1582,7 +1623,7 @@ impl Endpoint {
             let Some(outbound) = self.outbound.get_mut(&id) else {
                 continue;
             };
-            if outbound.attempts >= HANDSHAKE_ATTEMPTS {
+            if outbound.attempts >= self.handshake_attempts {
                 self.outbound.remove(&id);
                 return Ok(Some(Event::ConnectFailed { peer: id }));
             }

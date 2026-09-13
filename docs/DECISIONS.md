@@ -914,6 +914,12 @@ unreachable peer is reported rather than waited on. It is fixed rather than
 configurable, because nothing so far needs a different value and a parameter
 that exists "just in case" is how the inconsistency started.
 
+*Since revisited: something did come to need a different value, and the
+constant is ten seconds. The shape of this decision survived it —
+[D66](#d66--the-handshake-budget-was-three-tenths-spent-before-the-host-was-counted)
+raises the number and adds a setter on `Endpoint`, and does not put an argument
+back on any constructor.*
+
 Two tests pin it: one connects to a silent port and requires the call to
 return, and one does the same for every mode whose argument was removed.
 
@@ -1125,8 +1131,8 @@ answer for that anywhere a handshake was involved.
 
 **Decision**: `Connection` retransmits on the schedule `Endpoint` already used,
 bounded by the same `HANDSHAKE_TIMEOUT`, so a peer that is genuinely absent is
-still reported in five seconds — it now costs about six datagrams to establish
-that rather than one.
+still reported promptly — it now costs about six datagrams to establish that
+rather than one. (Five seconds when this was written; ten since D66.)
 
 `tests/handshake_loss.rs` puts a relay in the path and drops specific frames:
 the opening one, the reply, and three in a row. All three fail without the
@@ -3067,3 +3073,61 @@ Noise usage is sound, whether the rekey construction is what it claims, and
 whether the nonce and sequence discipline holds under every reachable state.
 That is the thing being waited for, and it is worth writing down so the wait
 ends on evidence rather than on patience running out.
+
+## D66 — The handshake budget was three tenths spent before the host was counted
+
+**Problem.** `handshake_loss.rs` failed about **one run in thirty**. Not a
+regression, and not new — it was found because a commit went out while two
+tests were red, which is its own lesson and is in FIXING-A-BUG.md's table now.
+
+Instrumented, the failure is `Connection::connect` timing out at 5.02 s with
+the relay having dropped **exactly the three opening frames it was told to**
+and no more. Nothing was lost that should not have been. The retries simply did
+not finish in time.
+
+They should have had room. The backoff is linear at 250 ms, so three losses put
+the fourth attempt at 1.5 s against a five-second budget — thirty per cent
+spent, a margin of 3.3. But a desktop that has been idle runs two to three
+times slow, which
+[§9 of BENCHMARKS.md](BENCHMARKS.md#9-under-packet-loss) documents and
+`cargo run --release --bin idle` reproduces on a loopback UDP echo with none of
+this protocol in it. One observed success took **2.6 s where 1.5 was nominal**.
+At 3.3 the margin was inside what this machine does to any measurement.
+
+That is not only a test's problem. A real caller on a loaded host, losing three
+opening frames, fails to connect for the same reason.
+
+**Decision.** `HANDSHAKE_TIMEOUT` becomes ten seconds, and `Endpoint` gets
+`set_handshake_attempts`.
+
+[D26](#d26--every-way-of-connecting-has-the-same-timeout) decided this value was
+fixed rather than configurable, "because nothing so far needs a different value
+and a parameter that exists *just in case* is how the inconsistency started".
+That reasoning has expired on its own terms — something does — but its shape is
+kept. **No constructor gets an argument back.** The eight stay identical, which
+is what D26 was protecting; what changes is the number they all share.
+
+The setter is on `Endpoint` only, and it counts attempts rather than taking a
+`Duration`. Both of those follow from the code rather than from preference. An
+endpoint gives up after `HANDSHAKE_ATTEMPTS` on the same linear backoff and
+consults no deadline at all, so a `Duration` would be converted to a count and
+then report a budget nothing honours. And a `Connection` cannot have a setter
+of any kind: its handshake is over before there is an object to call one on,
+which is the same fact that put D26 where it did.
+
+**What it costs.** A peer that is genuinely unreachable is reported in ten
+seconds rather than five. That is the whole of it, and it is smaller than it
+sounds — nothing waits the full budget unless there is nothing there to answer,
+which is exactly the case where the caller has no better information to act on.
+The two front ends are now asymmetric in a visible way: one has a knob and the
+other has a constant. That asymmetry is in the code already; this makes it
+legible rather than creating it.
+
+**What is still open.** Doubling a margin is not the same as understanding it.
+The margin is now 6.6, and the host effect behind the failure is measured at
+two to three — so this is comfortable rather than principled, and a machine
+five times slower than this one would be back where it started. The principled
+fix is a schedule that adapts to what the path is doing, as the retransmission
+timer already does for data. The handshake has no round-trip estimate to work
+from, which is precisely why it uses a fixed schedule, and inventing one from a
+single exchange is a different piece of work.

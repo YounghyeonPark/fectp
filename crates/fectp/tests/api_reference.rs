@@ -29,9 +29,10 @@ fn the_documented_constants_are_the_real_ones() {
     assert_eq!(fectp::CODEC_OVERHEAD, 4, "API.md says 4 bytes");
     assert_eq!(
         fectp::HANDSHAKE_TIMEOUT,
-        Duration::from_secs(5),
-        "API.md says 5 s"
+        Duration::from_secs(10),
+        "API.md says 10 s"
     );
+    assert_eq!(fectp::HANDSHAKE_ATTEMPTS, 4, "API.md says 4");
 }
 
 /// API.md — "Sending": two calls, each naming the payload's shape.

@@ -143,6 +143,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 | `set_peer_timeout(within)` | |
 | `set_max_peers(limit)` | |
 | `set_max_retries(n)` | As on `Connection`, applied to every peer — those already open as well as those still to arrive. |
+| `set_handshake_attempts(n)` | Opening frames sent before a connect is given up on. A count, not a duration: the endpoint stops after this many on a linear 250 ms backoff and consults no deadline. `Connection` has no equivalent — its handshake ends before there is an object to set anything on, so `HANDSHAKE_TIMEOUT` bounds it instead. |
 | `set_max_handshakes_per_second(rate)` | |
 | `set_max_migration_attempts_per_peer(rate)` | |
 | `set_ticket_lifetime(how_long)` | |
@@ -300,7 +301,8 @@ alone otherwise.
 | `CODEC_OVERHEAD` | 4 | Bytes a coded payload adds. |
 | `DEFAULT_MAX_DATAGRAM` | 1200 | The frame ceiling, before `set_max_datagram`. |
 | `MIN_MAX_DATAGRAM` | 128 | Below this a handshake does not fit. |
-| `HANDSHAKE_TIMEOUT` | 5 s | How long any way of connecting waits for a reply, resending meanwhile. |
+| `HANDSHAKE_TIMEOUT` | 10 s | How long a `Connection` constructor waits for a reply, resending meanwhile. |
+| `HANDSHAKE_ATTEMPTS` | 4 | Opening frames an `Endpoint` sends before giving up. `set_handshake_attempts` replaces it. |
 | `MAX_PEERS` | 1024 | Sessions one `Endpoint` holds, before the longest-silent is dropped. `set_max_peers` overrides it. |
 | `TICKET_LIFETIME` | 1 hour | How long a resumption ticket stays redeemable. `set_ticket_lifetime` overrides it. |
 | `MAX_HANDSHAKES_PER_SECOND` | 512 | New sessions answered per second. Established peers are not affected. `set_max_handshakes_per_second` overrides it. |

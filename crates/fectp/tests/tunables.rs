@@ -214,3 +214,35 @@ fn a_zero_keepalive_does_not_become_a_flood() {
          it must be clamped to something that cannot flood"
     );
 }
+
+/// The handshake give-up budget, which is a count and not a clock.
+///
+/// `Endpoint` stops resending an opening frame after `HANDSHAKE_ATTEMPTS`, on
+/// a linear 250 ms backoff, so the wall-clock budget is the sum of those
+/// intervals rather than a deadline anyone checks. Making it settable is the
+/// endpoint's half of D66; `Connection` cannot have one, because its handshake
+/// completes before there is an object to call a setter on.
+#[test]
+fn the_handshake_attempt_budget_is_settable_and_refuses_zero() {
+    let mut node = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+
+    assert_eq!(
+        node.handshake_attempts(),
+        fectp::HANDSHAKE_ATTEMPTS,
+        "the default must be the constant, so an endpoint that says nothing          behaves as the documentation describes"
+    );
+
+    node.set_handshake_attempts(9);
+    assert_eq!(node.handshake_attempts(), 9);
+
+    // Zero is the value a configuration file produces by accident. Taken
+    // literally it means "never send the opening frame", which is not a
+    // shorter handshake but no handshake at all — and the peer would be
+    // reported unreachable without one datagram having been sent to it.
+    node.set_handshake_attempts(0);
+    assert_eq!(
+        node.handshake_attempts(),
+        1,
+        "zero attempts must be raised to one: a handshake nobody sends cannot          fail for any reason worth reporting"
+    );
+}

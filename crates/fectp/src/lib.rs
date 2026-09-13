@@ -94,8 +94,8 @@ use rand_core::{OsRng, RngCore};
 pub use compress::PayloadType;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 pub use endpoint::{
-    Endpoint, Event, PeerId, MAX_HANDSHAKES_PER_SECOND, MAX_MIGRATION_ATTEMPTS_PER_PEER, MAX_PEERS,
-    MIN_KEEPALIVE, MIN_PEER_TIMEOUT,
+    Endpoint, Event, PeerId, HANDSHAKE_ATTEMPTS, MAX_HANDSHAKES_PER_SECOND,
+    MAX_MIGRATION_ATTEMPTS_PER_PEER, MAX_PEERS, MIN_KEEPALIVE, MIN_PEER_TIMEOUT,
 };
 pub use pipeline::MAX_QUEUED;
 pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
@@ -112,9 +112,20 @@ pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as C
 /// around it, which is how the argument came to be on some constructors and
 /// not others.
 ///
-/// Five seconds is generous enough for a satellite path and short enough that
+/// Ten seconds is generous enough for a satellite path and short enough that
 /// an unreachable peer is reported rather than waited on.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// It was five, and five was too close to the work. Three lost opening frames
+/// put the fourth attempt at 1.5 s on the linear 250 ms backoff — thirty per
+/// cent of the budget — and a desktop that has been idle runs two to three
+/// times slow, which `cargo run --release --bin idle` shows on a loopback UDP
+/// echo with none of this in it. `handshake_loss.rs` failed about one run in
+/// thirty, timing out at 5.02 s with every intended drop accounted for, and
+/// one observed success took 2.6 s where 1.5 was nominal. Doubling it buys a
+/// factor of two on a margin that was 3.3 and is now 6.6; it does not make an
+/// unreachable peer noticeably slower to report, because nothing waits the
+/// whole budget unless there is nothing there.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{
