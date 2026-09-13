@@ -3021,3 +3021,49 @@ That is a reasonable shape, but it means the setting is not linear in time and
 a caller reasoning about it has to know the cap. A duration-based budget would
 not have that wrinkle, and remains the better API for anyone willing to spend
 the 256 bytes.
+
+## D65 — Publishable, and not published until it has been audited
+
+**Problem.** Both crates are ready to go to crates.io. `fectp-core` passes
+`cargo publish --dry-run`; `fectp` passes everything a manifest can be checked
+for and needs only `fectp-core` to exist on the index first. The work in
+[RELEASING.md](RELEASING.md) is done. So the question is no longer whether it
+*can* be published but whether it *should be*, now, unaudited.
+
+The argument for going early is real. A version on the index is what bindings
+pin to, what test vectors are written against, and what anyone reporting a bug
+can name. [OTHER-LANGUAGES.md](OTHER-LANGUAGES.md) says as much: "a binding
+pinned to an unversioned dependency has nothing to pin to". Publishing `0.1.0`
+with the disclosure that already appears at the top of both crate READMEs would
+be ordinary practice for a `0.x` crate.
+
+**Decision.** Wait for the audit.
+
+This is an encrypted transport. Publishing it is not the same as publishing a
+parser: it puts a thing people can `cargo add` in front of them, and the
+disclosure in a README is read by a fraction of the people who will run it. The
+project's own ordering, written before the crates were ready and without this
+decision in view, put an audit first for exactly that reason — and being ready
+to publish is not new information about whether it is safe to.
+
+**What it costs.** Naming it rather than leaving it to be discovered:
+
+- **The name is not reserved.** `fectp` and `fectp-core` are unclaimed on
+  crates.io, and nothing stops somebody else registering them while this waits.
+  The usual answer is to publish a placeholder to hold the name, which is still
+  publishing and is therefore not available under this decision.
+- **Nothing downstream can start.** Bindings, test vectors and any dependent
+  have no version to pin, so the three items after the audit in
+  OTHER-LANGUAGES.md's list are all blocked behind one item rather than one.
+- **No discoverability at all**, and no docs.rs page, which is where most
+  people would read the API.
+
+**What is still open.** What "audited" means here has not been defined, and it
+should be before anyone goes looking for one. The surface is small — one
+handshake pattern, three frame layouts, a replay window and a reassembly buffer
+— and `protocol-adversary` has been over the parts that can be reviewed without
+a specialist. What that pass cannot do is the cryptographic review: whether the
+Noise usage is sound, whether the rekey construction is what it claims, and
+whether the nonce and sequence discipline holds under every reachable state.
+That is the thing being waited for, and it is worth writing down so the wait
+ends on evidence rather than on patience running out.

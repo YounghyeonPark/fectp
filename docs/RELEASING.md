@@ -1,11 +1,22 @@
 # Releasing
 
-Two crates are published, and they have to go in order. `fectp-bench` and
-`fectp-footprint` carry `publish = false` and never do.
+Two crates are publishable, and when they go they have to go in order.
+`fectp-bench` and `fectp-footprint` carry `publish = false` and never do.
 
 ---
 
-## Before the first one
+## Nothing has been published
+
+**Both crates are ready and are deliberately not on crates.io.** That is a
+decision, taken with the preparation finished rather than instead of it, and it
+is recorded with its costs in
+[D65](DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
+The short version: this is an encrypted transport, and a disclosure in a README
+is read by a fraction of the people who will run it.
+
+So the steps below are what to do *after* an audit, not a checklist to work
+through now. One consequence worth knowing before then: the names `fectp` and
+`fectp-core` are unclaimed and nothing reserves them.
 
 The order in [OTHER-LANGUAGES.md](OTHER-LANGUAGES.md) still stands, and the
 first item is not this page:

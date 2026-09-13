@@ -375,6 +375,11 @@ messages outright while 179 tests passed, and injecting jitter later found
 another that reported *success* for a message it had given up on, while 304
 did. That is the honest measure of what testing alone catches.
 
+**Not on crates.io, deliberately.** Both crates are ready to publish and are
+being held until that review happens — the reasoning, and what the wait costs,
+are in [D65](docs/DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
+Build it from this repository in the meantime.
+
 `cargo test --workspace` runs 313 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.1 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
