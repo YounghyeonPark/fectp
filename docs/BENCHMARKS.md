@@ -17,7 +17,8 @@ this document's headings: §6 and §7b have no harness section, §7 here is two 
 them, and §8 is discussion rather than a measurement. From §9 onwards the
 offset is a steady one — `-- 8` runs what this document calls §9, `-- 9` runs
 §10, `-- 10` runs §11 — but `-- 7` gives the compression-level table rather
-than §7's ratio table.
+than §7's ratio table, and `-- 11` is §8's, which was added after the rest and
+sits at the end.
 
 The numbers below are from one desktop (Windows 11, release build, loopback).
 Yours will differ, and so will these: re-running §5 on the same machine on one
@@ -249,8 +250,9 @@ against a control measured in the same run, not against a figure from another
 one.** That was once true of §2 and two tables in §10 and §11 only. It is now
 true of most of this file: §9's two loss tables, §10's reordering table and
 rebinding row, and §11's asymmetry and crowded-endpoint tables all carry one.
-§5 itself, and §8, still do not — which is why both say plainly that they are
-not measuring what they describe.
+§5 itself still does not, and says so. §8 did not either until its cost was
+measured directly rather than compared across builds — which turned out to need
+no control at all, because one half of it is arithmetic.
 
 ### A claim that was withdrawn
 
@@ -490,18 +492,39 @@ is why that row is labelled the way it now is.
 | `Connection::send`, unencrypted mode | 9.41 µs | **7.45 µs** (−21%) |
 | `Connection::send`, encrypted | 10.83 µs | **9.21 µs** (−15%) |
 
-**Neither row can be reproduced by the command at the top of this file**, and
-that is worth saying plainly. Nothing in the harness measures this: "before"
-and "after" are different builds, on unstated days, at an unstated compression
-level — which matters, because raising the level makes a failed attempt more
-expensive. The first row also measures a mode that has since been removed.
+**Neither row above can be reproduced by the command at the top of this file.**
+"Before" and "after" are different builds, on unstated days, at an unstated
+compression level — which matters, because raising the level makes a failed
+attempt more expensive — and the first row measures a mode that has since been
+removed. They are kept as the record of what the change was measured against at
+the time, and nothing else should be read into them.
 
-So the direction is sound and the mechanism is now stated correctly, but the
-two numbers are the one place in this document that rests entirely on absolute
-microseconds compared across days, which is exactly what §5 concluded cannot be
-done. Settling it needs a section in the harness that alternates batches of an
-incompressible stream with the probe interval at its current value and at
-zero, in one run.
+**The cost itself is now measured, in one run** (`-- 11`):
+
+| payload | one attempt | coded? | amortised |
+|---|---|---|---|
+| incompressible, 1 KiB | 2.4 µs | no | **0.3 µs** |
+| incompressible, 256 B | 0.0 µs | no | 0.0 µs |
+| compressible, 1 KiB | 2.0 µs | yes | every send |
+
+This needed less than it appeared to. Settling it looked like it required the
+probe interval to be varyable from the harness — a knob added to a shipping
+library to serve a benchmark. It does not. The cost has two parts and only one
+of them is a measurement: what an attempt costs on data that refuses to
+compress can be timed directly, because `encode_payload` is public and the send
+path calls it; how often the attempt happens is arithmetic from a constant,
+four sends in thirty-six. The product is the amortised column, and neither half
+is an absolute microsecond compared against another day.
+
+Across three runs the attempt cost read 2.4–2.9 µs, so the 2.9 µs quoted above
+is the top of that range rather than a typical value. The amortised figure is
+0.3 µs throughout.
+
+The 256-byte row is there because `MIN_COMPRESS_SIZE` is 1024: below that
+nothing is attempted at all, so there is no probe and nothing for it to skip.
+The optimisation has something to save only above that size. The compressible
+row is the control — there the counter never backs off, every send attempts,
+and the probe saves nothing, which is what the first row would cost without it.
 
 Compressible payloads are unaffected: the counter never advances, so coding is
 attempted every time exactly as before.

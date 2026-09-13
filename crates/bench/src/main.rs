@@ -90,6 +90,9 @@ fn main() {
     if run(10) {
         jitter_asymmetry_and_crowding();
     }
+    if run(11) {
+        refused_compression_cost();
+    }
 
     println!("\n{}", "=".repeat(72));
     println!("Absolute times are loopback figures; see the round-trip table for");
@@ -622,6 +625,101 @@ fn connect_or_retry(addr: SocketAddr, public: &[u8; 32]) -> Connection {
         }
     }
     panic!("connect failed {TRIES} times over: {last:?}");
+}
+
+// ─────────────────────────── 11. what a refused attempt costs ─────────────
+
+/// What the send path pays for compression that will not pay.
+///
+/// Section 8 of BENCHMARKS.md said this rested on two absolute figures from
+/// different builds on unstated days, which is exactly what section 5 concluded
+/// cannot be done, and that settling it needed a section in the harness. This
+/// is that section, and it turned out not to need one of the two things that
+/// was thought necessary: the probe interval does not have to be varied at all.
+///
+/// The cost has two parts and only one of them is a measurement. What an
+/// attempt costs on data that refuses to compress can be timed directly —
+/// `encode_payload` is public and the send path calls it. How often the attempt
+/// happens is arithmetic from a constant: four attempts, then thirty-two skips,
+/// so four sends in thirty-six. The product is what a send pays, and both
+/// halves are reproducible by the command at the top of the file.
+fn refused_compression_cost() {
+    heading(
+        "11. What a refused compression attempt costs",
+        "the send path's compression probe, on data that will not compress",
+    );
+
+    let full = Capabilities {
+        flags: fectp::CAP_ZSTD,
+        max_frame_size: u16::MAX,
+        codecs: u16::MAX,
+    };
+
+    row_header(&["payload", "one attempt", "coded?", "amortised"]);
+
+    // Four attempts before the counter backs off, thirty-two skips after, so
+    // four sends in every thirty-six attempt. This is the whole of the duty
+    // cycle, and it is why the old figure of 3% — one over the interval, with
+    // the attempts that precede each run of skips forgotten — was wrong by
+    // nearly four times.
+    const ATTEMPTS: f64 = 4.0;
+    const CYCLE: f64 = 36.0;
+    let duty = ATTEMPTS / CYCLE;
+
+    for (name, bytes) in [
+        ("incompressible, 1 KiB", datasets::incompressible(1024)),
+        ("incompressible, 256 B", datasets::incompressible(256)),
+        // The contrast that makes the first rows mean something: when coding
+        // pays, the counter never backs off and every send attempts. The probe
+        // exists for the rows above, not this one.
+        ("compressible, 1 KiB", vec![0x7Eu8; 1024]),
+    ] {
+        let attempt = measure_batched(50, 40, 200, || {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let _ = fectp::compress::encode_payload(
+                &bytes,
+                PayloadType::Opaque,
+                full,
+                &mut a,
+                &mut b,
+            );
+        });
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let paid =
+            fectp::compress::encode_payload(&bytes, PayloadType::Opaque, full, &mut a, &mut b)
+                .is_some();
+        let per_attempt = attempt.median_us();
+        row(&[
+            name,
+            &us(per_attempt),
+            if paid { "yes" } else { "no" },
+            // Only meaningful where coding is refused: where it pays, every
+            // send attempts and the duty cycle does not apply.
+            &if paid {
+                "every send".to_string()
+            } else {
+                us(per_attempt * duty)
+            },
+        ]);
+    }
+
+    note("The send path counts consecutive failures. After four it stops trying and");
+    note("retries once every 32 sends, so a stream that has refused to compress");
+    note("attempts on four sends in thirty-six — 11%, not the 3% this was first");
+    note("written as, which divided one by the interval and forgot the attempts.");
+    note("The last column is the first multiplied by that duty cycle: what a send");
+    note("of incompressible data pays for the probe, amortised.");
+    note("Both halves are reproducible here. What an attempt costs is timed; how");
+    note("often it happens is arithmetic from CODING_PROBE_INTERVAL. Neither is an");
+    note("absolute microsecond figure compared against another day, which is what");
+    note("section 5 concluded cannot be done and what this section used to do.");
+    note("The compressible row is the control. There the counter never backs off,");
+    note("every send attempts, and the probe has nothing to save — so it shows");
+    note("what the first row would cost without it.");
+    note("The 256-byte row reads zero because MIN_COMPRESS_SIZE is 1024: below");
+    note("that nothing is attempted, so there is no probe and nothing to skip.");
+    note("The optimisation only has anything to save above that size, which is");
+    note("worth knowing before reading the first row as a cost of every send.");
 }
 
 // ─────────────────────────────────────────────────────── formatting ───────

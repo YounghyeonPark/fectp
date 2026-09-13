@@ -482,7 +482,14 @@ skipped whenever it would not pay:
 The two rows marked *untyped* apply to `PayloadType::Opaque`. A declared type
 takes the other path: past 32 bytes the transform runs, and Zstandard runs after
 it whatever the size or the look of the bytes, because the transform has already
-changed them into something an entropy coder may well find structure in. That is
+changed them into something an entropy coder may well find structure in.
+
+One exception, in the direction of doing less. `PayloadType::Elements` maps to
+byte transposition, which only rearranges bytes and changes no sizes by itself,
+so it is skipped entirely when the peer has no Zstandard to follow it — there
+would be nothing to gain. The delta transforms for `I16` and `I32` do shrink
+their input and run either way. §7's "typed, no zstd" column shows this: the
+f32 row reads 1.00x. That is
 the intent, not an oversight — but it does mean a 64-byte typed payload is
 compressed and a 64-byte opaque one is not.
 
