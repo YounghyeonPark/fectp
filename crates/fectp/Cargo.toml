@@ -6,9 +6,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["udp", "transport", "encryption", "noise", "embedded"]
+categories = ["network-programming", "cryptography"]
+
+# The `compress` feature is off by default, so docs.rs would document the
+# crate without it and the compression API would simply be absent.
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
-fectp-core = { path = "../fectp-core", features = ["std"] }
+# The version is what a published crate depends on; the path is what this
+# workspace builds against. Both are needed — crates.io refuses a dependency
+# with no version requirement.
+fectp-core = { path = "../fectp-core", version = "0.1.0", features = ["std"] }
 rand_core = { workspace = true, features = ["std", "getrandom"] }
 zstd = { version = "0.13", optional = true }
 

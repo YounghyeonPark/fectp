@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "BSD-3-Clause"
-repository = "https://github.com/younghyeonpark/fectp"
+repository = "https://github.com/YounghyeonPark/fectp"
 authors = ["Younghyeon Park <ypark.dev@gmail.com>"]
 
 [workspace.dependencies]
