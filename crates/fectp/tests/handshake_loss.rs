@@ -25,6 +25,32 @@ use fectp::{Connection, Identity, PayloadType};
 /// Dropping the *first* rather than a random fraction is deliberate: the frame
 /// under test is the opening one, and a proportion would make the test pass or
 /// fail by luck.
+/// Sends and waits for the echo, retrying against a deadline.
+///
+/// Every test here puts a relay between the two peers, and a relay is a
+/// network — loopback drops datagrams too. These closing exchanges are
+/// unreliable sends, so a single attempt asserts "the connection works" *and*
+/// "nothing was lost", and the second fails on its own schedule. That is the
+/// trap `docs/FIXING-A-BUG.md` calls "assuming a relay is lossless"; the same
+/// shape in `handshake_flood.rs` reached CI on Windows. What is measured here
+/// is that the session came up at all, which the retry does not soften — a
+/// connection that does not work never echoes, whatever the deadline.
+fn echoes(conn: &Connection, message: &[u8]) -> bool {
+    let mut buf = vec![0u8; 1024];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if conn.send(message, PayloadType::Opaque).is_err() {
+            continue;
+        }
+        if let Ok(n) = conn.recv(&mut buf) {
+            if buf[..n] == *message {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 struct Relay {
     addr: SocketAddr,
     dropped: Arc<AtomicUsize>,
@@ -121,11 +147,10 @@ fn a_lost_opening_frame_is_sent_again() {
     // And the connection that came back is a working one, not just an `Ok`.
     conn.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    conn.send(b"after a lost handshake", PayloadType::Opaque)
-        .expect("send");
-    let mut buf = vec![0u8; 1024];
-    let n = conn.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"after a lost handshake");
+    assert!(
+        echoes(&conn, b"after a lost handshake"),
+        "the connection came back but does not carry traffic"
+    );
 }
 
 /// The reply is lost instead. The responder has already built its session, so
@@ -143,11 +168,10 @@ fn a_lost_handshake_reply_is_recovered() {
 
     conn.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    conn.send(b"reply was lost", PayloadType::Opaque)
-        .expect("send");
-    let mut buf = vec![0u8; 1024];
-    let n = conn.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"reply was lost");
+    assert!(
+        echoes(&conn, b"reply was lost"),
+        "the connection came back but does not carry traffic"
+    );
 }
 
 /// Several in a row, which the linear backoff has to ride out.
@@ -162,10 +186,10 @@ fn repeated_loss_is_ridden_out() {
 
     conn.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    conn.send(b"third time", PayloadType::Opaque).expect("send");
-    let mut buf = vec![0u8; 1024];
-    let n = conn.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"third time");
+    assert!(
+        echoes(&conn, b"third time"),
+        "the connection came back but does not carry traffic"
+    );
 }
 
 /// Retrying must not turn "nobody is there" into an unbounded wait. A peer that
@@ -205,8 +229,8 @@ fn repeatedly_lost_replies_are_answered_from_what_was_kept() {
 
     conn.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    conn.send(b"after three", PayloadType::Opaque).expect("send");
-    let mut buf = vec![0u8; 1024];
-    let n = conn.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"after three");
+    assert!(
+        echoes(&conn, b"after three"),
+        "the connection came back but does not carry traffic"
+    );
 }

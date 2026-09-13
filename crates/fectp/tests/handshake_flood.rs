@@ -328,6 +328,31 @@ fn a_flood_does_not_slow_an_established_peer() {
     let _ = flood.join();
 }
 
+/// Sends and waits for the echo, retrying against a deadline.
+///
+/// The exchanges in the test below run through a relay, and a relay is a
+/// network: loopback drops datagrams too. `send` here is unreliable, so a
+/// single attempt asserts the property *and* that nothing was lost, and the
+/// second of those fails on its own schedule. That is the trap
+/// `docs/FIXING-A-BUG.md` calls "assuming a relay is lossless", and it cost a
+/// CI failure on Windows before this was applied. The outcome measured here is
+/// success, so it is retried; where a test measures a *failure*, one attempt
+/// is still the right shape.
+fn echoes(conn: &Connection, message: &[u8], buf: &mut [u8]) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if conn.send(message, PayloadType::Opaque).is_err() {
+            continue;
+        }
+        if let Ok(n) = conn.recv(buf) {
+            if &buf[..n] == message {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// A captured opening frame, sent again.
 ///
 /// This is not the same as the flood above. A replay carries a *specific*
@@ -391,9 +416,10 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
 
     let mut buf = vec![0u8; 1024];
-    conn.send(b"before the replay", PayloadType::Opaque).expect("send");
-    let n = conn.recv(&mut buf).expect("recv");
-    assert_eq!(&buf[..n], b"before the replay");
+    assert!(
+        echoes(&conn, b"before the replay", &mut buf),
+        "the session must work before the replay, or what is asserted after it          has nothing to stand against"
+    );
 
     // Send the captured opening frame again, from the same address.
     replay_now.store(true, Ordering::Relaxed);
@@ -405,12 +431,10 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     thread::sleep(Duration::from_millis(200));
 
     // The session the frame named must still be the one that works.
-    conn.send(b"after the replay", PayloadType::Opaque)
-        .expect("send after replay");
-    let n = conn
-        .recv(&mut buf)
-        .expect("a replayed opening frame cut off the session it named");
-    assert_eq!(&buf[..n], b"after the replay");
+    assert!(
+        echoes(&conn, b"after the replay", &mut buf),
+        "a replayed opening frame cut off the session it named"
+    );
 
     stop.store(true, Ordering::Relaxed);
     let _ = pump.join();
