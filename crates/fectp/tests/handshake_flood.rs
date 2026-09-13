@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 use common::Echo;
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
+use fectp_core::keys::Keypair;
+use fectp_core::session::{Capabilities, Initiator};
+use rand_core::OsRng;
 
 /// One attacker, ordinary hardware, sixty seconds of nothing but handshakes.
 #[test]
@@ -426,23 +429,59 @@ fn new_handshakes_are_rate_limited() {
     let mut server = Endpoint::bind("127.0.0.1:0", identity).expect("bind");
     let addr = server.local_addr().expect("addr");
 
-    const PER_SECOND: u32 = 8;
+    // Low on purpose. The ceiling scales with this while what an unlimited
+    // server answers does not — that is bound by what the handshake crypto
+    // costs, about 230 over this window in a debug build, whatever the limit
+    // is set to. So a lower limit is a sharper test. At 8/s the ceiling was 64
+    // against 231 answered unlimited, a margin of 3.6x; at 2/s the ceiling is
+    // 16 against 234, which is 14.6x. The margin is how much slower a machine
+    // can be before this test stops being able to tell a limit from none.
+    const PER_SECOND: u32 = 2;
     server.set_max_handshakes_per_second(PER_SECOND);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stop);
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&attempts);
+    let offered = Arc::new(AtomicUsize::new(0));
+
+    // Initiations sent as raw datagrams, never waited on. This used to open
+    // real `Connection`s, and a refused one blocks for the whole handshake
+    // timeout — so the offered rate collapsed precisely when the limit was
+    // working, and the flood could barely reach the ceiling it was meant to
+    // overrun. Measured with the limit removed, that harness answered 177
+    // against a ceiling of 64: a margin of 2.8x, which means a machine 2.8
+    // times slower would have passed this test with no limit at all. That is
+    // the trap docs/FIXING-A-BUG.md §4 describes, and the reason for the
+    // `offered` count asserted at the end.
     let flood: Vec<_> = (0..4)
         .map(|_| {
-            let flag = Arc::clone(&flag);
-            let counted = Arc::clone(&counted);
+            let flag = Arc::clone(&stop);
+            let counted = Arc::clone(&offered);
             thread::spawn(move || {
-                let mut held = Vec::new();
+                let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
+                sock.connect(addr).expect("connect");
+                let mut wire = vec![0u8; 2048];
+                let mut session = 1u32;
                 while !flag.load(Ordering::Relaxed) {
-                    if let Ok(conn) = Connection::connect(addr, &public, &Identity::generate()) {
+                    // A distinct session identifier each time, so every one of
+                    // these is a new session to the server rather than a
+                    // duplicate of the last.
+                    session = session.wrapping_add(1);
+                    // A fresh identity per initiation, which is what a flood
+                    // of strangers looks like. `Keypair` is deliberately not
+                    // `Clone`, and the keygen is a fraction of what the server
+                    // spends answering one of these anyway.
+                    let Ok(mut initiator) = Initiator::new(
+                        Keypair::generate(&mut OsRng),
+                        public,
+                        session,
+                        Capabilities::minimal(1200),
+                    ) else {
+                        continue;
+                    };
+                    let Ok(n) = initiator.write_init(&mut OsRng, b"", &mut wire) else {
+                        continue;
+                    };
+                    if sock.send(&wire[..n]).is_ok() {
                         counted.fetch_add(1, Ordering::Relaxed);
-                        held.push(conn);
                     }
                 }
             })
@@ -463,29 +502,27 @@ fn new_handshakes_are_rate_limited() {
     // the refill. Generous slop on top: this is checking that a limit exists at
     // all, not measuring it to the packet.
     let accepted = server.peer_count();
+    let offered = offered.load(Ordering::Relaxed);
     let ceiling = (PER_SECOND as f64 * (1.0 + window.as_secs_f64()) * 2.0) as usize;
     assert!(
         accepted <= ceiling,
         "{accepted} handshakes answered at a limit of {PER_SECOND}/s over {window:?}; \
-         expected no more than about {ceiling}"
-    );
-    assert!(
-        attempts.load(Ordering::Relaxed) > 0,
-        "nothing connected at all, so the limit was never the thing being tested"
+         expected no more than about {ceiling} ({offered} were offered)"
     );
 
-    // That floor is weaker than it looks and is known to be. `attempts` counts
-    // connections that *succeeded*, not handshakes offered, so it says nothing
-    // about whether the flood could have exceeded the ceiling. Measured with
-    // the limit removed, this harness answered 177 against a ceiling of 64 —
-    // a margin of 2.8x, which is thin for the trap it is standing next to: a
-    // machine 2.8 times slower than this one would pass this test with no
-    // limit at all, exactly as docs/FIXING-A-BUG.md §4 describes.
-    //
-    // Counting offered handshakes instead does not fix it on its own. A
-    // refused `Connection::connect` blocks for the whole handshake timeout, so
-    // the offered rate collapses precisely when the limit is working, and four
-    // threads over three seconds cannot reach the ceiling. Raising the margin
-    // needs the flood to send handshake initiations as raw datagrams and never
-    // wait for an answer, which is a different harness from this one.
+    // Without this the assertion above is satisfied by a flood that never
+    // reached the ceiling, which is a statement about the harness rather than
+    // about the limit — and the old harness was close to exactly that. It
+    // counted connections that *succeeded* rather than handshakes offered, so
+    // it could not have noticed.
+    assert!(
+        offered > ceiling * 10,
+        "only {offered} initiations were offered against a ceiling of {ceiling}, \
+         so this run could not have exceeded it whether or not a limit exists. \
+         The result says nothing."
+    );
+    assert!(
+        accepted > 0,
+        "nothing was answered at all, so a limit of zero would pass this too"
+    );
 }
