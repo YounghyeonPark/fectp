@@ -13,7 +13,8 @@ about itself, and one by where the safety guarantees stop.
 | **C, C++** | A `cdylib` and a C header. Everything below is built on this. | possible |
 | **Python** | PyO3 as a native extension, or `cffi` over the C ABI. | possible |
 | **Java** | The FFM API (JDK 22+), or JNI. | possible |
-| **Node.js** | N-API, or `napi-rs`. | possible |
+| **Node.js, Deno, Bun** | N-API, or `napi-rs`. | possible |
+| **TypeScript** | Not a separate question — see below. | possible, with a runtime |
 | **Browser JavaScript** | — | **not possible** |
 
 **A browser cannot speak FECTP.** There is no API for sending a UDP datagram
@@ -22,6 +23,27 @@ HTTP/3 — both are different protocols, not transports this could sit on.
 Compiling the core to WebAssembly changes nothing, because the missing piece is
 the socket rather than the code. Anything browser-facing needs a gateway that
 speaks FECTP on one side and something a browser has on the other.
+
+**TypeScript is not the constraint; the runtime under it is.** The types are
+compiled away, and what decides the question is whether the host can open a UDP
+socket. Node has had `dgram` since the beginning, Deno has
+`Deno.listenDatagram`, and Bun has `Bun.udpSocket`. A browser has none of them,
+so the same TypeScript is fine in one place and impossible in another — the
+line is drawn by the host, not the language.
+
+Two things make TypeScript the easiest of these to bind well, which is worth
+saying because it is the only one where the ergonomics improve rather than
+degrade. `napi-rs` emits a `.d.ts` from the Rust signatures, so the type
+definitions are generated rather than hand-written and cannot drift from the
+implementation. And the sans-IO shape below — bytes in, bytes out — leaves the
+socket in TypeScript, using `dgram` directly, so nothing in the binding is
+async and there is no event loop to block.
+
+One addon may serve all three runtimes: Deno and Bun both implement Node-API.
+That is worth checking against their current versions rather than taking from
+here, because it is the sort of claim that is true in outline and full of
+exceptions in practice. Node's `dgram` is the only part of this paragraph that
+has been stable for a decade.
 
 ---
 
