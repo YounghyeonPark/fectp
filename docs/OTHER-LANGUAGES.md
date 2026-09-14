@@ -10,7 +10,7 @@ about itself, and one by where the safety guarantees stop.
 
 | | How | |
 |---|---|---|
-| **C, C++** | A `cdylib` and a C header. Everything below is built on this. | possible |
+| **C, C++** | A `cdylib` and a C header. Everything below is built on this. | **built** |
 | **Python** | PyO3 as a native extension, or `cffi` over the C ABI. | possible |
 | **Java** | The FFM API (JDK 22+), or JNI. | possible |
 | **Node.js, Deno, Bun** | N-API, or `napi-rs`. | possible |
@@ -46,6 +46,22 @@ exceptions in practice. Node's `dgram` is the only part of this paragraph that
 has been stable for a decade.
 
 ---
+
+## What exists
+
+`crates/ffi` is the C ABI, and it is the only binding written. It exports
+fifteen functions over `fectp-core`: an identity, the two sides of a handshake,
+and `seal`/`open` on the session that comes out. `include/fectp.h` is the
+header, and a test holds the two to each other — a function on one side and not
+the other fails the build rather than a caller's link step.
+
+It is not published, and neither is anything else until the audit (D65).
+
+What it does **not** do is everything `fectp` does above the session: no
+retransmission, no congestion control, no fragmentation, no keep-alive. That is
+the trade this page argues for and it is worth restating now that the code
+exists — see "what it costs" below, and D68 for what a caller has to build to
+get those back.
 
 ## Bind the core, not the convenience layer
 

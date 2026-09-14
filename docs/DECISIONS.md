@@ -3194,3 +3194,63 @@ lets a device store a key across resets, and a caller who copies them owns the
 copy. The binding must not call it, which is what `OTHER-LANGUAGES.md` already
 says and is now the only remaining path by which this secret leaves memory that
 gets wiped.
+
+## D68 — The C ABI binds the core, and the secret has no way out
+
+**Problem.** Every other language reaches this protocol through a C ABI —
+Python by `cffi`, Java by the FFM API, C and C++ directly — so that boundary is
+written once and everything else sits on it.
+[OTHER-LANGUAGES.md](OTHER-LANGUAGES.md) had already settled *what* to bind and
+listed five things a wrapper breaks. What it had not done is any of it.
+
+**Decision.** `crates/ffi`, fifteen functions over `fectp-core`, with the five
+answered rather than repeated.
+
+**The secret has no exit.** There is no call that reads a private key out of an
+identity — absent, not discouraged. The core's `Keypair` has no accessor for it
+either, so there is no path from the boundary to those bytes at all;
+`fectp_identity_from_secret` goes the other way and wipes its own copy before
+returning. This is the hazard that motivated D67 and it is the one worth
+spending API shape on: a `bytes` in Python and a `byte[]` in Java cannot be
+wiped, are copied by their runtime, and may reach swap.
+
+**No panic escapes.** Unwinding out of an `extern "C"` function aborts the
+process from Rust 1.81, which to a host language is the interpreter dying with
+no traceback. Every entry point goes through `catch_unwind` and returns
+`FECTP_ERR_PANIC`, including the ones that cannot fail — "cannot" is a claim
+about today's code, and the cost of being wrong is the whole process.
+
+**The caller owns every buffer.** Output goes where the caller says, at a
+length it gave; a buffer too small is an error and not a truncation, and the
+tests check that nothing is written to a refused one. The only things allocated
+here are the four opaque handles, each with its own free.
+
+**Consuming handles are nulled.** `read_response` and `write_response` take the
+handle by pointer, free it, and write null back — on failure as well, because a
+handshake cannot be retried from a half-read state. The double free that every
+C binding eventually has is unreachable: the second call sees null and refuses.
+Verified by removing the nulling and watching the test fail.
+
+**Drift protection, half of it.** `header_matches.rs` holds the header's
+declared names and the crate's `#[no_mangle]` exports to each other, and a
+second test fails if any exported name mentions the secret. That closes the
+half that drifts silently. It does **not** check signatures or semantics, and
+no test in Rust can check that the header's prose describes what the function
+does. Said here rather than left to be assumed.
+
+**What it costs.** `#![forbid(unsafe_code)]` does not hold in this crate and
+cannot: raw pointers, caller-chosen lengths and invisible lifetimes are what a
+C ABI is. The safety argument becomes "the file is short, every `unsafe` block
+is one of three shapes — borrow an input, borrow an output, take or give a
+handle — and each states its assumption". That is weaker than the rest of the
+workspace and is the price of the doorway.
+
+**What is still open.** This is the session layer only. Retransmission,
+congestion control, fragmentation and keep-alive live in `fectp`, and a caller
+here does without them or builds them. That is the sans-IO trade, and D63 is
+the reason to say it twice: the abandonment reporting a caller would have to
+reimplement is the exact logic this project got wrong twice, and §5.5 of the
+specification notes that such faults are **not observable by a conforming
+receiver**. Test vectors — the step before bindings in this document's own
+ordering — therefore cannot catch them. That gap is real and is not closed by
+anything here.

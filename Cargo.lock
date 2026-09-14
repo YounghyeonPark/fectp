@@ -250,6 +250,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fectp-ffi"
+version = "0.1.0"
+dependencies = [
+ "fectp-core",
+ "rand_core 0.6.4",
+ "zeroize",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

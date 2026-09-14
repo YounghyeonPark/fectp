@@ -1,0 +1,28 @@
+[package]
+name = "fectp-ffi"
+description = "FECTP over a C ABI: the sans-IO session layer, for binding from another language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Nothing is published until the audit (D65), and this least of all: it is the
+# one crate in the workspace that cannot carry `#![forbid(unsafe_code)]`.
+publish = false
+
+[lib]
+name = "fectp"
+# `cdylib` for a shared object a host loads, `staticlib` for linking into a C
+# program, `rlib` so the tests in this workspace can call the same functions a
+# C caller would rather than a parallel Rust API that might drift from them.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# The core, not the convenience layer: it is defined over buffers and never
+# touches a socket, so nothing here blocks, owns a thread, or hands memory
+# across the boundary. docs/OTHER-LANGUAGES.md sets out why that is the half to
+# bind.
+fectp-core = { path = "../fectp-core", version = "0.1.0", features = ["std"] }
+rand_core = { workspace = true, features = ["std", "getrandom"] }
+# To wipe the copy `fectp_identity_from_secret` makes of the caller's bytes.
+zeroize = { workspace = true }

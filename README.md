@@ -380,7 +380,7 @@ being held until that review happens — the reasoning, and what the wait costs,
 are in [D65](docs/DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
 Build it from this repository in the meantime.
 
-`cargo test --workspace` runs 317 of them and they pass. Linked for
+`cargo test --workspace` runs 325 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.3 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.
@@ -446,7 +446,7 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 | [ADDING-A-CODEC.md](docs/ADDING-A-CODEC.md) | Supporting a new data shape. |
 | [FIXING-A-BUG.md](docs/FIXING-A-BUG.md) | How a fix is verified here, and the ways tests have passed without testing anything. |
 | [RELEASING.md](docs/RELEASING.md) | Publishing to crates.io — the order the two crates go in, and what had to change to make them publishable. |
-| [OTHER-LANGUAGES.md](docs/OTHER-LANGUAGES.md) | Using it from Python, Java, C, C++, TypeScript or Node — what a wrapper costs, and why a browser cannot. |
+| [OTHER-LANGUAGES.md](docs/OTHER-LANGUAGES.md) | Using it from Python, Java, C, C++, TypeScript or Node — the C ABI in `crates/ffi`, what a wrapper costs, and why a browser cannot. |
 | [footprint/README.md](crates/footprint/README.md) | What it costs on a microcontroller, measured on a linked image. |
 | [project_description.md](project_description.md) | The original brief. Kept unedited, with a map of where the implementation departed from it and why. |
 

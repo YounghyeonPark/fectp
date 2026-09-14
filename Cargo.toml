@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fectp-core", "crates/fectp", "crates/bench"]
+members = ["crates/fectp-core", "crates/fectp", "crates/ffi", "crates/bench"]
 exclude = ["crates/footprint"]
 
 [workspace.package]
