@@ -86,9 +86,16 @@ fn burst_of_rubbish(server: SocketAddr) {
     }
 }
 
-/// How long one round trip takes with a burst of rubbish queued ahead of it.
-fn round_trip_behind_a_burst(conn: &Connection, server: SocketAddr) -> Duration {
-    let mut best = Duration::MAX;
+/// Every round trip measured behind a burst of rubbish, in order.
+///
+/// All of them rather than only the best, because the best alone cannot tell
+/// two very different failures apart. One slow sample means the burst had not
+/// drained when the clock started, which is this harness racing itself; five
+/// slow samples mean the datagram genuinely costs more. A failure on a machine
+/// that cannot be reproduced locally is readable only if the message carries
+/// them, and the first one was on a macOS runner.
+fn round_trips_behind_a_burst(conn: &Connection, server: SocketAddr) -> Vec<Duration> {
+    let mut samples = Vec::with_capacity(5);
     let mut buf = vec![0u8; 4096];
     for _ in 0..5 {
         burst_of_rubbish(server);
@@ -98,11 +105,20 @@ fn round_trip_behind_a_burst(conn: &Connection, server: SocketAddr) -> Duration 
         conn.send(b"behind the burst", PayloadType::Opaque)
             .expect("send");
         if conn.recv(&mut buf).is_ok() {
-            best = best.min(started.elapsed());
+            samples.push(started.elapsed());
         }
     }
-    assert!(best < Duration::MAX, "the echo peer never answered");
-    best
+    assert!(!samples.is_empty(), "the echo peer never answered");
+    samples
+}
+
+/// The most favourable reading of those samples.
+///
+/// What is asserted is that cost must *not* grow, so the kindest number for
+/// the code under test is the one to hold it to: if even the best round trip
+/// is several times worse with a full table, no amount of load explains it.
+fn best(samples: &[Duration]) -> Duration {
+    samples.iter().copied().min().expect("not empty")
 }
 
 #[test]
@@ -114,7 +130,7 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
     // The control: the same burst, the same measurement, an almost empty peer
     // table. Measured in the same run on the same host, so what is left when
     // the two are compared is the cost of the table.
-    let alone = round_trip_behind_a_burst(&conn, echo.addr);
+    let alone = round_trips_behind_a_burst(&conn, echo.addr);
 
     // Fill the table. These sessions do nothing afterwards; they are on file,
     // which is all the old loop needed to charge for them.
@@ -131,14 +147,22 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
         held.len()
     );
 
-    let crowded = round_trip_behind_a_burst(&conn, echo.addr);
+    let crowded = round_trips_behind_a_burst(&conn, echo.addr);
 
     assert!(
-        crowded < alone * 4,
-        "a burst of {BURST} rejected datagrams took a round trip from {alone:?} \
-         with an empty table to {crowded:?} with {} sessions on it. What a \
-         datagram costs must not grow with the number of peers — the table is \
-         reachable by anyone holding the endpoint's public key.",
+        best(&crowded) < best(&alone) * 4,
+        "a burst of {BURST} rejected datagrams took a round trip from {:?} \
+         with an almost empty table to {:?} with {} sessions on it. What a \
+         datagram costs must not grow with the number of peers, because the \
+         table is reachable by anyone holding the endpoint's public key.\n\
+         Every sample, so one slow reading can be told from a slow set: an \
+         outlier means the burst had drained before the clock started, which \
+         is this harness racing itself, while a slow set is the cost itself.\n\
+         empty table {alone:?}\n\
+         {} sessions {crowded:?}",
+        best(&alone),
+        best(&crowded),
+        held.len(),
         held.len()
     );
 }
