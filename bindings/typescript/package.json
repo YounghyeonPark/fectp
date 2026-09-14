@@ -1,0 +1,17 @@
+{
+  "name": "fectp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FECTP from TypeScript, over the C ABI in crates/ffi",
+  "license": "BSD-3-Clause",
+  "scripts": {
+    "test": "node --test test.ts"
+  },
+  "dependencies": {
+    "koffi": "^3.2.1"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

@@ -3254,3 +3254,70 @@ specification notes that such faults are **not observable by a conforming
 receiver**. Test vectors — the step before bindings in this document's own
 ordering — therefore cannot catch them. That gap is real and is not closed by
 anything here.
+
+## D69 — Two foreign callers over one boundary, and what the second one found
+
+**Problem.** D68 built the C ABI and argued for it. It did not use it from
+anywhere except Rust, and a binding written in Rust against a library built by
+the same compiler cannot catch a wrong calling convention, a mistaken pointer
+width, or a signature a foreign caller has to declare by hand. Those are the
+faults a binding meets first.
+
+**Decision.** Two bindings — `bindings/python` (11 tests) and
+`bindings/typescript` (12) — both over the C ABI, both using the runtime's own
+FFI rather than a native module. `ctypes` on one side, `koffi` on the other.
+PyO3 and `napi-rs` were the obvious route and were not taken.
+
+**Why not a native module.** A native module is a second boundary to audit, a
+compiler needed at the far end, and a separate build per platform per runtime.
+The C ABI is already written, already tested, and already the thing everything
+else sits on. The benefit a native module buys is ergonomics for a *published*
+package — `napi-rs` generates the `.d.ts` from the Rust signatures, so the
+types cannot drift — and nothing is published until the audit (D65). When
+something is, that is the good reason to revisit this.
+
+**What it costs.** Every signature is declared by hand on both sides, and a
+wrong one is wrong silently, sometimes only on one platform. The `.d.ts` is the
+TypeScript source rather than a generated artefact, so it can drift from the C
+header with nothing to catch it. `header_matches.rs` holds the header to the
+`#[no_mangle]` exports; nothing holds either binding to the header.
+
+**What the second caller found.** The two consuming functions take `void **`
+out-parameters. `ctypes` passes `POINTER(c_void_p)` and the library's write
+reaches the caller, so Python worked first time. `koffi` marshals a pointer
+argument to a temporary unless its direction is declared, so the same call
+returned a null session handle and every handshake failed at the same line —
+with no error from the library, which had done exactly what it was asked. The
+fix is `koffi.out` and `koffi.inout` in the signature.
+
+This is the argument for two foreign callers rather than one, stated as a
+measured thing rather than a principle: no Rust test can see it, the C header
+is correct, the Python binding is correct, and one binding would not have found
+it.
+
+**The properties both bindings hold, and how each is shown.**
+
+*The secret has no exit.* Neither can read a private key, because the ABI
+exports no such call (D68). Both tests assert the **absence** — Python over
+`dir()`, TypeScript over the whole prototype chain — because an absence is what
+a future convenience method quietly ends, and a discouragement in a comment is
+not a test.
+
+*No double free.* The handle is given up before the consuming call, so a second
+call sees nothing and throws. Verified by removing the give-up on both: each
+suite goes from passing to the process dying, **exit code 127** on both
+runtimes. That is the same crash, reached from two languages, and it is what
+the check is worth.
+
+*A moving collector changes nothing.* This is the first caller with one. The
+binding holds an opaque pointer the runtime never owns and never relocates, and
+a test drives a collection between sealing and opening on a live session. A
+binding that had kept a pointer into anything the runtime owns would fail
+there rather than where it was created.
+
+**What is still open.** Everything D68 left open, unchanged: this is the
+session layer only, and the abandonment reporting a caller would rebuild is the
+logic this project got wrong twice and that no conforming receiver can observe
+(§5.5). Neither binding is published, neither is audited, and the
+`bindings/typescript` loader is Node-only — `Deno.dlopen` and `bun:ffi` would
+replace one function, and neither has been run.

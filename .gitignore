@@ -4,3 +4,7 @@ target/
 # The Python binding is run from source; its bytecode cache is not ours.
 __pycache__/
 *.pyc
+
+# The TypeScript binding's one dependency, restored by `npm ci` from the
+# lockfile, which is committed.
+node_modules/

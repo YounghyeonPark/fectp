@@ -116,6 +116,27 @@ jobs:
       - name: drive it with ctypes
         run: python3 bindings/python/test_fectp.py
 
+  typescript-binding:
+    name: the C ABI from TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Node runs the .ts files directly, so there is nothing to compile and no
+      # build output to get stale.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: build the shared library
+        run: cargo build -p fectp-ffi --release
+      - name: install the one dependency
+        run: npm ci
+        working-directory: bindings/typescript
+      - name: drive it from Node
+        run: npm test
+        working-directory: bindings/typescript
+
   # `crates/footprint` is deliberately outside the workspace, so nothing above
   # builds it. It is also the only evidence for the 23.3 KiB the README claims.
   footprint:

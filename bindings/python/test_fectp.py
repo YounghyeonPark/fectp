@@ -6,6 +6,11 @@ Rust, through the same compiler that built them — which cannot catch a wrong
 calling convention, a mistaken pointer width, or a signature that ctypes has
 guessed. Those are exactly the faults a foreign caller meets first.
 
+`bindings/typescript/test.ts` is the second, and the pair is worth more than
+either: the `void **` out-parameters below work from ctypes by default and
+returned nothing at all from koffi until their direction was declared. One
+foreign caller would not have found that (D69).
+
     python3 bindings/python/test_fectp.py
 
 after `cargo build -p fectp-ffi --release` (or debug; either is found).

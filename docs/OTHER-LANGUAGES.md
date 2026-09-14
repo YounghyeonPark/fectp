@@ -13,8 +13,9 @@ about itself, and one by where the safety guarantees stop.
 | **C, C++** | A `cdylib` and a C header. Everything below is built on this. | **built** |
 | **Python** | `ctypes` over the C ABI, in `bindings/python`. | **built** |
 | **Java** | The FFM API (JDK 22+), or JNI. | possible |
-| **Node.js, Deno, Bun** | N-API, or `napi-rs`. | possible |
-| **TypeScript** | Not a separate question — see below. | possible, with a runtime |
+| **Node.js** | `koffi` over the C ABI, in `bindings/typescript`. | **built** |
+| **Deno, Bun** | The same binding; `Deno.dlopen` or `bun:ffi` in place of `koffi`. | possible |
+| **TypeScript** | Not a separate question — see below. | **built**, on Node |
 | **Browser JavaScript** | — | **not possible** |
 
 **A browser cannot speak FECTP.** There is no API for sending a UDP datagram
@@ -31,25 +32,27 @@ socket. Node has had `dgram` since the beginning, Deno has
 so the same TypeScript is fine in one place and impossible in another — the
 line is drawn by the host, not the language.
 
-Two things make TypeScript the easiest of these to bind well, which is worth
-saying because it is the only one where the ergonomics improve rather than
-degrade. `napi-rs` emits a `.d.ts` from the Rust signatures, so the type
-definitions are generated rather than hand-written and cannot drift from the
-implementation. And the sans-IO shape below — bytes in, bytes out — leaves the
-socket in TypeScript, using `dgram` directly, so nothing in the binding is
-async and there is no event loop to block.
+The sans-IO shape below is what makes this bind well: bytes in, bytes out
+leaves the socket in TypeScript, using `dgram` directly, so nothing in the
+binding is `async` and there is no event loop to block. That is the property
+worth protecting, and it is the reason the binding is small.
 
-One addon may serve all three runtimes: Deno and Bun both implement Node-API.
-That is worth checking against their current versions rather than taking from
-here, because it is the sort of claim that is true in outline and full of
-exceptions in practice. Node's `dgram` is the only part of this paragraph that
-has been stable for a decade.
+`napi-rs` was the obvious route — it emits a `.d.ts` from the Rust signatures,
+so the types cannot drift from the implementation, and one Node-API addon may
+serve all three runtimes because Deno and Bun implement it too. What was built
+instead is the C ABI again, through `koffi`: it reuses the boundary the Python
+binding already exercises rather than adding a second one to audit, and it
+needs no compiler at the far end. The cost is that the `.d.ts` is hand-written
+and the signatures are declared by hand, which is a real cost — a wrong one is
+wrong silently. A published package would be a good reason to revisit it; there
+is nothing published until the audit (D65).
 
 ---
 
 ## What exists
 
-`crates/ffi` is the C ABI and `bindings/python` sits on it. It exports
+`crates/ffi` is the C ABI; `bindings/python` and `bindings/typescript` sit on
+it. It exports
 fifteen functions over `fectp-core`: an identity, the two sides of a handshake,
 and `seal`/`open` on the session that comes out. `include/fectp.h` is the
 header, and a test holds the two to each other — a function on one side and not
@@ -61,11 +64,19 @@ compiler needed at the far end. `cffi` and PyO3 would both be better company
 for a published wheel; neither is worth a dependency for a binding that is not
 published, and nothing is published until the audit (D65).
 
-That binding is also the only test in the repository that crosses the boundary
-from outside Rust. `crates/ffi/tests/c_abi.rs` calls the same functions through
-the compiler that built them, which cannot catch a wrong calling convention, a
+The TypeScript side is `koffi` and nothing else, and Node runs the `.ts` files
+directly, so there is no build step either. Only `load()` is runtime-specific:
+Deno and Bun have FFI of their own and would replace that one function without
+touching the rest.
+
+Those two are the only tests in the repository that cross the boundary from
+outside Rust. `crates/ffi/tests/c_abi.rs` calls the same functions through the
+compiler that built them, which cannot catch a wrong calling convention, a
 mistaken pointer width, or a signature a foreign caller has to guess — the
-faults a binding meets first. CI runs it on every push.
+faults a binding meets first. Two callers rather than one is the point: the
+`void **` out-parameters worked from `ctypes` and silently returned nothing
+from `koffi` until their direction was declared, which is exactly the class of
+fault a single foreign caller does not find. CI runs both on every push.
 
 What it does **not** do is everything `fectp` does above the session: no
 retransmission, no congestion control, no fragmentation, no keep-alive. That is
