@@ -90,6 +90,7 @@ use fectp_core::session::{
 };
 use fectp_core::{Keypair, PublicKey, Transport};
 use rand_core::{OsRng, RngCore};
+use zeroize::Zeroize;
 
 pub use compress::PayloadType;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
@@ -328,6 +329,23 @@ pub struct Identity {
     public: PublicKey,
 }
 
+/// Wipes the secret when the identity goes.
+///
+/// A `[u8; 32]` has no destructor, so without this the long-term secret stayed
+/// readable in memory the allocator was free to hand out again — demonstrated
+/// in `tests/secret_wiping.rs` rather than assumed. The session keys were
+/// already wiped and the keypair inside `fectp-core` is wiped by
+/// `x25519-dalek`; this was the copy in between, and the one a caller holds.
+///
+/// `Clone` is derived, so a cloned identity wipes its own copy on its own
+/// drop. Nothing here can reach a copy the caller made of the bytes
+/// themselves, which is why `secret()` is documented the way it is.
+impl Drop for Identity {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
+}
+
 impl Identity {
     /// Generates a new identity from the operating system's RNG.
     pub fn generate() -> Self {
@@ -348,6 +366,17 @@ impl Identity {
     }
 
     /// The secret bytes, for persisting to storage.
+    ///
+    /// This is the one way the long-term secret leaves memory that gets wiped.
+    /// An `Identity` clears its own copy when it is dropped (D67), and nothing
+    /// here can reach a copy the caller has made — a `Vec` it was written
+    /// into, a buffer handed to a file write, a `bytes` object on the far side
+    /// of a language binding. Copy it as late as possible, keep it as briefly
+    /// as possible, and wipe it yourself.
+    ///
+    /// A binding to another language should not expose this at all. Load and
+    /// store the identity behind an opaque handle and let the host name a file
+    /// instead; see `docs/OTHER-LANGUAGES.md`.
     pub fn secret(&self) -> &[u8; 32] {
         &self.secret
     }

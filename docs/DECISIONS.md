@@ -782,9 +782,9 @@ nothing that matters is discarded.
 
 | | flash |
 |---|---|
-| full protocol | 23,644 bytes |
+| full protocol | 23,888 bytes |
 | the same image with the protocol removed | 36 bytes |
-| **FECTP** | **23,608 bytes (23.1 KiB)** |
+| **FECTP** | **23,852 bytes (23.3 KiB)** |
 
 The estimate was five times too pessimistic. RAM is smaller still: 358 bytes of
 session state, or 1,414 with the reliable-delivery queue, plus whatever buffers
@@ -2211,7 +2211,9 @@ window this is closing.
 ### What it costs
 
 **1,030 bytes of flash**, taking the `no_std` core from 22,578 to 23,608 bytes
-— 22.0 KiB to 23.1 KiB, or 9% of a 256 KiB part either way. Per frame it is a
+— 22.0 KiB to 23.1 KiB, or 9% of a 256 KiB part either way. (23,852 since D67
+wired the long-term secret's wiping back up, which cost 244 bytes.) Per frame
+it is a
 shift and a comparison; the derivation itself happens once in 65,536 frames and
 is one ChaCha20 block.
 
@@ -3131,3 +3133,64 @@ fix is a schedule that adapts to what the path is doing, as the retransmission
 timer already does for data. The handshake has no round-trip estimate to work
 from, which is precisely why it uses a fixed schedule, and inventing one from a
 single exchange is a different piece of work.
+
+## D67 — The long-term secret was not being wiped, and nothing said so
+
+**Problem.** Found while designing the C binding, which is the wrong place to
+find it. `OTHER-LANGUAGES.md` warns that a binding exposing the secret puts it
+somewhere `zeroize` cannot reach. Checking how much of that was already true in
+Rust turned up something worse: **the long-term X25519 secret was not wiped
+here either.**
+
+`x25519-dalek` wipes `StaticSecret` on drop, but only under its `zeroize`
+feature. That feature is on by default and was switched off by
+`default-features = false` without being listed again:
+
+```toml
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+```
+
+`cargo tree -e features` confirms only `static_secrets` reached it, and the
+crate's source gates the destructor on exactly that feature. Nothing failed,
+nothing warned: the type compiles either way and behaves identically until
+somebody reads the freed memory.
+
+`fectp::Identity` had the same hole for a different reason — it keeps its own
+`[u8; 32]`, and a plain array has no destructor at all.
+
+What makes this worth an entry rather than a one-line fix is what it sits
+beside. The **session** keys were being wiped carefully: `CipherState` carries a
+`Drop`, and it wipes the old key on rekey as well. `Keypair::generate` wipes the
+temporary buffer it fills. The care was real and the coverage missed the one
+secret that outlives every session and, recovered, forges every future
+handshake to that endpoint.
+
+**Decision.** Enable the feature, and give `Identity` a `Drop` that wipes its
+copy.
+
+**Demonstrated, not assumed.** `secret_wiping.rs` in both crates plants a
+recognisable secret, drops the value, and reads the memory back. Before the
+fix it printed the planted bytes verbatim — `a1 a2 a3 … be`, in order, at
+offset 1. After it, zeros. The tests use `unsafe` to read a dropped value,
+which is why they are integration tests rather than anything inside a crate
+that carries `#![forbid(unsafe_code)]`; the memory belongs to the test's own
+stack frame throughout and is never freed, so only the value in it has gone.
+
+Asserting a trait bound instead — that `StaticSecret: ZeroizeOnDrop` — would
+have been cheaper and would have proved less. x25519-dalek 2.0.1 uses the
+deprecated `#[zeroize(drop)]`, which generates a destructor without
+implementing that marker, so the bound that looks like the right one does not
+hold even when the behaviour is correct.
+
+**What it costs.** 244 bytes of flash, 23,608 to 23,852 — a fifth of one per
+cent of a 256 KiB part. RAM is unchanged. Every figure quoting 23.1 KiB has
+moved to 23.3.
+
+**What is still open.** Wiping narrows a window; it does not close one. It does
+nothing about the secret while it is in use, nothing about a copy the compiler
+made before the wipe, and nothing about swap unless the pages are locked, which
+they are not. `Identity::secret()` still hands out the raw bytes — that is what
+lets a device store a key across resets, and a caller who copies them owns the
+copy. The binding must not call it, which is what `OTHER-LANGUAGES.md` already
+says and is now the only remaining path by which this secret leaves memory that
+gets wiped.

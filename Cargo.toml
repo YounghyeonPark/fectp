@@ -12,7 +12,11 @@ repository = "https://github.com/YounghyeonPark/fectp"
 authors = ["Younghyeon Park <ypark.dev@gmail.com>"]
 
 [workspace.dependencies]
-x25519-dalek     = { version = "2", default-features = false, features = ["static_secrets"] }
+# `zeroize` is one of this crate's default features and was lost to
+# `default-features = false`. Without it `StaticSecret` has no `Drop`, and the
+# long-term secret stays readable in freed memory — demonstrated, not assumed,
+# by crates/fectp-core/tests/secret_wiping.rs.
+x25519-dalek     = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = { version = "0.10", default-features = false }
 blake2           = { version = "0.10", default-features = false }
 zeroize          = { version = "1", default-features = false }

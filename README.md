@@ -380,9 +380,9 @@ being held until that review happens — the reasoning, and what the wait costs,
 are in [D65](docs/DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
 Build it from this repository in the meantime.
 
-`cargo test --workspace` runs 313 of them and they pass. Linked for
+`cargo test --workspace` runs 317 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
-**23.1 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
+**23.3 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.
 
 ---
