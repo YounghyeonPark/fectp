@@ -100,8 +100,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
 
+  # Everything else calls the C ABI from Rust, through the compiler that built
+  # it — which cannot catch a wrong calling convention, a mistaken pointer
+  # width, or a signature a foreign caller has to guess. Those are the faults a
+  # binding meets first, so one job crosses the boundary from outside.
+  python-binding:
+    name: the C ABI from Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build the shared library
+        run: cargo build -p fectp-ffi --release
+      - name: drive it with ctypes
+        run: python3 bindings/python/test_fectp.py
+
   # `crates/footprint` is deliberately outside the workspace, so nothing above
-  # builds it. It is also the only evidence for the 23.1 KiB the README claims.
+  # builds it. It is also the only evidence for the 23.3 KiB the README claims.
   footprint:
     name: microcontroller image
     runs-on: ubuntu-latest

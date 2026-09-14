@@ -1,2 +1,6 @@
 target/
 **/*.rs.bk
+
+# The Python binding is run from source; its bytecode cache is not ours.
+__pycache__/
+*.pyc

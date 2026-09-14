@@ -11,7 +11,7 @@ about itself, and one by where the safety guarantees stop.
 | | How | |
 |---|---|---|
 | **C, C++** | A `cdylib` and a C header. Everything below is built on this. | **built** |
-| **Python** | PyO3 as a native extension, or `cffi` over the C ABI. | possible |
+| **Python** | `ctypes` over the C ABI, in `bindings/python`. | **built** |
 | **Java** | The FFM API (JDK 22+), or JNI. | possible |
 | **Node.js, Deno, Bun** | N-API, or `napi-rs`. | possible |
 | **TypeScript** | Not a separate question — see below. | possible, with a runtime |
@@ -49,13 +49,23 @@ has been stable for a decade.
 
 ## What exists
 
-`crates/ffi` is the C ABI, and it is the only binding written. It exports
+`crates/ffi` is the C ABI and `bindings/python` sits on it. It exports
 fifteen functions over `fectp-core`: an identity, the two sides of a handshake,
 and `seal`/`open` on the session that comes out. `include/fectp.h` is the
 header, and a test holds the two to each other — a function on one side and not
 the other fails the build rather than a caller's link step.
 
-It is not published, and neither is anything else until the audit (D65).
+The Python side is `ctypes` and nothing else — the standard library against
+the shared object cargo builds — so there is no package to install and no
+compiler needed at the far end. `cffi` and PyO3 would both be better company
+for a published wheel; neither is worth a dependency for a binding that is not
+published, and nothing is published until the audit (D65).
+
+That binding is also the only test in the repository that crosses the boundary
+from outside Rust. `crates/ffi/tests/c_abi.rs` calls the same functions through
+the compiler that built them, which cannot catch a wrong calling convention, a
+mistaken pointer width, or a signature a foreign caller has to guess — the
+faults a binding meets first. CI runs it on every push.
 
 What it does **not** do is everything `fectp` does above the session: no
 retransmission, no congestion control, no fragmentation, no keep-alive. That is
