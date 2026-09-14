@@ -1162,6 +1162,33 @@ An implementation is conforming if it:
 The reference test suite covers each of these; see `crates/fectp-core/tests/`
 and `crates/fectp/tests/`.
 
+### 9.2 Test vectors
+
+[test-vectors.txt](test-vectors.txt) is fixed inputs and the exact bytes the
+reference implementation produces for them: frame headers for every type and
+flag, varints at every length boundary, codec headers, the structural
+transforms, a full handshake from fixed keys and recorded ephemerals, the data
+frames that handshake's session seals, and the frame that lands on the rekey
+boundary. The format is comments, `[name]`, and `key = value`, so reading it
+needs no parser library.
+
+An implementation MAY check itself against these before testing against the
+reference implementation, which localises a fault to one layout rather than to
+a handshake. They are generated from the reference implementation and therefore
+say what it produces, not that it is correct; §3 through §6 above remain the
+normative text.
+
+Two things they cannot cover, stated because a list of vectors invites the
+assumption that it is exhaustive:
+
+- **Entropy-coded payloads.** Zstandard output depends on the encoder's version
+  and level, so pinning those bytes would pin a dependency rather than this
+  protocol. The structural transforms are pinned; the entropy stage is checked
+  by round-trip.
+- **Anything a receiver cannot observe.** §5.5 notes that abandonment of a
+  reliable message is not visible on the wire, so a sender that reports
+  delivery wrongly produces byte-identical traffic. No vector distinguishes it.
+
 ## 10. Not specified in version 1
 
 These are absent by omission and remain to be defined:

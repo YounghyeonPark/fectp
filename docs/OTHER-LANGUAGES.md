@@ -193,6 +193,9 @@ In order, because each one makes the next worth doing:
    pinned to an unversioned dependency has nothing to pin to.
 3. **Test vectors** — frames built from fixed keys, with expected bytes — so an
    independent implementer can check their work without reading this code.
-   Cheap, and it is what makes SPEC.md usable by somebody else.
+   **Built**: [test-vectors.txt](test-vectors.txt), SPEC §9.2.
 4. **Then bindings**, sans-IO, over the C ABI, with `catch_unwind` at every
-   entry point and the secret never crossing.
+   entry point and the secret never crossing. **Built**, out of order: C ABI,
+   Python and TypeScript exist and the two above them do not. Worth admitting
+   rather than quietly renumbering — the bindings were the interesting problem
+   and the ordering was the honest one.

@@ -26,7 +26,9 @@ first item is not this page:
    been audited; that is a disclosure, not a substitute.
 2. **Versioning and a release** — this page.
 3. **Test vectors**, so an independent implementer can check their work against
-   `SPEC.md` without reading the code.
+   `SPEC.md` without reading the code. **Done**:
+   [test-vectors.txt](test-vectors.txt), pinned by a test that regenerates and
+   compares, so the file cannot drift from the wire format without a failure.
 
 A version on crates.io is permanent. `0.1.0` cannot be re-uploaded, only
 yanked, and yanking does not remove it.

@@ -3321,3 +3321,58 @@ logic this project got wrong twice and that no conforming receiver can observe
 (§5.5). Neither binding is published, neither is audited, and the
 `bindings/typescript` loader is Node-only — `Deno.dlopen` and `bun:ffi` would
 replace one function, and neither has been run.
+
+## D70 — Test vectors, and the two directions one file has to be checked in
+
+**Problem.** §9 tells an independent implementer to validate the handshake
+against an existing Noise library and to write §3 through §6 themselves. Those
+are the layouts no library provides, and until now the only way to check them
+was to run this code — which is the thing a second implementation exists to
+avoid. [OTHER-LANGUAGES.md](OTHER-LANGUAGES.md) listed vectors as step 3 and
+bindings as step 4, and the bindings were built first. Said plainly rather than
+renumbered.
+
+**Decision.** [test-vectors.txt](test-vectors.txt): fixed inputs and the exact
+bytes this implementation produces, generated and checked by
+`crates/fectp-core/tests/vectors.rs`, and in CI beside the other checks that
+hold a document to the code.
+
+**Not JSON.** Comments, `[name]`, and `key = value`. Somebody writing a FECTP
+parser in C should not need a parser library to read the file that tells them
+their parser is wrong. It is a dozen lines in any language.
+
+**Both directions, because one is not enough.** Regenerating and comparing
+catches this implementation drifting. It does not catch an encoder and a
+decoder that are wrong in the same way, because they agree with each other and
+the file was written by the encoder. So a second test replays the file: the
+handshake frames go into a responder and an initiator that have never seen
+them, and every data frame is sealed or opened by the session that comes out.
+Everything it uses is read from the file — the static secrets, the recorded
+ephemerals, the capability block — so nothing it checks comes from a compiled-in
+constant, which is the position an outside implementer is in.
+
+**The rekey vector costs 65,537 seals, twice a run.** About five seconds in a
+debug build. Worth it: an implementation that never rekeys at all matches every
+other vector in the file and fails that one.
+
+**What no vector covers**, written into the file's own preamble because a list
+of vectors invites the assumption that it is exhaustive:
+
+- **Entropy stages.** Zstandard's output depends on its encoder's version and
+  level. Pinning those bytes pins a dependency, not this protocol, so the
+  structural transforms are pinned and the entropy stage is round-tripped.
+- **Anything a receiver cannot observe.** §5.5 again, and D63: a sender that
+  reports delivery wrongly produces byte-identical traffic. Vectors were the
+  step *before* bindings in the original ordering, as though they subsumed that
+  gap. They do not, and nothing does.
+- **Correctness.** These are generated from this implementation, so they say
+  what it produces. Only a reader of SPEC.md can say whether that is right.
+
+**One finding worth keeping.** Verifying that the replay really reads the
+file's ephemeral, changing the first byte of the recorded secret left the test
+green — which reads as a hole. It was not: X25519 clamps a scalar, so the low
+three bits of that byte never reach the wire. Byte ten failed immediately. The
+file now says so, since an implementer will notice the same thing, and
+FIXING-A-BUG.md has it as the mirror image of every other row there: when a
+break produces no failure, ask whether the code discarded it before concluding
+the test is weak.
