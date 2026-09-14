@@ -127,17 +127,24 @@ Inside Rust an invariant violation is a panic: catchable, or at worst one
 thread's problem. Unwinding out of an `extern "C"` function **aborts the
 process** (Rust 1.81 and later; the minimum here is 1.85).
 
-`fectp` has twelve `expect` sites. All are invariant assertions rather than
-input-driven, but a binding turns any future regression at one of them from "a
-Rust error" into "the interpreter died". Wrapping every entry point in
-`catch_unwind` and converting to an error code is mandatory, not tidiness.
+`fectp` has eight `expect` sites outside its tests, and `fectp-core` one. All
+are invariant assertions rather than input-driven, but a binding turns any
+future regression at one of them from "a Rust error" into "the interpreter
+died". Wrapping every entry point in `catch_unwind` and converting to an error
+code is mandatory, not tidiness — which is what `crates/ffi` does, at every
+entry including the ones that cannot fail.
 
 ### Key material escapes `zeroize`
 
-`Identity::secret()` returns the raw 32 bytes. In Rust they are wiped when
-dropped. As a Python `bytes`, a Java `byte[]` or a JavaScript `Buffer` they are
-immortal, copied by the garbage collector, and may reach swap. Nothing the Rust
-side does about it survives the crossing.
+`fectp::Identity::secret()` returns the raw 32 bytes. In Rust they are wiped
+when dropped. As a Python `bytes`, a Java `byte[]` or a JavaScript `Buffer`
+they are immortal, copied freely by the runtime, and may reach swap. Nothing
+the Rust side does about it survives the crossing.
+
+This one is answered rather than mitigated: `crates/ffi` binds `fectp-core`,
+whose `Keypair` has no such accessor, so there is no path from the boundary to
+those bytes and nothing for a binding to expose. Both bindings assert the
+absence rather than trusting it (D68, D69).
 
 A binding should never expose the secret. Load and store it behind an opaque
 handle, and let the host name a file rather than hold the bytes.

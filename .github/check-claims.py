@@ -20,6 +20,11 @@ This reads the four standing lists and looks for two things:
      ALLOWED below with a reason — silencing it costs a sentence, which is the
      point.
 
+It also checks the counted claims in COUNTED below -- sentences stating how
+many of something the source has. Those go stale in the other direction:
+nothing is built or removed, the number just drifts. One had, from twelve to
+eight, and read as true for as long as nobody counted.
+
 What it cannot see: a document contradicting itself in prose. SPEC said
 "address migration is not supported in version 1" in section 3.3 while
 specifying it in 5.8, and no keyword check finds that. It takes a reader.
@@ -172,6 +177,82 @@ def public_names() -> set[str]:
     return found
 
 
+# Numbers stated in prose, with how to count the thing each one claims.
+#
+# Only for counts a reader would take as current. A number in a decision record
+# is a measurement from the day it was written and is not checked here.
+WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+
+def outside_tests(text: str) -> str:
+    """The source with `#[cfg(test)]` items removed, by brace matching."""
+    out, i = [], 0
+    while (at := text.find("#[cfg(test)]", i)) != -1:
+        out.append(text[i:at])
+        brace = text.find("{", at)
+        if brace == -1:
+            break
+        depth, j = 0, brace
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        i = j + 1
+    out.append(text[i:])
+    return "".join(out)
+
+
+def expect_sites(crate: str) -> int:
+    """`.expect(` in a crate's own source, not counting its tests."""
+    total = 0
+    for source in sorted((ROOT / "crates" / crate / "src").rglob("*.rs")):
+        total += outside_tests(source.read_text(encoding="utf-8")).count(".expect(")
+    return total
+
+
+COUNTED = [
+    # The one that drifted. A binding turns any of these into the host
+    # interpreter dying, so the number is the argument for `catch_unwind` at
+    # every entry point, and it is worth keeping true.
+    (
+        "docs/OTHER-LANGUAGES.md",
+        "`fectp` has ([a-z]+) `expect` sites outside its tests, "
+        "and `fectp-core` ([a-z]+)",
+        lambda: (expect_sites("fectp"), expect_sites("fectp-core")),
+        "`expect` sites outside tests, in (fectp, fectp-core)",
+    ),
+]
+
+
+def counted_claims() -> list[str]:
+    """Each COUNTED sentence, against what the source actually has."""
+    problems = []
+    for where, pattern, count, what in COUNTED:
+        match = re.search(pattern, (ROOT / where).read_text(encoding="utf-8"))
+        if not match:
+            problems.append(
+                f"{where}: the sentence stating {what} is gone or reworded, so "
+                f"nothing is checking it. Fix the pattern in COUNTED, or drop "
+                f"the entry -- an unchecked count is how this one drifted."
+            )
+            continue
+        claimed = tuple(WORDS.get(g.lower(), -1) for g in match.groups())
+        actual = count()
+        if claimed != actual:
+            problems.append(
+                f"{where}: says {', '.join(match.groups())} {what}; the source "
+                f"has {', '.join(str(n) for n in actual)}."
+            )
+    return problems
+
+
 def main() -> int:
     working, readme_absent = readme_lists()
     claims = (
@@ -211,13 +292,18 @@ def main() -> int:
                 f"add the claim to ALLOWED in this script with a reason."
             )
 
+    problems += counted_claims()
+
     if problems:
         print(f"{len(problems)} claim(s) the code disagrees with:\n")
         for problem in problems:
             print(f"  {problem}")
         return 1
 
-    print(f"every absent-claim checks out ({len(claims)} across three lists)")
+    print(
+        f"every absent-claim checks out ({len(claims)} across three lists), "
+        f"and {len(COUNTED)} counted claim(s)"
+    )
     return 0
 
 
