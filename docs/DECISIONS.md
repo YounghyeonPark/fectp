@@ -3376,3 +3376,111 @@ file now says so, since an implementer will notice the same thing, and
 FIXING-A-BUG.md has it as the mirror image of every other row there: when a
 break produces no failure, ask whether the code discarded it before concluding
 the test is weak.
+
+## D71 — The handshake schedule learns the path, and cannot use it to give up sooner
+
+**Problem.** [D66](#d66--the-handshake-budget-was-three-tenths-spent-before-the-host-was-counted)
+doubled the handshake budget and said in its own closing paragraph that
+doubling a margin is not the same as understanding it. The schedule was a fixed
+linear backoff — 250 ms, then 500, then 750 — that knew nothing about the path
+it was on. On loopback, where the round trip measured here is 24.6 ms, a lost
+opening frame cost **300 ms**: an order of magnitude more than the path needs,
+paid on every reconnect by the device this protocol is written for, the one that
+wakes, reports a reading and sleeps.
+
+**Decision.** `Endpoint` keeps what each address measured and schedules from it,
+using `Rto` — the RFC 6298 estimator the data path has always used, unchanged.
+
+**Measured.** Recovering from one lost opening frame, on a path whose round trip
+measures about 24 ms. Median of three runs on an otherwise idle machine, because
+the first attempt at this table was taken while a thirty-times loop was running
+and read 30% high — the host effect D66 is about, met again while measuring the
+fix for it:
+
+| samples taken | recovery |
+|---|---|
+| none (cold) | 288 ms |
+| one | 65 ms |
+| five | 63 ms |
+| twenty | 50 ms |
+
+**4.4x on the first sample, 5.8x once settled.** Five samples are barely better
+than one, which is worth saying rather than rounding away: RFC 6298's estimate
+is `srtt + 4 x rttvar`, the first sample sets `rttvar` to half the round trip,
+and this path's own jitter keeps the variation term from shrinking much after
+that. The remaining 50 ms is about half path and half the 20 ms floor.
+
+**Per address, never pooled.** What loopback measures says nothing about a
+satellite link. An endpoint that averaged the two would abandon the slow peer at
+the fast peer's pace, so the estimate is stored against the address it came from
+and an address never seen before gets the cold schedule unchanged. Bounded at 64
+addresses, oldest evicted, because the addresses come from whoever the caller
+connects to.
+
+**It survives the session.** The reconnect is the case worth having this for, so
+what a handshake measured outlives the peer it produced. A test releases the
+session and asserts the next handshake is still fast.
+
+**It can only add attempts, never remove them.** This is the part that needed a
+second floor. Four attempts on a measured 20 ms estimate are over in under two
+tenths of a second, so the count alone would have an endpoint report an
+unreachable peer **more than ten times sooner** than before — on a path that may
+have merely stalled. So the give-up spends both: the attempts, *and* the wall
+clock the cold schedule would have taken. Cold that is unchanged, and measured
+against a socket that never answers it is 788 ms for two attempts, 2.55 s for
+four and 9.09 s for eight. Warm, the same wall clock buys more attempts instead
+of fewer.
+
+That test is the one that mattered. The first version of it passed with the
+floor removed, because its black-hole address had never been measured and so
+took the cold schedule anyway — it was checking that estimates are not pooled,
+which is worth checking and is not what its name claimed. Breaking the floor is
+what exposed it; with a path that was measured and *then* went silent, removing
+the floor gives up in 576 ms against 2.55 s.
+
+**Karn's algorithm, and the limit it sets.** Only handshakes that completed
+without a resend are sampled. Once an opening frame has been resent there is
+nothing to say which attempt the reply answers — the frame goes out byte for
+byte identical — and a sample from the wrong one skews the estimate. The data
+path's queue already refuses ambiguous samples for the same reason.
+
+The consequence is worth stating because it is the residue of D66 rather than
+its resolution: **a path slower than the cold schedule can never be measured.**
+Its handshakes always resend, so they never yield a clean sample, so the
+estimate never learns that the path is slow. What this decision fixes is a
+schedule that was too slow for a fast path. A schedule that is too fast for a
+slow path still needs `set_handshake_attempts`, and fixing it properly needs
+something in the opening frame to tell one attempt from another — which is a
+wire format change and is not this.
+
+**`Connection` is untouched.** One blocking call with nothing before or after
+it: there is nowhere to keep what a path measured and no second handshake to
+spend it on. The asymmetry D66 made legible stays legible.
+
+**Two things the tests taught, which the implementation did not.**
+
+*An adapted schedule resends early sometimes, and that is the trade.* Settled on
+a 25 ms path the estimate sits near the 20 ms floor, so jitter above it produces
+a spurious resend — one extra datagram, no harm, and the same trade the data
+path already makes with `MIN_RTO_MS`. It is worth stating because the first
+version of these tests assumed one opening frame per handshake and broke on it.
+
+*Loopback loses datagrams.* One warm-up handshake in fifteen runs lost its
+opening frame for real, which shifted every later frame's index and made the
+drop land on a handshake nothing was measuring. Naming the *n*th frame to throw
+away looked simpler and was wrong; the relay now arms a one-shot drop, and a
+trial where anything *else* went missing is repeated rather than believed.
+`handshake_loss.rs` has said a relay is a network since it was written — the
+same trap, met from a new direction.
+
+Both were found by running the file thirty times, which is the only reason they
+were found before CI. Four runs in thirty failed, for these two reasons; the
+redesign is thirty for thirty.
+
+**Two stale things found while reading, corrected here.** `HANDSHAKE_ATTEMPTS`
+documented the endpoint as giving up "a little after 1.5 s" on four attempts and
+after 7 s on eight; measured, it is 2.55 s and 9.09 s. 1.5 s is when the fourth
+frame is *sent*, which is the figure D66 correctly used for a different purpose
+and which had been copied into a sentence about giving up. And
+`exchange_handshake` still said an absent peer is reported "in five seconds"
+after D66 made it ten.

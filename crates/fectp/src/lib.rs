@@ -183,8 +183,13 @@ const HANDSHAKE_RETRY_MS: u64 = 250;
 ///
 /// Backoff is linear from [`HANDSHAKE_RETRY_MS`] and the whole thing is bounded
 /// by [`HANDSHAKE_TIMEOUT`], so a peer that is genuinely absent is still
-/// reported in five seconds rather than waited on — it just costs a handful of
-/// datagrams to establish that instead of one.
+/// reported inside that budget rather than waited on — it just costs a handful
+/// of datagrams to establish that instead of one.
+///
+/// This schedule stays fixed while [`Endpoint`](crate::Endpoint)'s adapts
+/// (D71). A `Connection` is one blocking call with nothing before or after it,
+/// so there is nowhere to keep what a path measured and nothing to keep it
+/// from: the first handshake to an address is the only handshake there is.
 fn exchange_handshake(
     transport: &mut UdpTransport,
     frame: &[u8],

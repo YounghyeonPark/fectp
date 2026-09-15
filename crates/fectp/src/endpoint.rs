@@ -57,6 +57,7 @@ use fectp_core::session::{
     preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
     Session, PATH_TOKEN_LEN,
 };
+use fectp_core::reliability::Rto;
 use fectp_core::PublicKey;
 use rand_core::{OsRng, RngCore};
 
@@ -161,14 +162,33 @@ pub enum Event {
     Idle,
 }
 
-/// How long to wait for a reply before resending the opening frame.
+/// How long to wait for a reply before resending the opening frame, on a path
+/// nothing has been measured about.
+///
+/// Only the cold schedule. Once a handshake to an address has completed
+/// without needing a resend, the interval comes from what that exchange
+/// measured instead; see [`Endpoint::handshake_delay`].
 const HANDSHAKE_RETRY_MS: u64 = 250;
 
-/// How many times to send an opening frame before giving up.
+/// Addresses whose round trip is remembered between handshakes.
 ///
-/// The endpoint's handshake budget is this count on the linear backoff above,
-/// not a deadline: four attempts at 250 ms, 500 and 750 give up a little after
-/// 1.5 s. [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is `Connection`'s
+/// The estimate is per address and never shared between them: what loopback
+/// measures says nothing about a satellite link, and an endpoint that pooled
+/// the two would give up on the slow peer at the fast peer's pace. Bounded
+/// because the addresses come from whoever the caller connects to.
+const MAX_MEASURED_PATHS: usize = 64;
+
+/// How many opening frames must be sent before a connect attempt is given up.
+///
+/// A floor on attempts rather than a ceiling, and the time the cold schedule
+/// would have taken is a second floor: an endpoint gives up only once it has
+/// spent both. Cold that is exactly what it always was — four attempts at 250,
+/// 500, 750 and 1000 ms, reported after a measured 2.55 s. On a path it has
+/// measured the intervals are far shorter, so more attempts fit in the same
+/// 2.5 s; what cannot happen is giving up sooner than before the estimate
+/// existed (D71).
+///
+/// [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is `Connection`'s
 /// equivalent and is a clock, because there the call blocks and something has
 /// to end it. Replaced per endpoint by
 /// [`set_handshake_attempts`](Endpoint::set_handshake_attempts).
@@ -315,6 +335,9 @@ struct Outbound {
     frame: Vec<u8>,
     next_attempt: Instant,
     attempts: u8,
+    /// When the first attempt left, for the round-trip measurement and for the
+    /// budget that decides when to stop.
+    first_sent: Instant,
 }
 
 /// How a server authenticates the peers that connect to it.
@@ -393,6 +416,12 @@ pub struct Endpoint {
     keepalive: Option<Duration>,
     /// Opening frames sent before a connect attempt is given up on.
     handshake_attempts: u8,
+    /// What a completed handshake measured, per address.
+    ///
+    /// A `Vec` rather than a map: it holds [`MAX_MEASURED_PATHS`] at most and
+    /// is walked once per handshake, so the scan is cheaper than the hashing
+    /// would be, and the order is what makes the eviction obvious.
+    paths: Vec<(SocketAddr, Rto)>,
     /// Attempts before a reliable message is abandoned, applied to every peer.
     max_retries: u8,
     /// How long a peer may go unheard from before its session is released.
@@ -521,6 +550,7 @@ impl Endpoint {
             by_session: HashMap::new(),
             events: VecDeque::new(),
             handshake_attempts: HANDSHAKE_ATTEMPTS,
+            paths: Vec::new(),
             max_retries: MAX_RETRIES,
             handshake_budget: MAX_HANDSHAKES_PER_SECOND as f32,
             handshake_refilled: Instant::now(),
@@ -642,6 +672,8 @@ impl Endpoint {
 
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
+        let sent_at = Instant::now();
+        let next_attempt = sent_at + self.handshake_delay(addr, 1);
         self.outbound.insert(
             peer_id,
             Outbound {
@@ -649,12 +681,71 @@ impl Endpoint {
                 addr,
                 session_id,
                 frame,
-                next_attempt: Instant::now() + Duration::from_millis(HANDSHAKE_RETRY_MS),
+                next_attempt,
                 attempts: 1,
+                first_sent: sent_at,
             },
         );
-        self.wake_at(Instant::now() + Duration::from_millis(HANDSHAKE_RETRY_MS));
+        self.wake_at(next_attempt);
         Ok(peer_id)
+    }
+
+    /// How long to wait before resending an opening frame to `addr`.
+    ///
+    /// Cold, this is the linear schedule that was here before: 250 ms, then
+    /// 500, then 750. Warm — once a handshake to this address has completed
+    /// without a resend — it is what that exchange measured, backed off
+    /// exponentially, which on loopback is the 20 ms floor rather than a
+    /// quarter of a second.
+    ///
+    /// The estimate is looked up by address and never pooled across them.
+    /// Pooling would let a fast path shorten a slow one's schedule, and the
+    /// endpoint would abandon the slow peer before its first reply could
+    /// arrive.
+    fn handshake_delay(&self, addr: SocketAddr, attempts: u8) -> Duration {
+        match self.paths.iter().find(|(a, _)| *a == addr) {
+            Some((_, rto)) => {
+                Duration::from_millis(u64::from(rto.with_backoff(attempts.saturating_sub(1))))
+            }
+            None => Duration::from_millis(HANDSHAKE_RETRY_MS * u64::from(attempts)),
+        }
+    }
+
+    /// The wall clock the cold schedule would have spent on `attempts` tries.
+    ///
+    /// A warm schedule runs through its attempts far sooner, so the count
+    /// alone would have an endpoint that has measured loopback give up on an
+    /// unanswered peer in a tenth of a second. Both have to be spent: the
+    /// attempts, and the time they would have taken cold. Nothing gives up
+    /// earlier than it did before this existed.
+    fn handshake_budget(attempts: u8) -> Duration {
+        let n = u64::from(attempts);
+        Duration::from_millis(HANDSHAKE_RETRY_MS * n * (n + 1) / 2)
+    }
+
+    /// Folds a completed handshake's round trip into what this address has
+    /// measured.
+    ///
+    /// Only unambiguous exchanges are offered here. Once an opening frame has
+    /// been resent, the reply cannot be attributed to a particular attempt —
+    /// the frame is resent byte for byte, so there is nothing in it to tell
+    /// them apart — and a sample from the wrong one skews the estimate. That
+    /// is Karn's algorithm, and the retransmit queue applies the same rule to
+    /// data.
+    fn measure_path(&mut self, addr: SocketAddr, rtt: Duration) {
+        let ms = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
+        if let Some((_, rto)) = self.paths.iter_mut().find(|(a, _)| *a == addr) {
+            rto.sample(ms);
+            return;
+        }
+        if self.paths.len() >= MAX_MEASURED_PATHS {
+            // The oldest goes. A caller that cycles through more addresses than
+            // this pays the cold schedule, which is what it paid before.
+            self.paths.remove(0);
+        }
+        let mut rto = Rto::new();
+        rto.sample(ms);
+        self.paths.push((addr, rto));
     }
 
     /// Handshakes this endpoint started that are still awaiting a reply.
@@ -1074,6 +1165,9 @@ impl Endpoint {
         };
         let outbound = self.outbound.remove(&peer_id).expect("just found");
         let addr = outbound.addr;
+        if outbound.attempts == 1 {
+            self.measure_path(addr, outbound.first_sent.elapsed());
+        }
 
         let mut staging = vec![0u8; self.rx.len()];
         let completed = match outbound.handshake {
@@ -1266,19 +1360,25 @@ impl Endpoint {
     /// Sets how many opening frames are sent before a connect attempt is given
     /// up on, replacing [`HANDSHAKE_ATTEMPTS`].
     ///
-    /// A count rather than a duration, because that is what the endpoint
-    /// actually does: it stops after this many attempts on a linear 250 ms
-    /// backoff, and no deadline is consulted. A `Duration` here would be
-    /// converted into a count and then report a budget nothing honours.
-    /// `Connection` is the other way round — its handshake blocks, so a clock
-    /// ends it, and [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is that
-    /// clock. It has no setter because the handshake is over before there is a
-    /// `Connection` to call one on.
+    /// A count rather than a duration, because a count is the part a caller
+    /// can reason about: how many chances a lost opening frame gets. A
+    /// `Duration` would have to be divided by an interval that is no longer
+    /// fixed — on a measured path it is what that path measured (D71) — so it
+    /// would report a budget nothing honours. `Connection` is the other way
+    /// round: its handshake blocks, so a clock ends it, and
+    /// [`HANDSHAKE_TIMEOUT`](crate::HANDSHAKE_TIMEOUT) is that clock. It has
+    /// no setter because the handshake is over before there is a `Connection`
+    /// to call one on.
     ///
-    /// The wall-clock budget this buys is the sum of the intervals, which grow
-    /// linearly: four attempts give up a little after 1.5 seconds, eight after
-    /// 7. Raise it for a path that loses opening frames, or for a host too
-    /// busy to keep to the schedule — a desktop that has been idle runs two to
+    /// The wall clock this buys is the sum of the *cold* intervals, which grow
+    /// linearly, and it is a floor as well as an estimate: an endpoint gives
+    /// up only once it has spent both the attempts and that much time.
+    /// Measured against a bound socket that never answers, two attempts take
+    /// 788 ms, four 2.55 s and eight 9.09 s. On a path this endpoint has
+    /// measured the same wall clock buys more attempts rather than fewer.
+    ///
+    /// Raise it for a path that loses opening frames, or for a host too busy
+    /// to keep to the schedule — a desktop that has been idle runs two to
     /// three times slow, which is measurable with no protocol in it at all
     /// (`cargo run --release --bin idle`).
     ///
@@ -1609,7 +1709,7 @@ impl Endpoint {
         Ok(())
     }
 
-    /// Resends unanswered opening frames, and abandons the hopeless ones.    /// Resends unanswered opening frames, and abandons the hopeless ones.
+    /// Resends unanswered opening frames, and abandons the hopeless ones.
     fn drive_handshakes(&mut self) -> Result<Option<Event>> {
         let now = Instant::now();
         let due: Vec<PeerId> = self
@@ -1620,18 +1720,31 @@ impl Endpoint {
             .collect();
 
         for id in due {
-            let Some(outbound) = self.outbound.get_mut(&id) else {
+            let Some(outbound) = self.outbound.get(&id) else {
                 continue;
             };
-            if outbound.attempts >= self.handshake_attempts {
+            let spent = now.saturating_duration_since(outbound.first_sent);
+            if outbound.attempts >= self.handshake_attempts
+                && spent >= Self::handshake_budget(self.handshake_attempts)
+            {
                 self.outbound.remove(&id);
                 return Ok(Some(Event::ConnectFailed { peer: id }));
             }
-            outbound.attempts += 1;
+            // Read what the next interval needs before the entry is borrowed
+            // again: `handshake_delay` reads the path table, which is also
+            // `self`.
+            // Saturating because a measured path can fit many more attempts
+            // into the same budget than the cold schedule ever did, and the
+            // counter is a byte.
+            let attempts = outbound.attempts.saturating_add(1);
+            let addr = outbound.addr;
+            let frame = outbound.frame.clone();
             // Back off, so an unreachable peer is not hammered.
-            outbound.next_attempt = now
-                + Duration::from_millis(HANDSHAKE_RETRY_MS * u64::from(outbound.attempts));
-            let (frame, addr) = (outbound.frame.clone(), outbound.addr);
+            let next = now + self.handshake_delay(addr, attempts);
+            if let Some(outbound) = self.outbound.get_mut(&id) {
+                outbound.attempts = attempts;
+                outbound.next_attempt = next;
+            }
             send_datagram(&self.socket, &frame, addr)?;
         }
         Ok(None)

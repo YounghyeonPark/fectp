@@ -19,12 +19,6 @@ use std::time::{Duration, Instant};
 use common::Echo;
 use fectp::{Connection, Identity, PayloadType};
 
-/// Forwards datagrams between one client and one server, dropping the first
-/// `drop_to_server` from the client and the first `drop_to_client` back.
-///
-/// Dropping the *first* rather than a random fraction is deliberate: the frame
-/// under test is the opening one, and a proportion would make the test pass or
-/// fail by luck.
 /// Sends and waits for the echo, retrying against a deadline.
 ///
 /// Every test here puts a relay between the two peers, and a relay is a
@@ -51,6 +45,12 @@ fn echoes(conn: &Connection, message: &[u8]) -> bool {
     false
 }
 
+/// Forwards datagrams between one client and one server, dropping the first
+/// `drop_to_server` from the client and the first `drop_to_client` back.
+///
+/// Dropping the *first* rather than a random fraction is deliberate: the frame
+/// under test is the opening one, and a proportion would make the test pass or
+/// fail by luck.
 struct Relay {
     addr: SocketAddr,
     dropped: Arc<AtomicUsize>,
