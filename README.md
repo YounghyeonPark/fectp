@@ -441,6 +441,7 @@ cargo run -p fectp --example tour  --features compress   # every documented snip
 | [USAGE.md](docs/USAGE.md) | Task-by-task guide. Every snippet is compiled. |
 | [API.md](docs/API.md) | The complete API, and where it is untidy. |
 | [SPEC.md](docs/SPEC.md) | Normative wire format, for an independent implementation. |
+| [formal/](docs/formal/) | Symbolic models of the parts a published analysis does not cover, what they proved, and what they cannot say. |
 | [test-vectors.txt](docs/test-vectors.txt) | Fixed inputs and the exact bytes this produces, for checking an implementation of SPEC.md against. |
 | [DECISIONS.md](docs/DECISIONS.md) | Why it is built this way, including what was measured and got changed. |
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Full comparison, with the methodology and the mistakes. |

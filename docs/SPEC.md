@@ -497,6 +497,26 @@ What resumption does **not** provide is protection against a compromised
 ticket being used to impersonate, before it is redeemed. A ticket is key
 material and MUST be stored as such.
 
+Nor does the handshake itself resist replay. Message 1 is accepted before the
+responder has contributed anything to it, so nothing in the cryptography
+distinguishes a first copy from a second; the single-use rule of §4.6 is what
+answers that, and it is a rule about a responder's state rather than a property
+of the construction. A responder MUST NOT rely on the handshake for it.
+
+**In pre-shared-key mode (§1.2.1) that rule is not in force**, because the
+configured key MUST NOT be consumed. A captured message 1 replayed from an
+address the responder has not already filed a session against is therefore
+accepted again, which has two consequences an implementer needs stated rather
+than derived:
+
+- its 0-RTT payload reaches the application a second time, so a caller MUST
+  treat 0-RTT data in this mode as replayable without limit, and MUST NOT carry
+  anything whose repetition matters;
+- each copy costs a session, so a party that does **not** hold the key can make
+  a responder allocate them. A responder MUST bound its session table (§7) and
+  SHOULD evict sessions that have never carried an authenticated frame before
+  those that have, or replayed copies displace working peers.
+
 ## 5. Data frames
 
 ```

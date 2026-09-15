@@ -3534,3 +3534,84 @@ And Miri is not an audit. It checks one class of fault — memory and aliasing
 inside Rust's model — on one crate, along the paths six tests happen to take.
 It says nothing about the protocol, the key schedule, or the resumption
 handshake, which is where the risk actually is.
+
+## D73 — What a formal model of resumption said, and the one thing it led to
+
+**Problem.** An audit is not going to happen (D72), so the assurance has to be
+built here. The highest-risk thing in the workspace is not the code that a
+tool can check — it is the design nobody has checked at all. The full handshake
+is standard `Noise_IK`, analysed symbolically in the literature and held to
+`snow` by `interop.rs`. Resumption is standard `Noise_NNpsk0`, but **how FECTP
+reaches it is not standard**: the pre-shared key is the resumption key of an
+earlier `IK` handshake, named on the wire by a hash of itself, replaced from the
+resumed handshake's own chaining key each time, and doubling as the configured
+pre-shared key of §1.2.1. That composition is this project's own.
+
+**Decision.** [`docs/formal/resumption.vp`](formal/resumption.vp), checked with
+Verifpal 1.4.10, with every derivation transcribed from `resume.rs` and
+`symmetric.rs` and the line it came from named.
+[`docs/formal/README.md`](formal/README.md) has the results and, at more length
+than the results, what the model cannot say.
+
+**What it confirmed.** Five of seven queries pass, and the two that matter most
+are among them. Leaking the stored resumption key after the exchange opens
+neither the resumed session nor the next resumption key — so the forward
+secrecy `resume.rs` claims holds, and one theft does not unroll the chain. The
+0-RTT payload falls, in four steps, which is correct: it is encrypted before
+any ephemeral has been mixed in and both the code and §4.8 say so. A query that
+fails where the documentation says it should is worth as much as one that
+passes.
+
+**What it led to.** Verifpal reports non-injective agreement on message 1: the
+responder contributes nothing before accepting it, so the same frame is
+accepted twice. §4.6 already answers that — a ticket MUST be spent when
+redeemed — so the model found no gap there. It derived independently *why* that
+rule is load-bearing, which is worth having, because a MUST whose reason lives
+only in a comment is a MUST somebody eventually relaxes.
+
+But §1.2.1 exempts the configured pre-shared key from that rule, and must: a
+responder that spent the key would refuse its peer's next connection. So in
+pre-shared-key mode nothing answers the replay, and nothing said so.
+[`resumption_replay.rs`](../crates/fectp/tests/resumption_replay.rs) measures
+what follows.
+
+**The finding, and its size.** A captured opening frame replayed in
+pre-shared-key mode is accepted, and delivers its 0-RTT payload again. Each
+copy takes a session, so a party that does **not** hold the key can make a
+responder allocate them — which it otherwise cannot do at all, since it cannot
+author a handshake.
+
+It stops there, and the reason is a design decision that predates this.
+`make_room` evicts by `(spoke, filed)`: the oldest peer that has never sent an
+authenticated frame goes first. A session conjured from a replay never sends
+one, because the attacker cannot. So the replays evict each other, and a peer
+that has spoken survives any number of them. Measured at four times the table's
+capacity, and verified by removing `spoke` from the eviction key and watching
+the honest peer get evicted.
+
+So the exposure is 0-RTT duplication in one mode, plus transient table pressure
+the eviction order already contains. §4.9 now says both, because deriving them
+from two correct sentences in separate sections is not the same as being told.
+
+**Two corrections to my own reasoning, both caught by measuring.**
+
+*The first test replayed from the same address and concluded the frame was
+refused.* It was, but not for a reason that generalises: `repeat_handshake`
+finds the route the first handshake left and resends the cached response.
+Replaying from anywhere else is easier for an attacker, not harder, and that
+version of the test was measuring a defence nobody was attacking.
+
+*Then I expected the replays to evict legitimate peers, and wrote that down
+before checking.* They do not, for the reason above. Reading the eviction key
+would have said so; measuring it said so with a test that now fails if the key
+changes.
+
+**What this is not.** Verifpal exhausted its search at two sessions, which is
+not a proof for unboundedly many; ProVerif and Tamarin are the tools for that
+and neither is run here. The model says nothing about state, which is exactly
+why the replay query fails against a protocol that is not replayable in its
+default mode. It says nothing about the implementation, about timing, or about
+`IK`, which it assumes rather than checks. It is one class of question, asked
+of one handshake, by a tool with known limits, in a model this project wrote
+about its own protocol — and an auditor's value is partly that none of those
+things are true of them.

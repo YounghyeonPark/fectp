@@ -1,0 +1,198 @@
+// FECTP session resumption: Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s, as
+// crates/fectp-core/src/noise/resume.rs implements it.
+//
+// Expected: every query passes except `confidentiality? zero_rtt`, which fails
+// in phase 1 and is meant to.
+//
+// WHAT THIS IS FOR. NNpsk0 is a standard Noise pattern and its security has
+// been analysed in the literature. What has not is the way FECTP reaches it:
+// the pre-shared key is not configured by an operator, it is derived from the
+// chaining key of an earlier Noise_IK handshake, named on the wire by a ticket
+// identifier, and replaced by a fresh one every time a session resumes. That
+// composition is this project's own, so it is the part worth modelling.
+//
+// Every derivation below is transcribed from the code rather than from the
+// module documentation, and the line each one comes from is named. Where the
+// two disagree the code is what ships.
+
+attacker[active]
+
+principal Client[
+	// Public constants. `pname` stands for the protocol name, which the
+	// SymmetricState constructor hashes because FECTP's is 37 bytes and
+	// therefore longer than HASHLEN (symmetric.rs, `new`).
+	knows public pname
+	// header(ResumeInit, session_id) followed by the ticket identifier, in
+	// the clear. session.rs `ResumeInitiator::new` builds this and hands it
+	// to the handshake as the Noise prologue, so the frame type, the
+	// session id and which ticket is being redeemed are all bound into the
+	// transcript.
+	knows public prologue
+	// Verifpal's HKDF takes (salt, ikm, info); Noise's takes (chaining key,
+	// input key material) with the output index as the only separator.
+	// These stand in for that index, so that two derivations from the same
+	// chaining key cannot collide in the model when they do not in the code.
+	knows public hkdf_info
+	// `Split()` feeds HKDF an empty input; `resumption_key()` feeds it a
+	// label. That difference is the whole of the domain separation between
+	// the transport keys and the next resumption key (symmetric.rs).
+	knows public empty
+	knows public resumption_label
+
+	// The pre-shared key: the resumption key an earlier IK handshake left
+	// behind, held by both peers. Modelled as shared private knowledge
+	// because that is what it is — the IK handshake that produced it is a
+	// standard pattern and is not what this model is about.
+	knows private rk
+
+	// 0-RTT data carried with message 1, and the message sent once the
+	// session is up.
+	generates zero_rtt
+	generates transport_msg
+
+	// --- InitializeSymmetric(RESUME_PROTOCOL_NAME) ---
+	ck0 = HASH(pname)
+	h0 = HASH(pname)
+
+	// --- MixHash(prologue) ---
+	h1 = HASH(h0, prologue)
+
+	// --- MixKeyAndHash(psk): the psk0 token, consumed before any other ---
+	// hkdf3 in the code; three outputs, exactly as here.
+	ck1, temp_h, k_psk = HKDF(ck0, rk, hkdf_info)
+	h2 = HASH(h1, temp_h)
+
+	// --- -> e ---
+	// mix_ephemeral_with_psk: MixHash *and* MixKey. The second half is the
+	// one a pre-shared-key pattern requires and that is easy to omit; the
+	// model would still verify without it, which is why interop.rs exists
+	// as well as this file.
+	generates e
+	ge = PUBKEY(e)
+	h3 = HASH(h2, ge)
+	ck2, k_e, _ = HKDF(ck1, ge, hkdf_info)
+
+	// --- EncryptAndHash(payload): transcript is the associated data ---
+	generates n0
+	c0 = AEAD_ENC(k_e, n0, zero_rtt, h3)
+	h4 = HASH(h3, c0)
+]
+
+// Message 1. Nothing is guarded: the ephemeral public key and the ciphertext
+// go over an open network and an active attacker may replace either. What it
+// cannot do is produce a ciphertext that opens, because k_e descends from the
+// pre-shared key.
+Client -> Server: ge, n0, c0
+
+principal Server[
+	knows public pname
+	knows public prologue
+	knows public hkdf_info
+	knows public empty
+	knows public resumption_label
+	knows private rk
+	generates handshake_reply
+
+	// The responder rebuilds the same state from its own copy of the ticket.
+	ck0_s = HASH(pname)
+	h0_s = HASH(pname)
+	h1_s = HASH(h0_s, prologue)
+	ck1_s, temp_h_s, k_psk_s = HKDF(ck0_s, rk, hkdf_info)
+	h2_s = HASH(h1_s, temp_h_s)
+
+	// --- <- e ---
+	h3_s = HASH(h2_s, ge)
+	ck2_s, k_e_s, _ = HKDF(ck1_s, ge, hkdf_info)
+
+	// --- DecryptAndHash. Checked: a responder that cannot open message 1
+	// stops, which is what read_message_1 does by returning an error.
+	zero_rtt_dec = AEAD_DEC(k_e_s, n0, c0, h3_s)?
+	h4_s = HASH(h3_s, c0)
+
+	// --- -> e (the responder's own) ---
+	generates f
+	gf = PUBKEY(f)
+	h5 = HASH(h4_s, gf)
+	ck3, k_f, _ = HKDF(ck2_s, gf, hkdf_info)
+
+	// --- -> ee: the one and only Diffie-Hellman in this handshake ---
+	ee = DH_KEX(ge, f)
+	ck4, k_ee, _ = HKDF(ck3, ee, hkdf_info)
+
+	generates n1
+	c1 = AEAD_ENC(k_ee, n1, handshake_reply, h5)
+	h6 = HASH(h5, c1)
+
+	// --- Split(): HKDF over an empty input ---
+	ts_c2s, ts_s2c, _ = HKDF(ck4, empty, hkdf_info)
+	// --- The key the *next* resumption will use, from the same chaining
+	// key but a different input. Because ck4 absorbed the ee exchange, this
+	// is not computable from rk alone.
+	next_rk_s, _, _ = HKDF(ck4, resumption_label, hkdf_info)
+]
+
+Server -> Client: gf, n1, c1
+
+principal Client[
+	h5_c = HASH(h4, gf)
+	ck3_c, k_f_c, _ = HKDF(ck2, gf, hkdf_info)
+	ee_c = DH_KEX(gf, e)
+	ck4_c, k_ee_c, _ = HKDF(ck3_c, ee_c, hkdf_info)
+	reply_dec = AEAD_DEC(k_ee_c, n1, c1, h5_c)?
+	h6_c = HASH(h5_c, c1)
+
+	ts_c2s_c, ts_s2c_c, _ = HKDF(ck4_c, empty, hkdf_info)
+	next_rk_c, _, _ = HKDF(ck4_c, resumption_label, hkdf_info)
+
+	// One transport frame, so the queries have something post-handshake to
+	// talk about.
+	generates n2
+	t0 = AEAD_ENC(ts_c2s_c, n2, transport_msg, h6_c)
+]
+
+Client -> Server: n2, t0
+
+principal Server[
+	transport_dec = AEAD_DEC(ts_c2s, n2, t0, h6)?
+]
+
+// Forward secrecy. The resumption key is long-lived: a constrained device
+// writes it to flash so that a reboot need not pay four Diffie-Hellman
+// operations again, which means it is exactly the kind of secret that is
+// stolen later. resume.rs claims that stealing it does not open a recorded
+// session. Phase 1 is after the fact: anything leaked here cannot be used to
+// interfere with the exchange above, only to try to decrypt it.
+phase[1]
+
+principal Client[
+	leaks rk
+]
+
+queries[
+	// The responder's handshake payload and the transport message are both
+	// protected by the ee exchange, so an attacker holding rk still needs an
+	// ephemeral private key, and those are discarded. This is the claim the
+	// module documentation makes; these two queries are what test it.
+	confidentiality? handshake_reply
+	confidentiality? transport_msg
+
+	// The 0-RTT payload is NOT expected to survive. It is encrypted under a
+	// key descending from the pre-shared key alone — no ephemeral has been
+	// mixed in on the sending side yet — so whoever later obtains rk and has
+	// a recorded frame can open it. resume.rs says so in `write_message_1`
+	// and SPEC 4 says so for the IK case; this query failing in phase 1 is
+	// the model agreeing, not the model finding a bug.
+	confidentiality? zero_rtt
+
+	// Authentication comes entirely from the pre-shared key: there are no
+	// static keys anywhere in this pattern. An attacker that does not hold
+	// rk cannot make either side accept a frame.
+	authentication? Client -> Server: c0
+	authentication? Server -> Client: c1
+	authentication? Client -> Server: t0
+
+	// The chain. If rk is stolen, the key the *next* resumption would use
+	// must not fall with it — otherwise one theft compromises every session
+	// that follows, and the chaining would be worse than useless.
+	confidentiality? next_rk_c
+]
