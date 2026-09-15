@@ -102,6 +102,30 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
 
+  miri:
+    name: undefined behaviour in the C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # `fectp-core` and `fectp` carry `#![forbid(unsafe_code)]`; `crates/ffi`
+      # cannot, because raw pointers and caller-chosen lengths are what a C ABI
+      # is. That crate is the whole of this project's own `unsafe`, and the
+      # tests there cannot see a fault that does not change an answer: a slice
+      # built one byte too long and then trimmed passes all six of them and is
+      # undefined behaviour. Miri names the line.
+      #
+      # Pinned rather than plain `nightly`. An advisory job that starts failing
+      # on its own is doing its job; a Miri job that does is noise, because the
+      # cause is a toolchain this repository did not change. Bump the date
+      # deliberately.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-15
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: the C ABI under Miri
+        run: cargo miri test -p fectp-ffi --test c_abi
+
   # Everything else calls the C ABI from Rust, through the compiler that built
   # it — which cannot catch a wrong calling convention, a mistaken pointer
   # width, or a signature a foreign caller has to guess. Those are the faults a

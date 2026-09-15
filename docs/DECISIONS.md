@@ -3484,3 +3484,53 @@ frame is *sent*, which is the figure D66 correctly used for a different purpose
 and which had been copied into a sentence about giving up. And
 `exchange_handshake` still said an absent peer is reported "in five seconds"
 after D66 made it ten.
+
+## D72 — Miri on the C ABI, because the tests there cannot see a fault that changes no answer
+
+**Problem.** An external security audit is not going to happen. That is a
+constraint rather than a decision, and it leaves
+[D65](#d65--publishable-and-not-published-until-it-has-been-audited) gating on a
+condition nothing will satisfy. What it does not change is that the assurance
+worth having can still be built, and the cheapest of it was missing.
+
+`crates/ffi` is the only place in this workspace that cannot carry
+`#![forbid(unsafe_code)]` — 668 lines with 48 `unsafe` sites, because raw
+pointers and caller-chosen lengths are what a C ABI is (D68). Its six tests
+check what the functions return. They cannot check whether getting there was
+undefined behaviour.
+
+**Decision.** CI runs `cargo miri test -p fectp-ffi --test c_abi`.
+
+**Demonstrated, not assumed.** Building the input slice one byte too long and
+then trimming it to the right length is undefined behaviour — `from_raw_parts`
+requires the whole range to be valid — and every byte the code goes on to read
+is in bounds, so nothing observable changes. All six tests pass. Miri stops at
+`lib.rs:180` and calls it a dangling reference going beyond the bounds of its
+allocation.
+
+That is the argument for the job in one experiment: the fault is exactly the
+shape a C ABI gets wrong, the existing tests are blind to it, and the tool is
+not.
+
+The first attempt at that experiment was worse and is worth recording. Reading
+`len + 1` bytes *and using them* broke three tests immediately, because the
+extra byte goes into the AEAD and authentication fails. A break that the tests
+catch proves nothing about the tool. The demonstration needed a fault that was
+undefined and silent, which took a second attempt.
+
+**Pinned nightly.** `nightly-2026-09-15`, not plain `nightly`. The advisory job
+(`audit.yml`) starting to fail with no code change is the whole point of it; a
+Miri job doing the same is noise, because the cause is a toolchain this
+repository did not choose. Bump the date deliberately.
+
+**Scope, and what it is not.** The FFI crate only. Running the core's tests
+under Miri would exercise `x25519-dalek` and `chacha20poly1305`'s internals
+rather than anything written here, at a cost measured in minutes per run — 221
+seconds for six FFI tests on this machine, and the crypto is far heavier. The
+core is `forbid(unsafe_code)`; there is no undefined behaviour for Miri to find
+in it that is this project's to fix.
+
+And Miri is not an audit. It checks one class of fault — memory and aliasing
+inside Rust's model — on one crate, along the paths six tests happen to take.
+It says nothing about the protocol, the key schedule, or the resumption
+handshake, which is where the risk actually is.

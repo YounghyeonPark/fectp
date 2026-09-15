@@ -18,7 +18,12 @@
 //! cannot: raw pointers, lengths chosen by the caller and lifetimes the
 //! compiler cannot see are what a C ABI *is*. So the safety argument stops
 //! being "the compiler proved it" and starts being "this file is short, every
-//! `unsafe` block is one of three shapes, and each says what it assumes".
+//! `unsafe` block is one of three shapes, each says what it assumes, and Miri
+//! runs the tests in CI".
+//!
+//! That last part is not decoration. The tests here cannot see a fault that
+//! does not change an answer: a slice built one byte too long and then trimmed
+//! passes all six of them, and is undefined behaviour. Miri names the line.
 //!
 //! **The secret never crosses.** [`fectp_identity`] is opaque and has no
 //! accessor for the private key — not a discouraged one, an absent one. The
