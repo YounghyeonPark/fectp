@@ -1,0 +1,66 @@
+name: Fuzz
+
+# Separate from ci.yml, and on a clock rather than on every push. A fuzzer's
+# value is in the hours it runs, not in the seconds a pull request can spare,
+# and its result is not a function of the commit: the same code passes today
+# and fails tomorrow because the fuzzer got further. That is the point, and it
+# is the same reason audit.yml lives on its own.
+#
+# It is not run on the developer machine this was written on. libFuzzer needs
+# a sanitizer runtime that does not link on Windows, so these targets were
+# type-checked locally and are exercised here. `handshake_mutation.rs` is what
+# covers the same entry points on every platform, every push, without a
+# coverage-guided fuzzer — see its module documentation for what that trade
+# costs.
+
+on:
+  schedule:
+    # Sunday night, so a find is waiting on Monday morning.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each target"
+        required: false
+        default: "300"
+  push:
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - handshake-init
+          - handshake-response
+          - resume-init
+          - session-open
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # Pinned for the reason the Miri job is: a nightly that breaks on its
+          # own is noise here, not a signal about this code.
+          toolchain: nightly-2026-09-15
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ github.event.inputs.seconds || 120 }} \
+            -rss_limit_mb=4096
+      # A crash is the whole reason this runs. Keeping the input means the next
+      # step is reproducing it rather than trying to make it happen again.
+      - name: keep whatever crashed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

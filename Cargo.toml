@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/fectp-core", "crates/fectp", "crates/ffi", "crates/bench"]
-exclude = ["crates/footprint"]
+# `fuzz` needs nightly and libFuzzer; a member would drag both into every build.
+exclude = ["crates/footprint", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"

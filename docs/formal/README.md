@@ -126,6 +126,34 @@ instead of building a second session. The first version of the test replayed
 from the same address, concluded the frame was refused, and was measuring the
 wrong thing.
 
+## Alongside it: fuzzing
+
+Two things, because one machine could not run the other.
+
+`crates/fectp-core/tests/handshake_mutation.rs` starts from a **real** handshake
+frame and breaks it — a byte set, a truncation, an extension, a swap — and
+feeds it back to the reader that would have accepted the original.
+`malformed_input.rs` throws arbitrary bytes at the same readers already; what
+it cannot do is get anywhere, because a random hundred bytes fails the header
+check and stops. This runs on every platform on every push and needs no tooling
+that is not already here.
+
+`fuzz/` holds libFuzzer targets for the four surfaces a stranger reaches
+unauthenticated, run weekly by `.github/workflows/fuzz.yml`. They are **not**
+run on the machine this was written on: libFuzzer needs a sanitizer runtime
+that does not link on Windows, so they were type-checked locally and are
+exercised in CI. That is worth stating rather than implying, because "there are
+fuzz targets" and "the fuzzer has run" are different claims.
+
+The mutation tests found something on their first run, and it was the test's
+fault rather than the code's, which is the useful kind. The property as first
+written — every byte of a handshake frame is either ciphertext or prologue —
+holds for message 1 and not for message 2: the reply's header is not a
+prologue, and its sequence field and known flag bits are neither compared nor
+authenticated. Nothing reads them on that path, so it costs nothing today.
+`a_reply_does_not_authenticate_its_sequence_or_its_known_flag_bits` pins the
+exact set, so that a change which gave those bytes a meaning fails there first.
+
 ## What the model cannot say
 
 - **Bounded search.** Verifpal exhausted its search at two sessions. A property

@@ -1,0 +1,49 @@
+# Fuzz targets for the surfaces an unauthenticated stranger reaches.
+#
+# Outside the workspace on purpose: it needs nightly and libFuzzer, and a
+# workspace member would drag both into every ordinary `cargo build`.
+[package]
+name = "fectp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `session_open` builds a real handshake per input, which needs an RNG.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[dependencies.fectp-core]
+path = "../crates/fectp-core"
+features = ["std"]
+
+[[bin]]
+name = "handshake-init"
+path = "fuzz_targets/handshake_init.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake-response"
+path = "fuzz_targets/handshake_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resume-init"
+path = "fuzz_targets/resume_init.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session-open"
+path = "fuzz_targets/session_open.rs"
+test = false
+doc = false
+bench = false
