@@ -73,6 +73,21 @@ psk = BLAKE2s-256("fectp/1 psk" || secret)
 resumption ticket, which MUST be. It is long-lived by definition; a responder
 that spent it would refuse the peer's next connection.
 
+That exemption removes the only thing answering replay, and nothing replaces
+it. §4.9 explains why the handshake itself cannot: message 1 is accepted before
+the responder has contributed anything to it. So a captured message 1 replayed
+from an address the responder has not already filed a session against is
+accepted again, with two consequences:
+
+- Its 0-RTT payload reaches the application a second time. A caller MUST treat
+  0-RTT data in this mode as replayable without limit, beyond the caveats of
+  §4.4.1, and MUST NOT carry anything whose repetition matters.
+- Each copy costs a session, so a party that does **not** hold the key can make
+  a responder allocate them — which it cannot otherwise do at all, since it
+  cannot author a handshake. A responder MUST bound its session table (§7) and
+  SHOULD evict sessions that have never carried an authenticated frame before
+  those that have, or replayed copies displace working peers.
+
 A pre-shared key is symmetric: every holder can impersonate every other holder.
 It is appropriate within one administrative domain and inappropriate across
 several, where public-key mode gives each peer a distinct identity.
@@ -499,23 +514,10 @@ material and MUST be stored as such.
 
 Nor does the handshake itself resist replay. Message 1 is accepted before the
 responder has contributed anything to it, so nothing in the cryptography
-distinguishes a first copy from a second; the single-use rule of §4.6 is what
+distinguishes a first copy from a second. The single-use rule of §4.6 is what
 answers that, and it is a rule about a responder's state rather than a property
-of the construction. A responder MUST NOT rely on the handshake for it.
-
-**In pre-shared-key mode (§1.2.1) that rule is not in force**, because the
-configured key MUST NOT be consumed. A captured message 1 replayed from an
-address the responder has not already filed a session against is therefore
-accepted again, which has two consequences an implementer needs stated rather
-than derived:
-
-- its 0-RTT payload reaches the application a second time, so a caller MUST
-  treat 0-RTT data in this mode as replayable without limit, and MUST NOT carry
-  anything whose repetition matters;
-- each copy costs a session, so a party that does **not** hold the key can make
-  a responder allocate them. A responder MUST bound its session table (§7) and
-  SHOULD evict sessions that have never carried an authenticated frame before
-  those that have, or replayed copies displace working peers.
+of the construction — which is why §1.2.1, where that rule does not apply, has
+to answer it differently.
 
 ## 5. Data frames
 
@@ -1104,6 +1106,8 @@ A conforming implementation MUST:
     and MUST NOT be consumed (§1.2.1).
 12. Run exactly one security mode per session, and never offer a choice
     between them on the wire (§1.2).
+12. Bound the session table, and in pre-shared-key mode expect a replayed
+    opening frame to reach it (§1.2.1).
 13. Apply `MixKey` as well as `MixHash` to ephemeral public keys in the
     resumption pattern (§4.7).
 

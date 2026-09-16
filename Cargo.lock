@@ -244,7 +244,6 @@ dependencies = [
  "proptest",
  "rand_core 0.6.4",
  "snow",
- "subtle",
  "x25519-dalek",
  "zeroize",
 ]

@@ -658,7 +658,7 @@ impl Endpoint {
             }
             Mode::Psk(psk) => {
                 let mut initiator = ResumeInitiator::new(
-                    *psk,
+                    psk.clone(),
                     fectp_core::ANONYMOUS,
                     session_id,
                     caps,
@@ -1221,7 +1221,7 @@ impl Endpoint {
         // resumption ticket is spent when redeemed, so that a captured
         // resumption request cannot be replayed.
         let configured = match &self.mode {
-            Mode::Psk(psk) if psk.id() == &id => Some((*psk, fectp_core::ANONYMOUS)),
+            Mode::Psk(psk) if psk.id() == &id => Some((psk.clone(), fectp_core::ANONYMOUS)),
             _ => None,
         };
         let (ticket, remote_static) = match configured {

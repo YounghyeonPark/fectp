@@ -187,6 +187,19 @@ WORDS = {
 }
 
 
+def as_number(word: str) -> int:
+    """A count written either as a word or in digits.
+
+    The first COUNTED entry spelled its numbers out and the second did not,
+    which this did not handle — it reported "says 34 ... the source has 34" as a
+    disagreement. A guard whose failure message contradicts itself is worse than
+    no guard, because it teaches the reader to disbelieve the next one.
+    """
+    if word.isdigit():
+        return int(word)
+    return WORDS.get(word.lower(), -1)
+
+
 def outside_tests(text: str) -> str:
     """The source with `#[cfg(test)]` items removed, by brace matching."""
     out, i = [], 0
@@ -209,6 +222,21 @@ def outside_tests(text: str) -> str:
     return "".join(out)
 
 
+def ffi_lines() -> int:
+    """Lines in the one file that carries this project's `unsafe`."""
+    return len((ROOT / "crates" / "ffi" / "src" / "lib.rs").read_text(encoding="utf-8").splitlines())
+
+
+def ffi_unsafe_blocks() -> int:
+    """`unsafe {` blocks in it.
+
+    Counted as blocks rather than by grepping for the word: the first attempt
+    at this number was 48, which is what `grep -c unsafe` returns and includes
+    four lines of prose and a lint attribute.
+    """
+    return (ROOT / "crates" / "ffi" / "src" / "lib.rs").read_text(encoding="utf-8").count("unsafe {")
+
+
 def expect_sites(crate: str) -> int:
     """`.expect(` in a crate's own source, not counting its tests."""
     total = 0
@@ -221,6 +249,15 @@ COUNTED = [
     # The one that drifted. A binding turns any of these into the host
     # interpreter dying, so the number is the argument for `catch_unwind` at
     # every entry point, and it is worth keeping true.
+    # The C ABI's size, which two documents state and which went stale within a
+    # day of being written: the Miri commit added five lines to the file whose
+    # length the same sentence cites.
+    (
+        "docs/OTHER-LANGUAGES.md",
+        "it is ([0-9]+) lines with ([0-9]+) `unsafe` blocks",
+        lambda: (ffi_lines(), ffi_unsafe_blocks()),
+        "lines and `unsafe` blocks in crates/ffi/src/lib.rs",
+    ),
     (
         "docs/OTHER-LANGUAGES.md",
         "`fectp` has ([a-z]+) `expect` sites outside its tests, "
@@ -243,7 +280,7 @@ def counted_claims() -> list[str]:
                 f"the entry -- an unchecked count is how this one drifted."
             )
             continue
-        claimed = tuple(WORDS.get(g.lower(), -1) for g in match.groups())
+        claimed = tuple(as_number(g) for g in match.groups())
         actual = count()
         if claimed != actual:
             problems.append(

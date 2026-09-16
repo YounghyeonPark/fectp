@@ -120,7 +120,7 @@ reintroduces exactly what the core excludes, and the memory-safety argument
 covers the protocol but not the doorway.
 
 Unavoidable. What narrows it is that `crates/ffi` is the only place in this
-workspace where that happens, it is 668 lines, and CI runs its tests under Miri
+workspace where that happens, it is 673 lines with 34 `unsafe` blocks, and CI runs its tests under Miri
 — which sees undefined behaviour the tests cannot, because a fault that changes
 no answer passes every one of them (D72). A hand-written binding in another
 language has none of that, which is the argument for going through this crate

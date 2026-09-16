@@ -107,11 +107,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # `fectp-core` and `fectp` carry `#![forbid(unsafe_code)]`; `crates/ffi`
-      # cannot, because raw pointers and caller-chosen lengths are what a C ABI
-      # is. That crate is the whole of this project's own `unsafe`, and the
-      # tests there cannot see a fault that does not change an answer: a slice
-      # built one byte too long and then trimmed passes all six of them and is
+      # `fectp-core` and `fectp` carry `#![forbid(unsafe_code)]` — the second
+      # of those only since D75, which found the claim had been made in three
+      # documents before the attribute existed. `crates/ffi` cannot carry it,
+      # because raw pointers and caller-chosen lengths are what a C ABI is.
+      # That crate is the whole of this project's own `unsafe`, and the tests
+      # there cannot see a fault that does not change an answer: a slice built
+      # one byte too long and then trimmed passes all six of them and is
       # undefined behaviour. Miri names the line.
       #
       # Pinned rather than plain `nightly`. An advisory job that starts failing

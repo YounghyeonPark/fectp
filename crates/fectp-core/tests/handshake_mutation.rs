@@ -223,7 +223,7 @@ proptest! {
     ) {
         let ticket = fectp_core::session::preshared_key(b"a configured secret");
         let mut initiator =
-            ResumeInitiator::new(ticket, fectp_core::ANONYMOUS, SESSION_ID, caps())
+            ResumeInitiator::new(ticket.clone(), fectp_core::ANONYMOUS, SESSION_ID, caps())
                 .expect("resume initiator");
         let mut frame = vec![0u8; ResumeInitiator::OVERHEAD + ZERO_RTT.len()];
         let n = initiator

@@ -3668,3 +3668,95 @@ Nothing in this repository establishes that, and D72 and D73 both say so in
 their own terms. It is a decision that a `0.x` crate with an accurate, prominent
 disclosure is a better thing to exist than a repository nobody can depend on,
 taken with the counter-argument written down beside it.
+
+## D75 — What an audit of the threat model found, including two things that were not true
+
+**Problem.** [THREAT-MODEL.md](THREAT-MODEL.md) was written to say what this
+protocol claims and what it does not. A document of claims written by the same
+party that wrote the claims is worth less than it looks, so it was audited
+against the code before being committed. Fourteen findings came back. Every one
+was reproduced here before being acted on; two were defects rather than wording.
+
+**`crates/fectp` did not forbid `unsafe`, and three documents said it did.**
+The crate carried `#![warn(missing_docs)]` and nothing else. It contains no
+`unsafe` today, so the property held by accident — which is exactly the state
+that ends quietly. `#![forbid(unsafe_code)]` is now on it, and the crate built
+unchanged, which is the evidence that the accident was real. The sentence was
+in the crate documentation, in OTHER-LANGUAGES.md and in a CI comment.
+
+**Resumption keys and configured pre-shared keys were never wiped.** SPEC §7
+item 15 names them explicitly — "resumption keys and configured pre-shared keys
+included" — and nothing implemented it. `ResumptionTicket` was `Copy`, which
+makes a destructor impossible, and `Session` held a bare `[u8; 32]`. A
+responder holds up to 256 tickets at once and a pre-shared-key endpoint holds
+its configured key in one.
+
+This is D67 again: that found the long-term X25519 secret unwiped, and this is
+the rest of the same sentence. `Copy` is gone from `ResumptionTicket` — the
+wrong derive for key material regardless, since it duplicates silently and
+leaves copies nothing will ever wipe — and both it and `Session` now zeroize on
+drop. Three call sites moved to `clone()`. Two tests read a dropped value's
+bytes, as D67's do; both failed before the change and are verified by removing
+each wipe in turn.
+
+**Two things the document did not mention, and one number that was wrong about
+the thing it measured.**
+
+*A first contact's address is never validated.* Path validation (§5.8) is about
+a session that **moves**. `accept_full` sends the reply to the source address
+on message 1, files the session there and hands the 0-RTT payload up, none of
+it waiting for that address to prove anything, and a UDP source address is
+whatever the sender wrote. [D57](#d57--one-datagram-in-must-not-buy-a-stream-out)
+settled the neighbouring case for keep-alives; `Endpoint::send` was not part of
+it.
+
+The audit called the application's answer "unbounded by anything here".
+Measured, that is wrong for an unreliable send and an understatement for a
+reliable one: `send` is capped at one frame by what the peer advertised, so it
+cannot amplify past one datagram — but `send_reliable` of 64 KiB to an address
+that never acknowledges turned **136 bytes in into 28,870 bytes out over twelve
+seconds**, a factor of 212, because retransmission keeps trying. The guidance
+that follows is about the application's shape, not the protocol's, and is in
+the threat model.
+
+*The compression side channel was absent.* With coding on — by default at 32
+bytes, and Zstandard at 1024 with the feature — a frame's length follows the
+payload's *content*. SPEC §6.5 and D6 both treat per-payload independence as a
+security property; the threat model said nothing about compression at all.
+
+**Eleven citation and precision errors**, each verified and corrected: the
+replay window is specified in §5.1 and not §5.2; the memory bounds are not in
+§8, and the constant that answers "a peer cannot force unbounded memory" is
+`MAX_REASSEMBLIES`, not the send-side `MAX_QUEUED`; `forged_frames.rs` is about
+crediting rather than confidentiality and was cited for both; the peer and
+handshake-rate limits are defaults a caller can raise; the event queue is
+unbounded, though only the local application grows it; `Identity::secret` exists
+on the Rust front end, so "no binding can leak a private key" needed its scope
+said; the reply's malleable set is eight bytes and four bits of a ninth, not
+nine bytes; `Instant` cannot step backwards, so the assumption about clocks
+named a failure that cannot happen and missed the one that can, which is
+suspend; and the dependency count fell from six to five when `subtle` was
+removed for being declared and never called — a crypto crate declaring it reads
+as a claim to do constant-time work of its own, and this one does none.
+
+**The C ABI's size is now a counted claim.** It was stated as "668 lines with
+48 `unsafe` sites" in two documents. 668 went stale the day it was written, by
+the commit that the same sentence cites. 48 is what `grep -c unsafe` returns
+and includes four lines of prose and a lint attribute. The real numbers are 673
+lines and 34 `unsafe` blocks — and 34, not the 28 a first recount gave, because
+`grep -c` counts lines and three lines hold two blocks each.
+
+`check-claims.py` now counts both, the way it counts `expect` sites (D64's
+successor mechanism). Adding it exposed a defect in the guard itself: it read
+numbers spelled as words and not as digits, so it reported "says 34 … the
+source has 34" as a disagreement. A guard whose failure message contradicts
+itself teaches the reader to disbelieve the next one, so that is fixed too, and
+the new claim is verified by drifting it.
+
+**What the audit confirmed**, which is most of the document: every cited test
+function exists and tests what its row claims, every decision record supports
+what is drawn from it, every SPEC section says what is attributed to it, every
+numeric constant matches, padding really is off by default, and no code in this
+repository does a constant-time comparison — the one secret-adjacent byte
+compare written here is a path-challenge token, which is consistent with the
+confession rather than a counterexample to it.

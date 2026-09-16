@@ -2,6 +2,8 @@
 
 use rand_core::{CryptoRng, RngCore};
 
+use zeroize::Zeroize;
+
 use crate::error::{Error, Result};
 use crate::frame::{FrameType, Header, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN};
 use crate::keys::{Keypair, PublicKey};
@@ -294,6 +296,15 @@ pub struct Session {
     remote_static: PublicKey,
     padding: bool,
     resumption_key: [u8; PSK_LEN],
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The transport ciphers wipe themselves; this is the one piece of key
+        // material the session holds in the clear, kept so that
+        // `resumption_ticket` can be asked at any point in the session's life.
+        self.resumption_key.zeroize();
+    }
 }
 
 impl Session {
@@ -983,10 +994,24 @@ const TICKET_ID_LABEL: &[u8] = b"fectp/1 ticket-id";
 /// the clear — a responder has to know which key to try before it can decrypt
 /// anything — but it is one-way derived, so it discloses nothing about the key
 /// and is bound into the transcript by the prologue.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResumptionTicket {
     id: [u8; TICKET_ID_LEN],
     key: [u8; PSK_LEN],
+}
+
+/// Wipes the key when the ticket goes.
+///
+/// `Copy` was removed to make this possible, and it was the wrong derive for
+/// this type regardless: a `Copy` secret is duplicated by every assignment,
+/// silently, leaving copies nothing will ever wipe. SPEC 7 item 15 names
+/// resumption keys and configured pre-shared keys; a responder holds up to
+/// `MAX_TICKETS` of these and a pre-shared-key endpoint holds its configured
+/// key in one.
+impl Drop for ResumptionTicket {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
 }
 
 impl ResumptionTicket {

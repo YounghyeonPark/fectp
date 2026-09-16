@@ -83,6 +83,12 @@
 //! standing lists are `README.md` and the gaps table in `docs/DECISIONS.md`,
 //! and this paragraph is the summary of them rather than a separate claim.
 
+// Nothing here needs raw pointers, and the claim that the layers above the C
+// ABI carry this was made in several documents before the attribute existed —
+// the crate happened to contain no `unsafe`, which is not the same as refusing
+// it. `crates/ffi` is the one crate that cannot have this, for the reasons its
+// own module documentation gives.
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod compress;
@@ -594,7 +600,7 @@ impl Core {
         let mut scratch = vec![0u8; size];
 
         let mut initiator = ResumeInitiator::new(
-            *ticket,
+            ticket.clone(),
             *peer_public,
             OsRng.next_u32(),
             local_capabilities(),

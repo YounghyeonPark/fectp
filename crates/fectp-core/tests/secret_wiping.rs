@@ -22,6 +22,8 @@
 use core::mem::{size_of, ManuallyDrop};
 
 use fectp_core::keys::Keypair;
+use fectp_core::session::{Capabilities, Initiator, Responder, ResumptionTicket};
+use rand_core::OsRng;
 
 /// The bytes of `value`, then the bytes of the same memory after dropping it.
 ///
@@ -117,5 +119,89 @@ fn a_generated_secret_is_wiped_too() {
         checked > 16,
         "only {checked} secret bytes were examined, which is too few for this \
          to be testing anything — the layout assumption is wrong"
+    );
+}
+
+/// A resumption key is wiped when the ticket holding it is dropped.
+///
+/// SPEC §7 item 15 names these explicitly — "resumption keys and configured
+/// pre-shared keys included" — and they were the half of that sentence nothing
+/// implemented. A ticket authenticates a later handshake, a responder holds up
+/// to 256 of them at once, and in pre-shared-key mode the same type carries the
+/// configured key, which is long-lived and symmetric. D67 was this exact
+/// finding about the static key; this is the rest of it.
+#[test]
+fn a_resumption_key_is_wiped_when_its_ticket_is_dropped() {
+    let mut key = [0u8; 32];
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = 0xC0 ^ (i as u8);
+    }
+
+    let (before, after) = bytes_around_drop(ResumptionTicket::from_key(key));
+
+    let at = find(&before, &key).expect(
+        "the key is not in the ticket's own bytes, so this test is looking in \
+         the wrong place and would pass whatever happened on drop",
+    );
+
+    assert!(
+        after[at..at + key.len()].iter().all(|&b| b == 0),
+        "a resumption key survived the drop of its ticket. A responder holds up \
+         to 256 of these and a pre-shared-key endpoint holds its configured key \
+         in one, so this is key material left in memory that will be reused, \
+         swapped, or written to a core dump. Found at offset {at}: {:02x?}",
+        &after[at..at + key.len()]
+    );
+}
+
+/// And when the session that derived it is dropped.
+///
+/// The session keeps its own copy so that `resumption_ticket()` can be called
+/// at any point in the session's life, which means the key outlives every
+/// ticket handed out from it.
+#[test]
+fn a_session_wipes_the_resumption_key_it_holds() {
+    let server_key = Keypair::from_secret([0x22; 32]);
+    let server_public = *server_key.public();
+    let mut initiator = Initiator::new(
+        Keypair::from_secret([0x11; 32]),
+        server_public,
+        1,
+        Capabilities::minimal(1200),
+    )
+    .expect("initiator");
+    let mut responder = Responder::new(server_key, Capabilities::minimal(1200));
+
+    let mut msg1 = vec![0u8; Initiator::OVERHEAD + 16];
+    let n = initiator
+        .write_init(&mut OsRng, &[], &mut msg1)
+        .expect("message 1");
+    let mut staging = vec![0u8; msg1.len()];
+    responder
+        .read_init(&msg1[..n], &mut staging)
+        .expect("read message 1");
+    let mut msg2 = vec![0u8; Responder::OVERHEAD + 16];
+    let (server, n2) = responder
+        .write_response(&mut OsRng, &[], &mut msg2)
+        .expect("message 2");
+    let mut reply = vec![0u8; msg2.len()];
+    let (client, _) = initiator
+        .read_response(&msg2[..n2], &mut reply)
+        .expect("read message 2");
+
+    // Both sides derive the same key, so either one proves the property; the
+    // ticket is taken first because a dropped session cannot be asked.
+    let key = *client.resumption_ticket().key();
+    drop(client);
+
+    let (before, after) = bytes_around_drop(server);
+    let at = find(&before, &key).expect(
+        "the resumption key is not in the session's own bytes, so this test is \
+         looking in the wrong place",
+    );
+    assert!(
+        after[at..at + key.len()].iter().all(|&b| b == 0),
+        "a session's resumption key survived its drop. Found at offset {at}: {:02x?}",
+        &after[at..at + key.len()]
     );
 }
