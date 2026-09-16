@@ -17,11 +17,17 @@ cargo build --release --features baseline && python size.py   # the same image, 
 
 | | flash |
 |---|---|
-| full protocol | 23,888 bytes |
+| full protocol | 23,932 bytes |
 | baseline | 36 bytes |
-| **FECTP** | **23,852 bytes (23.3 KiB)** |
+| **FECTP** | **23,896 bytes (23.3 KiB)** |
 
 The estimate was five times too pessimistic.
+
+Both figures move when the protocol does, and the decision records keep the
+value each was measured at rather than the value today: 23,608 before D67 added
+the long-term secret's wipe, 23,852 after it, and 23,896 since D75 added the
+same for resumption keys and the session's copy of one. Forty-four bytes for
+that, on a part where the whole protocol is 9% of the flash.
 
 ## How it is measured
 

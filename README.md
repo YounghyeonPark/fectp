@@ -375,12 +375,16 @@ messages outright while 179 tests passed, and injecting jitter later found
 another that reported *success* for a message it had given up on, while 304
 did. That is the honest measure of what testing alone catches.
 
-**Not on crates.io, deliberately.** Both crates are ready to publish and are
-being held until that review happens — the reasoning, and what the wait costs,
-are in [D65](docs/DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
-Build it from this repository in the meantime.
+**On crates.io, unaudited, deliberately.** `fectp` and `fectp-core` are
+published at `0.1.0`. [D65](docs/DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited)
+held them back for a review, and [D74](docs/DECISIONS.md#d74--published-unaudited-with-the-disclosure-moved-to-where-it-is-read)
+reversed that when the review was decided against — with D65's argument kept
+beside it rather than rewritten. What replaces the gate is where the disclosure
+sits: in the crate description crates.io shows in search results, and as a
+warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
+the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 325 of them and they pass. Linked for
+`cargo test --workspace` runs 344 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.3 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.

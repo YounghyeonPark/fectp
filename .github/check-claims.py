@@ -237,6 +237,36 @@ def ffi_unsafe_blocks() -> int:
     return (ROOT / "crates" / "ffi" / "src" / "lib.rs").read_text(encoding="utf-8").count("unsafe {")
 
 
+def workspace_tests() -> int:
+    """Tests `cargo test --workspace` runs.
+
+    Counted by running them, which is slower than the rest of this file and is
+    the only honest way: the number is the sum of what each binary reports, and
+    nothing static predicts it. README has carried three different values for
+    this, each correct when written.
+    """
+    import re
+    import subprocess
+
+    done = subprocess.run(
+        ["cargo", "test", "--workspace"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    # A run that did not finish reports a partial sum, and comparing that to the
+    # document says the document is wrong when it is not. This guard has already
+    # done that once, reporting 87 against a true 344 because the run was cut
+    # short. Raise instead, so the failure names itself.
+    if done.returncode != 0:
+        raise RuntimeError(
+            "`cargo test --workspace` did not succeed, so the count cannot be "
+            "taken and nothing can be said about what README claims. Fix the "
+            "tests first. Tail of the run:\n" + done.stdout[-2000:]
+        )
+    return sum(int(n) for n in re.findall(r"^test result: ok\. (\d+) passed", done.stdout, re.M))
+
+
 def expect_sites(crate: str) -> int:
     """`.expect(` in a crate's own source, not counting its tests."""
     total = 0
@@ -249,6 +279,13 @@ COUNTED = [
     # The one that drifted. A binding turns any of these into the host
     # interpreter dying, so the number is the argument for `catch_unwind` at
     # every entry point, and it is worth keeping true.
+    # The count README states, which has been wrong twice.
+    (
+        "README.md",
+        r"`cargo test --workspace` runs ([0-9]+) of them",
+        lambda: (workspace_tests(),),
+        "tests run by `cargo test --workspace`",
+    ),
     # The C ABI's size, which two documents state and which went stale within a
     # day of being written: the Miri commit added five lines to the file whose
     # length the same sentence cites.
@@ -281,7 +318,11 @@ def counted_claims() -> list[str]:
             )
             continue
         claimed = tuple(as_number(g) for g in match.groups())
-        actual = count()
+        try:
+            actual = count()
+        except RuntimeError as why:
+            problems.append(f"{where}: cannot check {what} -- {why}")
+            continue
         if claimed != actual:
             problems.append(
                 f"{where}: says {', '.join(match.groups())} {what}; the source "

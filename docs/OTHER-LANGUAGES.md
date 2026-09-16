@@ -193,9 +193,11 @@ specification-shaped README.
 In order, because each one makes the next worth doing:
 
 1. **An audit.** Binding an unaudited core into five languages spreads it
-   further, not thinner.
-2. **Versioning and a release.** Not on crates.io, no version policy. A binding
-   pinned to an unversioned dependency has nothing to pin to.
+   further, not thinner. **Decided against** (D74), which is not the same as
+   done: what stands in its place is a disclosure where it is read, a threat
+   model, a symbolic model of the resumption handshake, and Miri over the C ABI.
+2. **Versioning and a release.** **Done**: `fectp` and `fectp-core` are on
+   crates.io at `0.1.0`, so a binding now has a version to pin to.
 3. **Test vectors** — frames built from fixed keys, with expected bytes — so an
    independent implementer can check their work without reading this code.
    **Built**: [test-vectors.txt](test-vectors.txt), SPEC §9.2.
