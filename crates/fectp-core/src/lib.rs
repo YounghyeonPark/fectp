@@ -4,6 +4,19 @@
 //! the `Noise_IK_25519_ChaChaPoly_BLAKE2s` handshake, the framing format,
 //! and the datagram [`Transport`] abstraction.
 //!
+//! <div class="warning">
+//!
+//! **This has not been security-audited.** No cryptographer has reviewed the
+//! handshake, the key schedule or the replay window, and none is going to:
+//! [D74](https://github.com/YounghyeonPark/fectp/blob/main/docs/DECISIONS.md)
+//! records that decision and what was done instead. This crate is
+//! `#![forbid(unsafe_code)]` and is cross-validated against
+//! [`snow`](https://docs.rs/snow) in both handshake roles, but neither of
+//! those is a review of whether the construction is right. Use it where being
+//! wrong is survivable.
+//!
+//! </div>
+//!
 //! This crate deliberately contains no transport implementation and no entropy
 //! coder. The typed transforms are here — delta, zigzag, varint, transpose —
 //! because they are integer arithmetic with no allocator behind them; what is

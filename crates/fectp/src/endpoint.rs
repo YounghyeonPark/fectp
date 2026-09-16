@@ -1491,11 +1491,11 @@ impl Endpoint {
 
     /// Sets a payload to carry in the response to every handshake.
     ///
-    /// A peer that sends data with its handshake ([`Connection::connect_and_send`])
+    /// A peer that sends data with its handshake ([`Connection::connect_and_send`](crate::Connection::connect_and_send))
     /// gets an answer in the same round trip rather than the one after it — the
     /// other half of the property this protocol exists for, and until now the
     /// half an `Endpoint` could not reach. `Connection` already delivers it:
-    /// the payload arrives through the first [`recv`](Connection::recv) as
+    /// the payload arrives through the first [`recv`](crate::Connection::recv) as
     /// though it were any other message.
     ///
     /// **This is not 0-RTT data and does not carry its caveats.** The opening

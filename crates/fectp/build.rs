@@ -54,6 +54,7 @@ fn main() {
          use std::time::Duration;\n",
     );
     let mut count = 0usize;
+    let mut found = 0usize;
 
     for doc in docs {
         let path = root.join(doc);
@@ -62,6 +63,7 @@ fn main() {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
+        found += 1;
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;
         let mut nth = 0;
@@ -90,6 +92,16 @@ fn main() {
     }
 
     out.push_str(&format!("\npub const SNIPPETS_CHECKED: usize = {count};\n"));
+    // A crate unpacked from the index has no documents beside it, so there is
+    // nothing to extract and nothing to assert about. Saying which case this is
+    // lets the test tell "the extractor broke" from "there is no repository
+    // here" — excluding the test from the package would do the same job and
+    // make `cargo publish` warn every time, during the one operation here that
+    // cannot be undone.
+    out.push_str(&format!(
+        "\npub const DOCUMENTS_FOUND: bool = {};\n",
+        found > 0
+    ));
     let dest = PathBuf::from(env::var("OUT_DIR").unwrap()).join("doc_snippets.rs");
     fs::write(dest, out).expect("write generated snippets");
 }

@@ -43,11 +43,30 @@ use rand_core::{CryptoRng, Error as RngError, RngCore};
 
 /// Where the committed file lives.
 fn vectors_path() -> PathBuf {
+    docs_dir().join("test-vectors.txt")
+}
+
+/// The repository's documentation directory, two levels up from this crate.
+fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("docs")
-        .join("test-vectors.txt")
+}
+
+/// Whether this is the repository rather than a crate unpacked from the index.
+///
+/// The vectors live in `docs/`, which is outside the package, so a consumer
+/// running `cargo test` on the published crate has no file to check against.
+/// Excluding the test from the package would do the same job and make
+/// `cargo publish` warn every time — a warning during the one operation that
+/// cannot be undone is worth avoiding.
+///
+/// The whole directory is the discriminator, not the file. A missing
+/// `test-vectors.txt` beside a `docs/` that exists is a deleted artefact and
+/// must still fail.
+fn in_the_repository() -> bool {
+    docs_dir().is_dir()
 }
 
 // ---------------------------------------------------------------- the format
@@ -806,6 +825,10 @@ fn render(b: &Builder) -> String {
 
 #[test]
 fn the_file_is_what_this_implementation_produces() {
+    if !in_the_repository() {
+        eprintln!("skipped: docs/ is not beside this crate, so there is no file to check");
+        return;
+    }
     let path = vectors_path();
     let generated = build();
 
@@ -856,6 +879,10 @@ fn the_file_is_what_this_implementation_produces() {
 
 #[test]
 fn the_file_decodes_back() {
+    if !in_the_repository() {
+        eprintln!("skipped: docs/ is not beside this crate, so there is no file to check");
+        return;
+    }
     // The other direction. Without this, an encoder and a decoder that are
     // wrong in the same way agree with each other and with the file.
     let text = fs::read_to_string(vectors_path()).expect("read the vectors");

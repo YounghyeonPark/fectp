@@ -3,6 +3,21 @@
 //! Fast encrypted transport. Send bytes, get bytes; the encryption, framing,
 //! and compression decisions are not something the caller has to think about.
 //!
+//! <div class="warning">
+//!
+//! **This has not been security-audited.** No cryptographer has reviewed the
+//! handshake, the key schedule or the replay window, and none is going to:
+//! [D74](https://github.com/YounghyeonPark/fectp/blob/main/docs/DECISIONS.md)
+//! records that decision and what was done instead. What exists is
+//! `#![forbid(unsafe_code)]` in the layers that can carry it, cross-validation
+//! against [`snow`](https://docs.rs/snow) in both handshake roles, a symbolic
+//! model of the resumption handshake, published test vectors, and a
+//! specification written to be implemented from. That is more than most
+//! unaudited transports have and it is not the same as an audit. Use it where
+//! being wrong is survivable.
+//!
+//! </div>
+//!
 //! ```no_run
 //! use std::time::Duration;
 //! use fectp::{Connection, Endpoint, Event, Identity, PayloadType};

@@ -16,8 +16,17 @@
 include!(concat!(env!("OUT_DIR"), "/doc_snippets.rs"));
 
 /// An extractor that silently matched nothing would pass by doing nothing.
+///
+/// Skipped when there were no documents to extract from, which is the case for
+/// a crate unpacked from the index: they live two directories up and are not
+/// in the package. `DOCUMENTS_FOUND` separates that from an extractor that has
+/// stopped matching, and only the second is a failure.
 #[test]
 fn the_documentation_still_has_snippets_to_check() {
+    if !DOCUMENTS_FOUND {
+        eprintln!("skipped: no README.md or docs/USAGE.md beside this crate");
+        return;
+    }
     assert!(
         SNIPPETS_CHECKED >= 25,
         "only {SNIPPETS_CHECKED} snippets extracted from README.md and docs/USAGE.md \

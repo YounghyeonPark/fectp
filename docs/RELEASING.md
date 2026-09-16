@@ -5,33 +5,31 @@ Two crates are publishable, and when they go they have to go in order.
 
 ---
 
-## Nothing has been published
+## Published unaudited, on purpose
 
-**Both crates are ready and are deliberately not on crates.io.** That is a
-decision, taken with the preparation finished rather than instead of it, and it
-is recorded with its costs in
-[D65](DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
-The short version: this is an encrypted transport, and a disclosure in a README
-is read by a fraction of the people who will run it.
+**No audit is coming.** Not deferred and not being sought — decided against, in
+[D74](DECISIONS.md#d74--published-unaudited-with-the-disclosure-moved-to-where-it-is-read),
+which reversed [D65](DECISIONS.md#d65--publishable-and-not-published-until-it-has-been-audited).
+D65's argument against publishing is still in the record and has not weakened;
+the decision went the other way with that argument written beside it.
 
-So the steps below are what to do *after* an audit, not a checklist to work
-through now. One consequence worth knowing before then: the names `fectp` and
-`fectp-core` are unclaimed and nothing reserves them.
+What replaces the gate is where the disclosure sits. D65 refused because "the
+disclosure in a README is read by a fraction of the people who will run it",
+which was an argument about placement. So it is now in the two places a reader
+meets first:
 
-The order in [OTHER-LANGUAGES.md](OTHER-LANGUAGES.md) still stands, and the
-first item is not this page:
+- the **crate description**, which crates.io shows in search results and at the
+  top of the crate page — both end "Not security-audited";
+- the **crate-level documentation**, which is the first thing on docs.rs,
+  rendered as a warning block.
 
-1. **An audit.** Publishing an unaudited transport puts it where people can
-   depend on it. The crate descriptions and both crate READMEs say it has not
-   been audited; that is a disclosure, not a substitute.
-2. **Versioning and a release** — this page.
-3. **Test vectors**, so an independent implementer can check their work against
-   `SPEC.md` without reading the code. **Done**:
-   [test-vectors.txt](test-vectors.txt), pinned by a test that regenerates and
-   compares, so the file cannot drift from the wire format without a failure.
+Keeping those accurate is part of releasing, not decoration. Before each
+publish, check that both still say what is true.
 
-A version on crates.io is permanent. `0.1.0` cannot be re-uploaded, only
-yanked, and yanking does not remove it.
+A version on crates.io is **permanent**. `0.1.0` cannot be re-uploaded, only
+yanked, and yanking does not remove it — a yanked version still resolves for
+anyone with it in a lockfile. Publishing also claims the name for good, which
+is the one thing here that cannot be undone at all.
 
 ---
 

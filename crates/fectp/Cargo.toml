@@ -1,6 +1,6 @@
 [package]
 name = "fectp"
-description = "FECTP: fast encrypted transport - std API with UDP transport"
+description = "FECTP: fast encrypted transport, std API over UDP. Not security-audited."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

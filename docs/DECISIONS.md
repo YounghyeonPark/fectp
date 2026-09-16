@@ -3615,3 +3615,56 @@ default mode. It says nothing about the implementation, about timing, or about
 of one handshake, by a tool with known limits, in a model this project wrote
 about its own protocol — and an auditor's value is partly that none of those
 things are true of them.
+
+## D74 — Published unaudited, with the disclosure moved to where it is read
+
+**Problem.** [D65](#d65--publishable-and-not-published-until-it-has-been-audited)
+gated crates.io on an audit. No audit is going to happen — not deferred, not
+sought and waiting: decided against. A gate whose condition can never be met is
+not a gate, it is a permanent refusal wearing one, and D65 did not decide that.
+So the decision has to be made again with what is actually true.
+
+**Decision.** Publish. `0.1.0` of `fectp-core` and `fectp` go to crates.io, and
+releases continue from there.
+
+The argument against is in D65 and has not weakened: this is an encrypted
+transport, publishing puts a thing people can `cargo add` in front of them, and
+being unaudited is a real defect that being useful does not cancel. That
+argument was made, it is recorded above, and the decision went the other way.
+What follows from that is not to restate it but to make the thing it was
+protecting against as small as possible.
+
+**D65's own words are the design of the replacement.** It refused because "the
+disclosure in a README is read by a fraction of the people who will run it".
+That was correct, and it was an argument about *placement* rather than about
+publishing. So the disclosure now sits in the two places a reader actually
+meets before any README:
+
+- **The crate description**, which is the line crates.io shows in search
+  results and at the top of the crate page. Both now end "Not
+  security-audited."
+- **The crate-level documentation**, which is the first thing on docs.rs, as a
+  rendered warning block rather than a sentence in a paragraph.
+
+It says what is absent — no cryptographer has reviewed the handshake, the key
+schedule or the replay window — and that none is coming, so a reader is not
+left waiting for one. It then says what exists instead, because a bare "not
+audited" invites the reader to assume nothing was done, and something was:
+`#![forbid(unsafe_code)]` in the layers that can carry it, cross-validation
+against `snow` in both handshake roles (`interop.rs`), a symbolic model of the
+resumption handshake (D73), Miri over the C ABI (D72), published test vectors
+(D70), and a specification written to be implemented from. That list is longer
+than most unaudited transports can offer and it is still not an audit, which is
+the sentence both crates carry.
+
+**What does not change.** The name is claimed by publishing, which D65 listed
+as a cost of waiting; that cost is now paid rather than incurred. `crates/ffi`,
+`crates/bench` and `crates/footprint` stay `publish = false` — the C ABI
+because it is `staticlib`/`cdylib` output nobody consumes from the index, the
+other two because they are measurement rigs.
+
+**What this decision is not.** It is not a claim that the protocol is sound.
+Nothing in this repository establishes that, and D72 and D73 both say so in
+their own terms. It is a decision that a `0.x` crate with an accurate, prominent
+disclosure is a better thing to exist than a repository nobody can depend on,
+taken with the counter-argument written down beside it.

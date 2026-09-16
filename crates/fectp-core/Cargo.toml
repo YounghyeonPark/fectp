@@ -1,6 +1,6 @@
 [package]
 name = "fectp-core"
-description = "FECTP core: no_std Noise_IK_25519_ChaChaPoly_BLAKE2s session layer and wire format"
+description = "FECTP core: no_std Noise_IK_25519_ChaChaPoly_BLAKE2s session layer and wire format. Not security-audited."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
