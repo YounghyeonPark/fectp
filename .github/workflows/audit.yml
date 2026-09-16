@@ -24,6 +24,14 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# The action reports what it finds by creating a check run, which needs more
+# than the default read-only token. Without this it finds the advisory, says so
+# in the log, and then fails a second time trying to tell anyone — which is how
+# RUSTSEC-2026-0285 was first seen here.
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   audit:
     name: RustSec advisories
