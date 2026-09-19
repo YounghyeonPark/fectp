@@ -33,6 +33,48 @@ is the one thing here that cannot be undone at all.
 
 ---
 
+## What a version number promises
+
+Two version numbers exist here and they are not the same thing. Conflating them
+is the mistake this section is for.
+
+**The wire version is 1**, in the high nibble of every frame header, and a
+receiver MUST reject a frame whose version it does not implement (SPEC §1.1).
+The cipher suite and both handshake patterns are fixed per wire version and are
+not negotiated. So two peers interoperate if they implement the same wire
+version, whatever crate versions they were built from — and a peer built from
+`fectp` 0.1.0 will talk to one built from 0.9.0 as long as the wire version has
+not moved.
+
+**The crate version is `0.1.0`**, and under Cargo's rules a `0.x` crate may
+break its Rust API in any release that changes the minor number. That is what
+`0.x` is for. Nothing has used it yet: `0.1.0` is the first release, so D75
+removing `Copy` from `ResumptionTicket` — which the type should never have had,
+since it duplicates key material silently — broke nobody. The next such change
+will.
+
+The two move independently, in one direction only:
+
+- **A Rust API change does not change the wire.** Most releases will be this.
+- **A wire change forces a new wire version**, because §1.1 leaves no room for
+  anything else — there is no negotiation and no capability bit for it. It also
+  forces a crate release, but the crate number is the smaller news.
+- **A wire version bump is not backwards compatible by construction.** Peers on
+  version 1 and version 2 do not interoperate at all; they reject each other's
+  frames. Anything shipping that would need both implemented side by side, and
+  nothing here does that today.
+
+What else is a compatibility surface, stated so it is not discovered:
+
+- **The MSRV is 1.85**, declared as `rust-version` and built in CI. Raising it
+  is a minor-version change, not a patch.
+- **Cargo features are API.** `fectp/compress` and `fectp-core/std` are both
+  off by default; removing or renaming either breaks a caller as surely as
+  removing a function.
+- **`docs/test-vectors.txt` is part of the wire contract**, not of the crate.
+  A release that changed a byte in it without changing the wire version would
+  be a bug in the release, and `tests/vectors.rs` is what makes that loud.
+
 ## The order
 
 ```bash

@@ -38,10 +38,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # This is a cryptographic transport whose entire security rests on six
+      # This is a cryptographic transport whose entire security rests on five
       # dependencies it did not write — x25519-dalek, chacha20poly1305, blake2,
-      # zeroize, subtle, rand_core. An advisory against any of them is an
-      # advisory against this.
+      # zeroize, rand_core. An advisory against any of them is an advisory
+      # against this. It was six until D75 removed `subtle`, which was declared
+      # and never called.
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

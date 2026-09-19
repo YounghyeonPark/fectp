@@ -25,6 +25,12 @@ many of something the source has. Those go stale in the other direction:
 nothing is built or removed, the number just drifts. One had, from twelve to
 eight, and read as true for as long as nobody counted.
 
+It also holds SECURITY.md's "what is already known" list against
+THREAT-MODEL.md's known weaknesses. That list exists so a reporter does not
+spend a day on something understood, and a weakness missing from it wastes
+exactly the time it was written to save. Anything deliberately left out goes in
+NOT_FOR_REPORTERS with a reason, the same bargain ALLOWED makes.
+
 What it cannot see: a document contradicting itself in prose. SPEC said
 "address migration is not supported in version 1" in section 3.3 while
 specifying it in 5.8, and no keyword check finds that. It takes a reader.
@@ -108,6 +114,68 @@ ALLOWED = {
         "`delta` matches the delta transform that exists; what was measured and "
         "declined (D45) is the bit-packed variant of it.",
 }
+
+
+# Known weaknesses that SECURITY.md deliberately does not repeat, and why.
+#
+# SECURITY.md tells a reporter what is already known so they do not spend a day
+# on it. A weakness missing from that list wastes exactly the time the list
+# exists to save, so every one in THREAT-MODEL.md is either there or here.
+NOT_FOR_REPORTERS = {
+    "the c abi is the one place without `#![forbid(unsafe_code)]`":
+        "SECURITY.md carries this under 'what is checked mechanically', where "
+        "it belongs: it is a statement about how the code is verified rather "
+        "than a weakness someone could report.",
+    "abandonment reporting is not observable on the wire":
+        "Not an attack. It is a place the usual defences cannot reach, which "
+        "matters to an implementer and not to someone looking for a way in.",
+}
+
+
+def threat_model_weaknesses() -> list[str]:
+    """The `###` headings under THREAT-MODEL.md's Known weaknesses."""
+    text = read("docs/THREAT-MODEL.md")
+    section = re.search(r"^## Known weaknesses\n(.*?)(?=^## )", text, re.S | re.M)
+    if not section:
+        sys.exit("docs/THREAT-MODEL.md: could not find the Known weaknesses section")
+    return re.findall(r"^### (.+)$", section.group(1), re.M)
+
+
+def security_md_known() -> list[str]:
+    """The bullets under SECURITY.md's 'What is already known'."""
+    text = read("SECURITY.md")
+    section = re.search(
+        r"^## What is already known\n(.*?)(?=^## )", text, re.S | re.M
+    )
+    if not section:
+        sys.exit("SECURITY.md: could not find the 'What is already known' section")
+    # Bullets wrap, so join continuation lines onto the one that starts them.
+    bullets: list[str] = []
+    for line in section.group(1).splitlines():
+        if line.startswith("- "):
+            bullets.append(line[2:].strip())
+        elif bullets and line.startswith("  "):
+            bullets[-1] += " " + line.strip()
+    return bullets
+
+
+def weaknesses_reach_reporters() -> list[str]:
+    """Each known weakness is in SECURITY.md's list, or excused above."""
+    told = [words(b) for b in security_md_known()]
+    problems = []
+    for heading in threat_model_weaknesses():
+        if heading.lower().strip(" .") in NOT_FOR_REPORTERS:
+            continue
+        mine = words(heading)
+        if not any(len(mine & theirs) >= 2 for theirs in told):
+            problems.append(
+                f'SECURITY.md: THREAT-MODEL.md knows about "{heading}" and the '
+                f"'What is already known' list does not say so. A reporter "
+                f"reads that list to avoid spending a day on something already "
+                f"understood. Add it, or add it to NOT_FOR_REPORTERS in this "
+                f"script with a reason."
+            )
+    return problems
 
 
 def read(path: str) -> str:
@@ -371,6 +439,7 @@ def main() -> int:
             )
 
     problems += counted_claims()
+    problems += weaknesses_reach_reporters()
 
     if problems:
         print(f"{len(problems)} claim(s) the code disagrees with:\n")

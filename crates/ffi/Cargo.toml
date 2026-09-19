@@ -6,8 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Nothing is published until the audit (D65), and this least of all: it is the
-# one crate in the workspace that cannot carry `#![forbid(unsafe_code)]`.
+# The other two crates are on crates.io (D74); this one is not, and the reason
+# is its own rather than the release policy's. It is the one crate in the
+# workspace that cannot carry `#![forbid(unsafe_code)]`, and its output is a
+# `cdylib`/`staticlib` nobody consumes from the index — a C caller builds it
+# from the repository.
 publish = false
 
 [lib]
