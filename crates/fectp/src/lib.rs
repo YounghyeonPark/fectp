@@ -107,7 +107,8 @@ use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
 use fectp_core::frame::HEADER_LEN;
 use fectp_core::reliability::MessageId;
 use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumptionTicket, Session, PATH_TOKEN_LEN,
+    preshared_key, Initiator, ResumeInitiator, ResumptionTicket, Session, INITIATOR_OVERHEAD,
+    PATH_TOKEN_LEN,
 };
 use fectp_core::{Keypair, PublicKey, Transport};
 use rand_core::{OsRng, RngCore};
@@ -694,7 +695,7 @@ impl Core {
         zero_rtt: &[u8],
     ) -> Result<Self> {
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size + Initiator::OVERHEAD];
+        let mut tx = vec![0u8; size + INITIATOR_OVERHEAD];
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 

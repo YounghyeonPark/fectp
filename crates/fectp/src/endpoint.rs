@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
 use fectp_core::session::{
     preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
+    INITIATOR_OVERHEAD, RESPONDER_OVERHEAD,
     Session, PATH_TOKEN_LEN,
 };
 use fectp_core::reliability::Rto;
@@ -540,7 +541,7 @@ impl Endpoint {
 
     fn with_mode(addr: impl ToSocketAddrs, mode: Mode) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
-        let size = max_datagram() + Initiator::OVERHEAD;
+        let size = max_datagram() + INITIATOR_OVERHEAD;
         Ok(Self {
             socket,
             mode,
@@ -646,7 +647,7 @@ impl Endpoint {
         let addr = crate::resolve(addr)?;
         let session_id = OsRng.next_u32();
         let caps = local_capabilities();
-        let mut frame = vec![0u8; max_datagram() + Initiator::OVERHEAD];
+        let mut frame = vec![0u8; max_datagram() + INITIATOR_OVERHEAD];
 
         let (handshake, len) = match &self.mode {
             Mode::PublicKey(identity) => {
@@ -1512,7 +1513,7 @@ impl Endpoint {
     /// Fails with [`Error::PayloadTooLarge`](fectp_core::Error::PayloadTooLarge)
     /// if it would not fit a handshake frame.
     pub fn set_handshake_reply(&mut self, payload: &[u8]) -> Result<()> {
-        let overhead = Responder::OVERHEAD
+        let overhead = RESPONDER_OVERHEAD
             .max(ResumeResponder::OVERHEAD)
 ;
         if payload.len() + overhead > max_datagram() {

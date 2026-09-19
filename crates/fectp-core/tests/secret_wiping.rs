@@ -22,7 +22,7 @@
 use core::mem::{size_of, ManuallyDrop};
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder, ResumptionTicket};
+use fectp_core::session::{Capabilities, Initiator, Responder, ResumptionTicket, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
 use rand_core::OsRng;
 
 /// The bytes of `value`, then the bytes of the same memory after dropping it.
@@ -172,7 +172,7 @@ fn a_session_wipes_the_resumption_key_it_holds() {
     .expect("initiator");
     let mut responder = Responder::new(server_key, Capabilities::minimal(1200));
 
-    let mut msg1 = vec![0u8; Initiator::OVERHEAD + 16];
+    let mut msg1 = vec![0u8; INITIATOR_OVERHEAD + 16];
     let n = initiator
         .write_init(&mut OsRng, &[], &mut msg1)
         .expect("message 1");
@@ -180,7 +180,7 @@ fn a_session_wipes_the_resumption_key_it_holds() {
     responder
         .read_init(&msg1[..n], &mut staging)
         .expect("read message 1");
-    let mut msg2 = vec![0u8; Responder::OVERHEAD + 16];
+    let mut msg2 = vec![0u8; RESPONDER_OVERHEAD + 16];
     let (server, n2) = responder
         .write_response(&mut OsRng, &[], &mut msg2)
         .expect("message 2");

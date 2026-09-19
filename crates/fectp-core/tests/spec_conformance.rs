@@ -21,10 +21,9 @@ use fectp_core::noise::{
     RESUME_MSG_OVERHEAD, RESUME_PROTOCOL_NAME, TAGLEN,
 };
 use fectp_core::session::{
-    Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
+    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket,
     CAPS_LEN, CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
-    TICKET_ID_LEN,
-};
+    TICKET_ID_LEN, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
 
 /// SPEC §2 — cipher suite sizes.
 #[test]
@@ -160,10 +159,10 @@ fn handshake_frame_sizes() {
     assert_eq!(MSG2_OVERHEAD, 48);
 
     // Minimum valid frames include the mandatory capability block.
-    assert_eq!(Initiator::OVERHEAD, 118, "14 header + 96 Noise + 8 caps");
-    assert_eq!(Responder::OVERHEAD, 70, "14 header + 48 Noise + 8 caps");
-    assert_eq!(Initiator::OVERHEAD, HEADER_LEN + MSG1_OVERHEAD + CAPS_LEN);
-    assert_eq!(Responder::OVERHEAD, HEADER_LEN + MSG2_OVERHEAD + CAPS_LEN);
+    assert_eq!(INITIATOR_OVERHEAD, 118, "14 header + 96 Noise + 8 caps");
+    assert_eq!(RESPONDER_OVERHEAD, 70, "14 header + 48 Noise + 8 caps");
+    assert_eq!(INITIATOR_OVERHEAD, HEADER_LEN + MSG1_OVERHEAD + CAPS_LEN);
+    assert_eq!(RESPONDER_OVERHEAD, HEADER_LEN + MSG2_OVERHEAD + CAPS_LEN);
 }
 
 /// SPEC §5.1, §5.3 — replay window and padding block.

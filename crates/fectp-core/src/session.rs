@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
 use crate::frame::{FrameType, Header, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN};
-use crate::keys::{Keypair, PublicKey};
+use crate::keys::{Keypair, PublicKey, StaticKey};
 use crate::fragment::{Fragment, FRAGMENT_LEN};
 use crate::reliability::{Ack, MessageId, ACK_BLOCK_LEN, MESSAGE_ID_LEN};
 use crate::noise::{
@@ -745,20 +745,38 @@ impl Session {
 
 }
 
+/// Bytes that a message-1 frame adds on top of its application payload.
+///
+/// Free rather than only associated: `Initiator` became generic over its
+/// long-term key so that a secure element could hold one, and
+/// `Initiator::OVERHEAD` then cannot infer the parameter it does not depend
+/// on. `Initiator::<Keypair>::OVERHEAD` also works and says the same thing.
+pub const INITIATOR_OVERHEAD: usize = HEADER_LEN + MSG1_OVERHEAD + CAPS_LEN;
+
+/// Bytes that a message-2 frame adds on top of its application payload.
+///
+/// Free for the same reason as [`INITIATOR_OVERHEAD`].
+pub const RESPONDER_OVERHEAD: usize = HEADER_LEN + MSG2_OVERHEAD + CAPS_LEN;
+
 /// The initiator half of the framed handshake.
-pub struct Initiator {
-    hs: HandshakeState,
+///
+/// Generic over the long-term key, defaulting to an in-memory
+/// [`Keypair`](crate::keys::Keypair) so that existing callers write `Initiator`
+/// and mean what they always did. A secure element is the other case; see
+/// [`StaticKey`](crate::keys::StaticKey).
+pub struct Initiator<S: StaticKey = Keypair> {
+    hs: HandshakeState<S>,
     session_id: u32,
     caps: Capabilities,
 }
 
-impl Initiator {
+impl<S: StaticKey> Initiator<S> {
     /// Prepares an initiator that will connect to `remote_static`.
     ///
     /// `session_id` should be drawn at random; it demultiplexes sessions that
     /// share one socket.
     pub fn new(
-        static_key: Keypair,
+        static_key: S,
         remote_static: PublicKey,
         session_id: u32,
         caps: Capabilities,
@@ -775,8 +793,21 @@ impl Initiator {
         })
     }
 
+    /// The long-term key this initiator was built with.
+    ///
+    /// For a caller holding a secure element rather than a `Keypair`: the
+    /// handshake owns the key for its duration, and this is how to reach the
+    /// device for anything else it offers — a call count, a health check, an
+    /// unlock. Read-only, because the handshake is using it.
+    pub fn static_key(&self) -> &S {
+        self.hs.static_key()
+    }
+
     /// Bytes that a message-1 frame adds on top of its application payload.
-    pub const OVERHEAD: usize = HEADER_LEN + MSG1_OVERHEAD + CAPS_LEN;
+    ///
+    /// Same value as [`INITIATOR_OVERHEAD`], which is what to reach for when
+    /// the key type is not already named: this one needs it spelled out.
+    pub const OVERHEAD: usize = INITIATOR_OVERHEAD;
 
     /// Writes the message-1 frame, carrying `app_payload` as 0-RTT data.
     ///
@@ -854,21 +885,25 @@ impl Initiator {
 }
 
 /// The responder half of the framed handshake.
-pub struct Responder {
+///
+/// Generic over the long-term key on the same terms as
+/// [`Initiator`]: the default is an in-memory [`Keypair`](crate::keys::Keypair)
+/// and the other case is a secure element.
+pub struct Responder<S: StaticKey = Keypair> {
     /// Taken when message 1 arrives; the handshake needs the header of that
     /// message as its prologue, so it cannot be built any earlier.
-    static_key: Option<Keypair>,
-    hs: Option<HandshakeState>,
+    static_key: Option<S>,
+    hs: Option<HandshakeState<S>>,
     static_public: PublicKey,
     session_id: u32,
     caps: Capabilities,
     peer_caps: Option<Capabilities>,
 }
 
-impl Responder {
+impl<S: StaticKey> Responder<S> {
     /// Prepares a responder holding `static_key`.
-    pub fn new(static_key: Keypair, caps: Capabilities) -> Self {
-        let static_public = *static_key.public();
+    pub fn new(static_key: S, caps: Capabilities) -> Self {
+        let static_public = static_key.public();
         Self {
             static_key: Some(static_key),
             hs: None,
@@ -880,7 +915,9 @@ impl Responder {
     }
 
     /// Bytes that a message-2 frame adds on top of its application payload.
-    pub const OVERHEAD: usize = HEADER_LEN + MSG2_OVERHEAD + CAPS_LEN;
+    ///
+    /// Same value as [`RESPONDER_OVERHEAD`]; see the note there.
+    pub const OVERHEAD: usize = RESPONDER_OVERHEAD;
 
     /// Consumes a message-1 frame, writing any 0-RTT payload into `out`.
     ///

@@ -139,6 +139,20 @@ died". Wrapping every entry point in `catch_unwind` and converting to an error
 code is mandatory, not tidiness — which is what `crates/ffi` does, at every
 entry including the ones that cannot fail.
 
+### A key held in hardware does not cross either
+
+`fectp-core` takes a `StaticKey` so that a secure element can perform the
+Diffie-Hellman without releasing the key (D76). **The C ABI does not expose
+that**, and neither do the bindings on it: a trait crosses as a struct of
+function pointers the caller fills in, with a lifetime the C side has to
+honour and a failure path in both directions. `fectp_identity_from_secret` is
+what exists, and it takes the bytes.
+
+Not a gap so much as a different problem. The case D76 closes is a constrained
+device linking `fectp-core` directly, in Rust, where there is no boundary to
+cross; a C caller with an element is a second design, not the same one wearing
+a header.
+
 ### Key material escapes `zeroize`
 
 `fectp::Identity::secret()` returns the raw 32 bytes. In Rust they are wiped

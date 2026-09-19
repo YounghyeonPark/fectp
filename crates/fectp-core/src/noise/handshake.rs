@@ -18,7 +18,7 @@ use super::cipher::{CipherState, TAGLEN};
 use super::symmetric::SymmetricState;
 use super::PROTOCOL_NAME;
 use crate::error::{Error, Result};
-use crate::keys::{Keypair, PublicKey, DHLEN};
+use crate::keys::{Keypair, PublicKey, StaticKey, DHLEN};
 
 /// Bytes that message 1 adds on top of its payload.
 ///
@@ -56,24 +56,30 @@ enum Step {
 }
 
 /// An in-progress IK handshake.
-pub struct HandshakeState {
+///
+/// Generic over the long-term key so that one held in a secure element works
+/// the same way an in-memory one does; see [`StaticKey`]. The default keeps
+/// every existing caller writing `HandshakeState` and meaning the in-memory
+/// case. Ephemerals stay [`Keypair`]s — they are generated here and discarded
+/// here, and nothing outside can hold them.
+pub struct HandshakeState<S: StaticKey = Keypair> {
     sym: SymmetricState,
     role: Role,
-    s: Keypair,
+    s: S,
     e: Option<Keypair>,
     rs: Option<PublicKey>,
     re: Option<PublicKey>,
     step: Step,
 }
 
-impl HandshakeState {
-    fn init(role: Role, s: Keypair, rs: Option<PublicKey>, prologue: &[u8]) -> Self {
+impl<S: StaticKey> HandshakeState<S> {
+    fn init(role: Role, s: S, rs: Option<PublicKey>, prologue: &[u8]) -> Self {
         let mut sym = SymmetricState::new(PROTOCOL_NAME);
         sym.mix_hash(prologue);
         // Pre-message `<- s`: both sides absorb the responder's static key.
         match role {
             Role::Initiator => sym.mix_hash(rs.as_ref().expect("initiator knows rs")),
-            Role::Responder => sym.mix_hash(s.public()),
+            Role::Responder => sym.mix_hash(&s.public()),
         }
         Self {
             sym,
@@ -93,13 +99,18 @@ impl HandshakeState {
     ///
     /// `remote_static` is the responder's public key, which must already be
     /// known; obtaining it is out of scope for the protocol.
-    pub fn initiator(s: Keypair, remote_static: PublicKey, prologue: &[u8]) -> Self {
+    pub fn initiator(s: S, remote_static: PublicKey, prologue: &[u8]) -> Self {
         Self::init(Role::Initiator, s, Some(remote_static), prologue)
     }
 
     /// Starts a handshake as the responder.
-    pub fn responder(s: Keypair, prologue: &[u8]) -> Self {
+    pub fn responder(s: S, prologue: &[u8]) -> Self {
         Self::init(Role::Responder, s, None, prologue)
+    }
+
+    /// The long-term key this handshake was built with.
+    pub fn static_key(&self) -> &S {
+        &self.s
     }
 
     /// This peer's role.
@@ -178,14 +189,14 @@ impl HandshakeState {
         self.sym.mix_key(&e.dh(&rs));
 
         // -> s
-        out[DHLEN..DHLEN + DHLEN].copy_from_slice(self.s.public());
+        out[DHLEN..DHLEN + DHLEN].copy_from_slice(&self.s.public());
         let enc_s_len = self
             .sym
             .encrypt_and_hash(&mut out[DHLEN..MSG1_PAYLOAD_OFFSET], DHLEN)?;
         debug_assert_eq!(enc_s_len, DHLEN + TAGLEN);
 
         // -> ss
-        self.sym.mix_key(&self.s.dh(&rs));
+        self.sym.mix_key(&self.s.dh(&rs)?);
 
         // -> payload
         self.sym
@@ -213,7 +224,7 @@ impl HandshakeState {
         self.sym.mix_hash(&re);
 
         // <- es
-        self.sym.mix_key(&self.s.dh(&re));
+        self.sym.mix_key(&self.s.dh(&re)?);
 
         // <- s
         let mut enc_s = [0u8; DHLEN + TAGLEN];
@@ -226,7 +237,7 @@ impl HandshakeState {
         rs.copy_from_slice(&enc_s[..DHLEN]);
 
         // <- ss
-        self.sym.mix_key(&self.s.dh(&rs));
+        self.sym.mix_key(&self.s.dh(&rs)?);
 
         // <- payload
         let ct = &msg[MSG1_PAYLOAD_OFFSET..];
@@ -325,7 +336,7 @@ impl HandshakeState {
         self.sym.mix_key(&ee);
 
         // <- se: initiator mixes its static with the responder's ephemeral.
-        let se = self.s.dh(&re);
+        let se = self.s.dh(&re)?;
         self.sym.mix_key(&se);
 
         // <- payload

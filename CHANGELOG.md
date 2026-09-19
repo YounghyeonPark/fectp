@@ -8,6 +8,26 @@ wire version, which is 1 and has not moved — is in
 The reasoning behind anything here is in [DECISIONS.md](docs/DECISIONS.md),
 which is the long form: this file says what changed, that one says why.
 
+## Unreleased
+
+**A long-term key can live in a secure element.** `fectp-core` takes a
+`StaticKey` — `public()` and a fallible `dh()`, which is everything the protocol
+does with a static private key — so an element or HSM that never releases the
+key can be used. `Keypair` implements it and so does `&T`, because a device is
+owned by the application and lent to a handshake rather than given away. New
+`Error::KeyUnavailable` for a device that is busy, locked or absent, which an
+in-memory key never is. Costs 50 bytes of flash. See D76.
+
+`Endpoint` and `Connection` still require a `Keypair`; the case this closes is
+the constrained one, which uses the core directly.
+
+**Breaking:** `Initiator` and `Responder` are generic over the key type with a
+default, so `Initiator` still means `Initiator<Keypair>` — but
+`Initiator::OVERHEAD` no longer infers. Use `INITIATOR_OVERHEAD` and
+`RESPONDER_OVERHEAD`, which are free constants with the same values, or name
+the parameter. The wire format is unchanged: the test vectors pass untouched
+and the handshake still agrees with `snow` in both roles.
+
 ## 0.1.0 — 2026-09-16
 
 First published version. Wire version 1.

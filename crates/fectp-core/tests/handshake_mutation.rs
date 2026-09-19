@@ -34,7 +34,7 @@
 use proptest::prelude::*;
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder};
+use fectp_core::session::{Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
 use rand_core::OsRng;
 
 /// Fixed secrets, so a shrunk counterexample is reproducible from its seed.
@@ -56,7 +56,7 @@ fn opening_frame() -> Vec<u8> {
         caps(),
     )
     .expect("initiator");
-    let mut frame = vec![0u8; Initiator::OVERHEAD + ZERO_RTT.len()];
+    let mut frame = vec![0u8; INITIATOR_OVERHEAD + ZERO_RTT.len()];
     let n = initiator
         .write_init(&mut OsRng, ZERO_RTT, &mut frame)
         .expect("message 1");
@@ -73,7 +73,7 @@ fn reply_frame() -> (Initiator, Vec<u8>) {
         caps(),
     )
     .expect("initiator");
-    let mut msg1 = vec![0u8; Initiator::OVERHEAD + ZERO_RTT.len()];
+    let mut msg1 = vec![0u8; INITIATOR_OVERHEAD + ZERO_RTT.len()];
     let n = initiator
         .write_init(&mut OsRng, ZERO_RTT, &mut msg1)
         .expect("message 1");
@@ -84,7 +84,7 @@ fn reply_frame() -> (Initiator, Vec<u8>) {
         .read_init(&msg1[..n], &mut staging)
         .expect("read message 1");
 
-    let mut msg2 = vec![0u8; Responder::OVERHEAD + 32];
+    let mut msg2 = vec![0u8; RESPONDER_OVERHEAD + 32];
     let (_, n2) = responder
         .write_response(&mut OsRng, b"and the reply", &mut msg2)
         .expect("message 2");

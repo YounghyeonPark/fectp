@@ -579,7 +579,7 @@ These are unimplemented, not overlooked.
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
-| **Keys must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake performs its own Diffie-Hellman. | A secure element or HSM that never releases the key — the whole point of one — cannot be used without a trait for the DH. Relevant on exactly the microcontrollers this protocol targets. |
+| **Keys must be in process memory, through the std front end** | `fectp-core` takes a [`StaticKey`](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it) and a secure element implements it ([D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it)). `Endpoint` and `Connection` still require a `Keypair`. | Closed for the case that motivated it — a constrained device uses the core directly — and open for the std API, which would need the parameter threaded through the peer table and the event loop. Ephemerals are in memory either way, on purpose: they last one handshake. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -3760,3 +3760,62 @@ numeric constant matches, padding really is off by default, and no code in this
 repository does a constant-time comparison — the one secret-adjacent byte
 compare written here is a path-challenge token, which is consistent with the
 confession rather than a counterexample to it.
+
+## D76 — The long-term key became a trait, so a secure element can hold it
+
+**Problem.** The gaps table has carried this row since it was written, and its
+own note says why it is the one worth closing: *"Relevant on exactly the
+microcontrollers this protocol targets."* `Keypair::from_secret` takes the raw
+32 bytes and the handshake performs its own Diffie-Hellman, so a secure element
+or HSM that never releases the key — which is the entire reason to have one —
+could not be used at all. A device that wakes, reports a reading and sleeps is
+also a device somebody can pick up, and its long-term identity sitting in flash
+is the thing that makes stealing it worthwhile.
+
+**Decision.** `StaticKey`: two methods, `public()` and a fallible `dh()`. That
+is everything this protocol does with a long-term private key, and an element
+can do both without handing anything over. `Keypair` implements it; so does
+`&T` for any `T` that does.
+
+**Static keys only, and that is deliberate.** Ephemerals stay `Keypair`s. An
+ephemeral is generated per handshake and discarded, so hardware would protect
+one session's forward secrecy; the static key is the identity, and losing it is
+permanent impersonation. The narrower interface is also the one an element is
+likeliest to offer.
+
+**The `dh` an element performs can fail, and a `Keypair`'s cannot.** That
+asymmetry is the whole of what the trait adds beyond indirection. A device can
+be busy, locked or unplugged, and every caller of this handshake was written
+against an operation with no failure case. `Error::KeyUnavailable` is new;
+`Error` is `#[non_exhaustive]`, so adding it breaks nobody.
+
+**Borrowing rather than giving.** `impl<T: StaticKey> StaticKey for &T` exists
+because ownership was wrong the first time round: a handshake owns its key for
+its duration, which suits a `Keypair` and not a device. An element is owned by
+the application, outlives any handshake, and gets asked other things — a health
+check, an unlock, a call count. Found while writing the third test, which could
+not read the element's call counter because the handshake had consumed it.
+
+**What it costs.** Fifty bytes of flash, 23,896 to 23,946, which is the error
+paths a fallible operation needs. Measured on the linked image, both halves of
+the subtraction taken fresh.
+
+**One published API broke.** `Initiator` and `Responder` are now generic with a
+default type parameter, so `Initiator` still means `Initiator<Keypair>` and
+every value-level caller is unchanged. `Initiator::OVERHEAD` is not: an
+associated constant cannot infer a parameter it does not depend on.
+`INITIATOR_OVERHEAD` and `RESPONDER_OVERHEAD` are free constants with the same
+values, and `Initiator::<Keypair>::OVERHEAD` also works.
+
+This is the first exercise of the `0.x` latitude that
+[RELEASING.md](RELEASING.md) wrote down two days ago, and it is the shape that
+document predicted: the Rust API moved and the wire did not. The test vectors
+pass unchanged and `interop.rs` still agrees with `snow` in both roles, which is
+what makes "the wire did not move" a measurement rather than an intention.
+
+**What is still not possible.** `Endpoint` and `Connection` stay on `Keypair`.
+The std front end would need a type parameter threaded through the peer table
+and the event loop, and the case this closes is the constrained one, which uses
+`fectp-core` directly — `crates/footprint` is that case and is what the fifty
+bytes were measured on. Worth stating rather than leaving a reader to discover
+that the trait exists and the front end cannot reach it.

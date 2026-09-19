@@ -38,7 +38,7 @@ use fectp_core::frame::{
     FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN,
 };
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder, CAPS_LEN, REKEY_INTERVAL};
+use fectp_core::session::{Capabilities, Initiator, Responder, CAPS_LEN, REKEY_INTERVAL, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
 use rand_core::{CryptoRng, Error as RngError, RngCore};
 
 /// Where the committed file lives.
@@ -583,7 +583,7 @@ fn handshake(b: &mut Builder) {
 
     let mut initiator =
         Initiator::new(initiator_key, responder_public, SESSION_ID, caps()).expect("initiator");
-    let mut msg1 = vec![0u8; Initiator::OVERHEAD + ZERO_RTT.len()];
+    let mut msg1 = vec![0u8; INITIATOR_OVERHEAD + ZERO_RTT.len()];
     let msg1_len = initiator
         .write_init(&mut Fixed::new(INITIATOR_EPHEMERAL_SEED), ZERO_RTT, &mut msg1)
         .expect("message 1");
@@ -596,7 +596,7 @@ fn handshake(b: &mut Builder) {
         .expect("read message 1");
     assert_eq!(&zero_rtt_out[..zero_rtt_len], ZERO_RTT);
 
-    let mut msg2 = vec![0u8; Responder::OVERHEAD + REPLY_PAYLOAD.len()];
+    let mut msg2 = vec![0u8; RESPONDER_OVERHEAD + REPLY_PAYLOAD.len()];
     let (mut server, msg2_len) = responder
         .write_response(
             &mut Fixed::new(RESPONDER_EPHEMERAL_SEED),
@@ -1006,7 +1006,7 @@ fn replay_the_handshake(parsed: &Parsed) {
         stated_caps,
     )
     .expect("initiator");
-    let mut regenerated = vec![0u8; Initiator::OVERHEAD + ZERO_RTT.len()];
+    let mut regenerated = vec![0u8; INITIATOR_OVERHEAD + ZERO_RTT.len()];
     let n1 = initiator
         .write_init(
             &mut Fixed::from_bytes(msg1.bytes("ephemeral_secret")),

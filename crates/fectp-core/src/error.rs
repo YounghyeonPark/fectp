@@ -45,6 +45,13 @@ pub enum Error {
     PayloadTooLarge,
     /// Too many reliable messages are already awaiting acknowledgement.
     WindowFull,
+    /// A long-term key held outside this process could not be used.
+    ///
+    /// Only reachable through a [`StaticKey`](crate::keys::StaticKey) that is
+    /// not a [`Keypair`](crate::keys::Keypair): an in-memory key is never
+    /// busy, locked, or unplugged. A secure element is all three at times, and
+    /// a caller that has one has to cope with it.
+    KeyUnavailable,
 }
 
 impl core::fmt::Display for Error {
@@ -62,6 +69,7 @@ impl core::fmt::Display for Error {
             Error::NotReady => "session not established",
             Error::PayloadTooLarge => "payload too large for one frame",
             Error::WindowFull => "too many unacknowledged messages in flight",
+            Error::KeyUnavailable => "the long-term key could not be used",
         };
         f.write_str(s)
     }
