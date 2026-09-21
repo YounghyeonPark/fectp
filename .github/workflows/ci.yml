@@ -102,6 +102,26 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
 
+  fuzz-targets-build:
+    name: the fuzz targets still compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # `fuzz` is outside the workspace, so `cargo test --workspace` and clippy
+      # never see it, and fuzz.yml only runs on a Sunday or when `fuzz/**`
+      # changes. A change to `fectp-core` that breaks a target therefore hid
+      # for a week — D76 broke `session-open` on a Thursday and the Sunday run
+      # reported it as a fuzzer failure, which it was not.
+      #
+      # `cargo check` and not `cargo fuzz build`: this only has to catch the
+      # targets drifting from the API they call. Linking libFuzzer is fuzz.yml's
+      # job and costs minutes this does not need.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-15
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --manifest-path fuzz/Cargo.toml
+
   miri:
     name: undefined behaviour in the C ABI
     runs-on: ubuntu-latest

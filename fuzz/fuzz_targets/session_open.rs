@@ -16,7 +16,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder};
+use fectp_core::session::{Capabilities, Initiator, Responder, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
 use rand_core::OsRng;
 
 /// A settled pair, built once per input.
@@ -39,12 +39,12 @@ fn pair() -> Option<(fectp_core::Session, fectp_core::Session)> {
     .ok()?;
     let mut responder = Responder::new(server_key, Capabilities::minimal(1200));
 
-    let mut msg1 = vec![0u8; Initiator::OVERHEAD + 64];
+    let mut msg1 = vec![0u8; INITIATOR_OVERHEAD + 64];
     let n = initiator.write_init(&mut OsRng, &[], &mut msg1).ok()?;
     let mut staging = vec![0u8; msg1.len()];
     responder.read_init(&msg1[..n], &mut staging).ok()?;
 
-    let mut msg2 = vec![0u8; Responder::OVERHEAD + 64];
+    let mut msg2 = vec![0u8; RESPONDER_OVERHEAD + 64];
     let (server, n2) = responder.write_response(&mut OsRng, &[], &mut msg2).ok()?;
     let mut reply = vec![0u8; msg2.len()];
     let (client, _) = initiator.read_response(&msg2[..n2], &mut reply).ok()?;

@@ -175,3 +175,5 @@ It is not a security audit. Injecting packet loss found a bug that lost
 messages while 179 tests passed; writing the specification a second time found
 another that had been there since the reliability layer was written. Both were
 found by doing something new, not by doing this list again.
+
+| **A crate the gate does not compile** | `fuzz` sits outside the workspace on purpose — it needs nightly and libFuzzer — so `cargo test --workspace` and `cargo clippy --workspace` never touch it, and its own workflow runs weekly. A change to `fectp-core` broke a target on a Thursday and surfaced on Sunday as a *fuzz failure*, which it was not: it was a compile error four days old. Anything excluded from the workspace is excluded from the gate. List those crates and check them explicitly; `cargo check` is enough and needs no linker. |
