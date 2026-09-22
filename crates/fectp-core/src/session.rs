@@ -763,9 +763,9 @@ pub const RESPONDER_OVERHEAD: usize = HEADER_LEN + MSG2_OVERHEAD + CAPS_LEN;
 /// The initiator half of the framed handshake.
 ///
 /// Generic over the long-term key, defaulting to an in-memory
-/// [`Keypair`](crate::keys::Keypair) so that existing callers write `Initiator`
+/// [`Keypair`] so that existing callers write `Initiator`
 /// and mean what they always did. A secure element is the other case; see
-/// [`StaticKey`](crate::keys::StaticKey).
+/// [`StaticKey`].
 pub struct Initiator<S: StaticKey = Keypair> {
     hs: HandshakeState<S>,
     session_id: u32,
@@ -888,7 +888,7 @@ impl<S: StaticKey> Initiator<S> {
 /// The responder half of the framed handshake.
 ///
 /// Generic over the long-term key on the same terms as
-/// [`Initiator`]: the default is an in-memory [`Keypair`](crate::keys::Keypair)
+/// [`Initiator`]: the default is an in-memory [`Keypair`]
 /// and the other case is a secure element.
 pub struct Responder<S: StaticKey = Keypair> {
     /// Taken when message 1 arrives; the handshake needs the header of that

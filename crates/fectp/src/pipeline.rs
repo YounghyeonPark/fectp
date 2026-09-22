@@ -315,13 +315,8 @@ pub(crate) struct Peer {
     /// Coding scratch space, grown on demand.
     pub primary: Vec<u8>,
     pub secondary: Vec<u8>,
-    /// Consecutive coding attempts that did not shrink the payload.
-    coding_misses: u8,
-    /// Sends still to be skipped before coding is attempted again.
-    coding_skips: u8,
-    /// The shape the miss counter was accumulated for. A caller that changes
-    /// shape is describing different data, which deserves a fresh attempt.
-    coding_shape: PayloadType,
+    /// Whether coding is worth attempting for the next send.
+    coding: CodingDecision,
 }
 
 /// Misses in a row before coding is assumed not to pay for this stream.
@@ -339,6 +334,59 @@ const CODING_MISS_LIMIT: u8 = 4;
 /// data, that is roughly 0.3 µs on every send.
 const CODING_PROBE_INTERVAL: u8 = 32;
 
+/// Whether coding is worth attempting, and what the last few attempts did.
+///
+/// Its own type because it is its own decision: three counters and two rules,
+/// reachable without a session. An end-to-end test cannot guard the retry — a
+/// payload too large to send raw is coded whatever this says, which `seal`
+/// calls `must_try` — so the tests that do guard it live beside it here.
+#[derive(Debug)]
+struct CodingDecision {
+    /// Consecutive coding attempts that did not shrink the payload.
+    misses: u8,
+    /// Sends still to be skipped before coding is attempted again.
+    skips: u8,
+    /// The shape the miss counter was accumulated for. A caller that changes
+    /// shape is describing different data, which deserves a fresh attempt.
+    shape: PayloadType,
+}
+
+impl CodingDecision {
+    fn new() -> Self {
+        Self {
+            misses: 0,
+            skips: 0,
+            shape: PayloadType::Opaque,
+        }
+    }
+
+    fn should_code(&mut self, payload_type: PayloadType) -> bool {
+        if payload_type != self.shape {
+            self.shape = payload_type;
+            self.misses = 0;
+            self.skips = 0;
+            return true;
+        }
+        if self.skips > 0 {
+            self.skips -= 1;
+            return false;
+        }
+        true
+    }
+
+    fn record(&mut self, paid: bool) {
+        if paid {
+            self.misses = 0;
+            self.skips = 0;
+        } else if self.misses + 1 >= CODING_MISS_LIMIT {
+            self.misses = 0;
+            self.skips = CODING_PROBE_INTERVAL;
+        } else {
+            self.misses += 1;
+        }
+    }
+}
+
 impl Peer {
     pub fn new(session: Session, buffer_hint: usize) -> Self {
         Self {
@@ -354,38 +402,18 @@ impl Peer {
             queue: VecDeque::new(),
             primary: vec![0u8; buffer_hint],
             secondary: vec![0u8; buffer_hint],
-            coding_misses: 0,
-            coding_skips: 0,
-            coding_shape: PayloadType::Opaque,
+            coding: CodingDecision::new(),
         }
     }
 
     /// Whether coding is worth attempting for this send.
     fn should_code(&mut self, payload_type: PayloadType) -> bool {
-        if payload_type != self.coding_shape {
-            self.coding_shape = payload_type;
-            self.coding_misses = 0;
-            self.coding_skips = 0;
-            return true;
-        }
-        if self.coding_skips > 0 {
-            self.coding_skips -= 1;
-            return false;
-        }
-        true
+        self.coding.should_code(payload_type)
     }
 
     /// Folds one coding outcome into the decision for the next send.
     fn record_coding(&mut self, paid: bool) {
-        if paid {
-            self.coding_misses = 0;
-            self.coding_skips = 0;
-        } else if self.coding_misses + 1 >= CODING_MISS_LIMIT {
-            self.coding_misses = 0;
-            self.coding_skips = CODING_PROBE_INTERVAL;
-        } else {
-            self.coding_misses += 1;
-        }
+        self.coding.record(paid)
     }
 
     /// The peer's authenticated static public key.
@@ -1328,6 +1356,117 @@ mod hostile_fragment {
             matches!(ingested, Ok(Ingested::Nothing)),
             "a fragment nobody can decode must be dropped like any other \
              unusable payload, not returned as an error"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coding_heuristic {
+    //! The sender-side decision about whether coding is worth attempting.
+    //!
+    //! Not observable end to end, which is the point: a receiver gets the same
+    //! bytes whether or not the sender bothered, and `end_to_end.rs` says so.
+    //! That also means an end-to-end test cannot guard it — one there claimed
+    //! to and did not, because a payload too large to send raw is coded
+    //! whatever this decides. So it is guarded here, where the decision is.
+
+    use super::*;
+
+    /// The decision, with no session behind it.
+    fn fresh() -> CodingDecision {
+        CodingDecision::new()
+    }
+
+    #[test]
+    fn coding_is_attempted_until_it_stops_paying() {
+        let mut peer = fresh();
+        for i in 0..CODING_MISS_LIMIT {
+            assert!(
+                peer.should_code(PayloadType::Opaque),
+                "attempt {i} should still be tried; nothing has given up yet"
+            );
+            peer.record(false);
+        }
+        assert!(
+            !peer.should_code(PayloadType::Opaque),
+            "after {CODING_MISS_LIMIT} misses in a row coding should be skipped"
+        );
+    }
+
+    #[test]
+    fn coding_is_retried_after_the_probe_interval_rather_than_abandoned() {
+        let mut peer = fresh();
+        for _ in 0..CODING_MISS_LIMIT {
+            peer.should_code(PayloadType::Opaque);
+            peer.record(false);
+        }
+
+        // The skip is a countdown, not a switch. Spend it.
+        let mut skipped = 0;
+        while !peer.should_code(PayloadType::Opaque) {
+            skipped += 1;
+            assert!(
+                skipped <= CODING_PROBE_INTERVAL,
+                "coding was skipped {skipped} times against an interval of \
+                 {CODING_PROBE_INTERVAL}, so it is being abandoned rather than \
+                 probed — a stream whose content becomes compressible would \
+                 never find out"
+            );
+        }
+        assert_eq!(
+            skipped, CODING_PROBE_INTERVAL,
+            "the probe should come exactly one interval after giving up"
+        );
+    }
+
+    #[test]
+    fn a_payoff_clears_the_count_so_the_next_run_of_misses_starts_again() {
+        let mut peer = fresh();
+
+        // One short of giving up, then a payoff.
+        for _ in 0..(CODING_MISS_LIMIT - 1) {
+            peer.should_code(PayloadType::Opaque);
+            peer.record(false);
+        }
+        peer.record(true);
+
+        // The count has to start over, so one more miss must not be enough.
+        // Asserting only that coding continues after the payoff is weaker than
+        // it reads, and was: with the reset removed, a run of payoffs never
+        // reaches the give-up branch at all, so nothing is skipped and the
+        // test passes while the property is gone.
+        peer.should_code(PayloadType::Opaque);
+        peer.record(false);
+        assert!(
+            peer.should_code(PayloadType::Opaque),
+            "one miss after a payoff gave up, so the payoff did not clear the \
+             count and a stream that coded well once is one miss from being \
+             skipped"
+        );
+
+        // And a full run still gives up, so the reset did not disable it.
+        for _ in 0..CODING_MISS_LIMIT {
+            peer.should_code(PayloadType::Opaque);
+            peer.record(false);
+        }
+        assert!(
+            !peer.should_code(PayloadType::Opaque),
+            "a full run of misses after a payoff should still give up"
+        );
+    }
+
+    #[test]
+    fn changing_shape_starts_the_decision_again() {
+        let mut peer = fresh();
+        for _ in 0..CODING_MISS_LIMIT {
+            peer.should_code(PayloadType::Opaque);
+            peer.record(false);
+        }
+        assert!(!peer.should_code(PayloadType::Opaque), "given up on Opaque");
+        assert!(
+            peer.should_code(PayloadType::I16 { channels: 2 }),
+            "a different shape is a different stream and what the last one did \
+             says nothing about it"
         );
     }
 }

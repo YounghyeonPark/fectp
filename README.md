@@ -384,7 +384,7 @@ sits: in the crate description crates.io shows in search results, and as a
 warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
 the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 347 of them and they pass. Linked for
+`cargo test --workspace` runs 351 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.4 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.
