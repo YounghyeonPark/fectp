@@ -102,6 +102,26 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p fectp --all-targets --features compress -- -D warnings
 
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # No `rustfmt.toml`: the defaults are the official style guide, and
+      # tuning was measured before adopting it — the closest configuration got
+      # 332 differing hunks down to 310, because this codebase's line breaks
+      # were chosen sentence by sentence and rustfmt's only lever is a width.
+      # Taking the standard whole is the point of having one.
+      - run: cargo fmt --all -- --check
+      # `crates/footprint` and `fuzz` are outside the workspace, so `--all`
+      # does not reach them. Same hole that let a fuzz target sit broken for
+      # four days; checked explicitly for the same reason.
+      - run: cargo fmt --manifest-path crates/footprint/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+
   fuzz-targets-build:
     name: the fuzz targets still compile
     runs-on: ubuntu-latest

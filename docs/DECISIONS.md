@@ -3819,3 +3819,61 @@ and the event loop, and the case this closes is the constrained one, which uses
 `fectp-core` directly — `crates/footprint` is that case and is what the fifty
 bytes were measured on. Worth stating rather than leaving a reader to discover
 that the trait exists and the front end cannot reach it.
+
+## D77 — rustfmt, taken whole rather than tuned
+
+**Problem.** The repository was in the worst of the three available states: it
+did not run `rustfmt`, and it did not say that it did not. Sixty-one files
+differed from the default output, so anyone arriving and typing `cargo fmt` out
+of habit produced a diff touching most of the codebase.
+
+**Decision.** Adopt it, with no `rustfmt.toml`.
+
+**Tuning was measured before being rejected.** The obvious middle path is to
+configure rustfmt towards the existing style and get the tool's benefit without
+rewriting anything. It does not work here:
+
+| configuration | differing hunks |
+|---|---|
+| defaults | 332 |
+| `chain_width`/`fn_call_width` = 70 | 310 |
+| `chain_width`/`fn_call_width` = 80 | 443 |
+| `use_small_heuristics = "Max"` | 613 |
+| `use_small_heuristics = "Off"` | 624 |
+
+Seven per cent at best, and most settings make it worse. The reason is
+structural rather than a matter of finding the right number: this codebase's
+line breaks were chosen sentence by sentence for what reads well, and rustfmt's
+only lever is a character count. There is no width that agrees with a judgement
+made per line.
+
+So the choice was the real one — take the official style whole, or write down
+that the project does not use it. Rust has a style guide arrived at through its
+own RFC process and owned by a style team, and rustfmt's thin configuration is
+deliberate for the same reason `gofmt` has none: the value is in everyone using
+the same one, not in it being the best one. Half-adopting it gets neither.
+
+**Against, and recorded because it was the standing recommendation until the
+decision went the other way.** Some of what it does is worse to read — a 55
+character line becomes four because the *chain* exceeds 60 even though the line
+is well under 100. The codebase was already internally consistent, so this
+fixes no inconsistency; it replaces one consistent style with another. And the
+contributor count is one, which is the condition under which a formatter earns
+least.
+
+**What answers the `git blame` cost.** `.git-blame-ignore-revs`, naming the
+reformat commit. GitHub honours it without being asked and `git config
+blame.ignoreRevsFile .git-blame-ignore-revs` does the same locally. Checked:
+blame on a line rustfmt moved reports D76's commit, not the reformat.
+
+**The excluded crates were formatted through their own manifests.**
+`cargo fmt --all` covers the workspace, and `crates/footprint` and `fuzz` are
+not in it. That is the hole which let a fuzz target sit uncompiled for four
+days the previous week, met a second time in a different tool one week later —
+which is the argument for the CI job checking all three rather than the one.
+
+**Verified rather than assumed.** A reformat that changed behaviour would
+change it silently, so: the full suite, clippy at every feature combination,
+MSRV 1.85, both bindings, the test vectors byte-identical, `interop.rs` still
+agreeing with `snow` in both roles, and the linked `thumbv7em` image at 23,982
+bytes — the same number as before.
