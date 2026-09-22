@@ -44,7 +44,7 @@ pub mod transport;
 
 pub use codec::{CodecHeader, Entropy, Transform};
 pub use error::{Error, Result};
-pub use keys::{Keypair, PublicKey, ANONYMOUS, DHLEN};
+pub use keys::{Keypair, PublicKey, StaticKey, ANONYMOUS, DHLEN};
 pub use reliability::{Ack, DedupWindow, Due, MessageId, RetransmitQueue};
 pub use session::{
     preshared_key, Capabilities, Initiator, Responder, ResumeInitiator, ResumeResponder,

@@ -8,6 +8,15 @@ wire version, which is 1 and has not moved — is in
 The reasoning behind anything here is in [DECISIONS.md](docs/DECISIONS.md),
 which is the long form: this file says what changed, that one says why.
 
+## Unreleased
+
+**`StaticKey` is re-exported at the crate root**, as `Keypair`, `PublicKey`,
+`ANONYMOUS` and `DHLEN` already were. It shipped in 0.2.0 reachable only as
+`fectp_core::keys::StaticKey`, so somebody who wrote `use fectp_core::Keypair`
+had to reach a module deeper for the trait it implements. The old path still
+works; this adds the short one. A test now uses every key name through the root
+so the set cannot drift again.
+
 ## 0.2.0 — 2026-09-22
 
 Wire version 1, unchanged. A peer built from 0.1.0 and one built from this talk
