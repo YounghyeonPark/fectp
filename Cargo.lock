@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "fectp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fectp-core",
  "proptest",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "fectp-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fectp",
  "flate2",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "fectp-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "chacha20poly1305",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "fectp-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fectp-core",
  "rand_core 0.6.4",

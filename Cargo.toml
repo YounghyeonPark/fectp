@@ -5,7 +5,7 @@ members = ["crates/fectp-core", "crates/fectp", "crates/ffi", "crates/bench"]
 exclude = ["crates/footprint", "fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "BSD-3-Clause"

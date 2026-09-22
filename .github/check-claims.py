@@ -132,6 +132,38 @@ NOT_FOR_REPORTERS = {
 }
 
 
+def path_dependency_versions() -> list[str]:
+    """Path dependencies whose `version` has drifted from the workspace's.
+
+    `fectp-core = { path = "..." }` builds in a workspace and is refused on
+    publish — "all dependencies must have a version requirement specified" — so
+    both are written, and the version half has to be bumped by hand every
+    release. RELEASING.md said so and said nothing checked it. Missing the bump
+    publishes a crate that depends on the *previous* core, which resolves,
+    compiles, and is wrong.
+    """
+    root = re.search(r'^version = "([^"]+)"', read("Cargo.toml"), re.M)
+    if not root:
+        sys.exit("Cargo.toml: could not find the workspace version")
+    want = root.group(1)
+
+    problems = []
+    for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        for dep, version in re.findall(
+            r'^(\w[\w-]*) = \{[^}]*path = "[^"]*"[^}]*version = "([^"]+)"', text, re.M
+        ):
+            if version != want:
+                where = manifest.relative_to(ROOT).as_posix()
+                problems.append(
+                    f"{where}: `{dep}` is pinned at {version} and the workspace "
+                    f"is {want}. A release that ships this depends on the "
+                    f"previous version of its own core, which resolves and is "
+                    f"wrong."
+                )
+    return problems
+
+
 def threat_model_weaknesses() -> list[str]:
     """The `###` headings under THREAT-MODEL.md's Known weaknesses."""
     text = read("docs/THREAT-MODEL.md")
@@ -440,6 +472,7 @@ def main() -> int:
 
     problems += counted_claims()
     problems += weaknesses_reach_reporters()
+    problems += path_dependency_versions()
 
     if problems:
         print(f"{len(problems)} claim(s) the code disagrees with:\n")

@@ -8,7 +8,17 @@ wire version, which is 1 and has not moved — is in
 The reasoning behind anything here is in [DECISIONS.md](docs/DECISIONS.md),
 which is the long form: this file says what changed, that one says why.
 
-## Unreleased
+## 0.2.0 — 2026-09-22
+
+Wire version 1, unchanged. A peer built from 0.1.0 and one built from this talk
+to each other: the test vectors are byte-identical and the handshake still
+agrees with `snow` in both roles, which is what makes that a measurement rather
+than an intention.
+
+**Also in this release, and touching no behaviour:** the codebase is now
+formatted with `rustfmt` at its defaults, enforced in CI (D77).
+`.git-blame-ignore-revs` names the commit that applied it, so blame steps over
+it rather than stopping there.
 
 **A long-term key can live in a secure element.** `fectp-core` takes a
 `StaticKey` — `public()` and a fallible `dh()`, which is everything the protocol
