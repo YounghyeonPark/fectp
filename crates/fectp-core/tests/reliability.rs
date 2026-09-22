@@ -476,11 +476,17 @@ fn identifiers_are_compared_the_way_they_wrap() {
     for id in [2u32, 1, 0, u32::MAX] {
         assert!(ack.covers(id), "{id} is within three of a highest of 2");
     }
-    assert!(!ack.covers(u32::MAX - 1), "four below, and only three bits are set");
+    assert!(
+        !ack.covers(u32::MAX - 1),
+        "four below, and only three bits are set"
+    );
 
     // And the receive window, which decides what reaches the application.
     let mut window = DedupWindow::new();
-    assert!(window.accept(u32::MAX - 2), "first message, whatever its value");
+    assert!(
+        window.accept(u32::MAX - 2),
+        "first message, whatever its value"
+    );
     assert!(window.accept(u32::MAX - 1));
     assert!(window.accept(u32::MAX));
     assert!(
@@ -497,6 +503,9 @@ fn identifiers_are_compared_the_way_they_wrap() {
     // The acknowledgement it produces has to name what it accepted.
     let ack = window.to_ack();
     for id in [1u32, 0, u32::MAX, u32::MAX - 1, u32::MAX - 2] {
-        assert!(ack.covers(id), "accepted {id} but the acknowledgement omits it");
+        assert!(
+            ack.covers(id),
+            "accepted {id} but the acknowledgement omits it"
+        );
     }
 }

@@ -39,7 +39,9 @@ fn our_initiator_talks_to_snow_responder() {
     let n = ours
         .write_message_1(&mut OsRng, b"0-RTT request", &mut wire)
         .expect("write message 1");
-    let len = theirs.read_message(&wire[..n], &mut plain).expect("snow reads message 1");
+    let len = theirs
+        .read_message(&wire[..n], &mut plain)
+        .expect("snow reads message 1");
     assert_eq!(&plain[..len], b"0-RTT request");
 
     // The responder authenticates the initiator from message 1 alone.
@@ -50,8 +52,12 @@ fn our_initiator_talks_to_snow_responder() {
     );
 
     // Message 2.
-    let n = theirs.write_message(b"welcome", &mut wire).expect("snow writes message 2");
-    let len = ours.read_message_2(&wire[..n], &mut plain).expect("read message 2");
+    let n = theirs
+        .write_message(b"welcome", &mut wire)
+        .expect("snow writes message 2");
+    let len = ours
+        .read_message_2(&wire[..n], &mut plain)
+        .expect("read message 2");
     assert_eq!(&plain[..len], b"welcome");
 
     // Both sides must derive identical transport keys.
@@ -93,15 +99,21 @@ fn snow_initiator_talks_to_our_responder() {
     let mut wire = [0u8; 1024];
     let mut plain = [0u8; 1024];
 
-    let n = theirs.write_message(b"hello from snow", &mut wire).expect("snow message 1");
-    let len = ours.read_message_1(&wire[..n], &mut plain).expect("read message 1");
+    let n = theirs
+        .write_message(b"hello from snow", &mut wire)
+        .expect("snow message 1");
+    let len = ours
+        .read_message_1(&wire[..n], &mut plain)
+        .expect("read message 1");
     assert_eq!(&plain[..len], b"hello from snow");
     assert_eq!(ours.remote_static(), Some(&initiator_public));
 
     let n = ours
         .write_message_2(&mut OsRng, b"welcome from fectp", &mut wire)
         .expect("write message 2");
-    let len = theirs.read_message(&wire[..n], &mut plain).expect("snow reads message 2");
+    let len = theirs
+        .read_message(&wire[..n], &mut plain)
+        .expect("snow reads message 2");
     assert_eq!(&plain[..len], b"welcome from fectp");
 
     let (our_send, _our_recv) = ours.split().expect("split");
@@ -120,8 +132,11 @@ fn snow_initiator_talks_to_our_responder() {
 #[test]
 fn wrong_responder_key_is_rejected() {
     let wrong_public = *Keypair::from_secret([0x33; 32]).public();
-    let mut ours =
-        HandshakeState::initiator(Keypair::from_secret(INITIATOR_SECRET), wrong_public, PROLOGUE);
+    let mut ours = HandshakeState::initiator(
+        Keypair::from_secret(INITIATOR_SECRET),
+        wrong_public,
+        PROLOGUE,
+    );
     let mut theirs = Builder::new(PARAMS.parse().unwrap())
         .local_private_key(&RESPONDER_SECRET)
         .prologue(PROLOGUE)
@@ -130,7 +145,9 @@ fn wrong_responder_key_is_rejected() {
 
     let mut wire = [0u8; 1024];
     let mut plain = [0u8; 1024];
-    let n = ours.write_message_1(&mut OsRng, b"", &mut wire).expect("write");
+    let n = ours
+        .write_message_1(&mut OsRng, b"", &mut wire)
+        .expect("write");
     assert!(
         theirs.read_message(&wire[..n], &mut plain).is_err(),
         "a handshake aimed at the wrong static key must not authenticate"
@@ -155,7 +172,9 @@ fn prologue_mismatch_is_rejected() {
 
     let mut wire = [0u8; 1024];
     let mut plain = [0u8; 1024];
-    let n = ours.write_message_1(&mut OsRng, b"", &mut wire).expect("write");
+    let n = ours
+        .write_message_1(&mut OsRng, b"", &mut wire)
+        .expect("write");
     assert!(theirs.read_message(&wire[..n], &mut plain).is_err());
 }
 
@@ -195,10 +214,14 @@ fn our_resume_initiator_talks_to_snow() {
     let mut plain = [0u8; 1024];
 
     let n = write_resume_1(&mut ours, b"resumed 0-RTT", &mut wire);
-    let len = theirs.read_message(&wire[..n], &mut plain).expect("snow reads 1");
+    let len = theirs
+        .read_message(&wire[..n], &mut plain)
+        .expect("snow reads 1");
     assert_eq!(&plain[..len], b"resumed 0-RTT");
 
-    let n = theirs.write_message(b"welcome back", &mut wire).expect("snow writes 2");
+    let n = theirs
+        .write_message(b"welcome back", &mut wire)
+        .expect("snow writes 2");
     let len = ours.read_message_2(&wire[..n], &mut plain).expect("read 2");
     assert_eq!(&plain[..len], b"welcome back");
 
@@ -208,7 +231,9 @@ fn our_resume_initiator_talks_to_snow() {
     let mut buf = [0u8; 256];
     buf[..8].copy_from_slice(b"resumed!");
     let ct = our_send.encrypt_at(&[], 0, &mut buf, 8).expect("seal");
-    let len = their_transport.read_message(&buf[..ct], &mut plain).expect("snow opens");
+    let len = their_transport
+        .read_message(&buf[..ct], &mut plain)
+        .expect("snow opens");
     assert_eq!(&plain[..len], b"resumed!");
 }
 
@@ -225,12 +250,16 @@ fn snow_resume_initiator_talks_to_us() {
     let mut wire = [0u8; 1024];
     let mut plain = [0u8; 1024];
 
-    let n = theirs.write_message(b"hello again", &mut wire).expect("snow writes 1");
+    let n = theirs
+        .write_message(b"hello again", &mut wire)
+        .expect("snow writes 1");
     let len = ours.read_message_1(&wire[..n], &mut plain).expect("read 1");
     assert_eq!(&plain[..len], b"hello again");
 
     let n = write_resume_2(&mut ours, b"welcome", &mut wire);
-    let len = theirs.read_message(&wire[..n], &mut plain).expect("snow reads 2");
+    let len = theirs
+        .read_message(&wire[..n], &mut plain)
+        .expect("snow reads 2");
     assert_eq!(&plain[..len], b"welcome");
 
     let (our_send, _) = ours.split().expect("split");
@@ -238,7 +267,9 @@ fn snow_resume_initiator_talks_to_us() {
     let mut buf = [0u8; 256];
     buf[..6].copy_from_slice(b"server");
     let ct = our_send.encrypt_at(&[], 0, &mut buf, 6).expect("seal");
-    let len = their_transport.read_message(&buf[..ct], &mut plain).expect("snow opens");
+    let len = their_transport
+        .read_message(&buf[..ct], &mut plain)
+        .expect("snow opens");
     assert_eq!(&plain[..len], b"server");
 }
 
@@ -267,17 +298,28 @@ fn both_peers_derive_the_same_resumption_key() {
     let responder_kp = Keypair::from_secret(RESPONDER_SECRET);
     let responder_public = *responder_kp.public();
 
-    let mut initiator =
-        HandshakeState::initiator(Keypair::from_secret(INITIATOR_SECRET), responder_public, PROLOGUE);
+    let mut initiator = HandshakeState::initiator(
+        Keypair::from_secret(INITIATOR_SECRET),
+        responder_public,
+        PROLOGUE,
+    );
     let mut responder = HandshakeState::responder(responder_kp, PROLOGUE);
 
     let mut wire = [0u8; 1024];
     let mut plain = [0u8; 1024];
 
-    let n = initiator.write_message_1(&mut OsRng, b"", &mut wire).expect("msg1");
-    responder.read_message_1(&wire[..n], &mut plain).expect("read msg1");
-    let n = responder.write_message_2(&mut OsRng, b"", &mut wire).expect("msg2");
-    initiator.read_message_2(&wire[..n], &mut plain).expect("read msg2");
+    let n = initiator
+        .write_message_1(&mut OsRng, b"", &mut wire)
+        .expect("msg1");
+    responder
+        .read_message_1(&wire[..n], &mut plain)
+        .expect("read msg1");
+    let n = responder
+        .write_message_2(&mut OsRng, b"", &mut wire)
+        .expect("msg2");
+    initiator
+        .read_message_2(&wire[..n], &mut plain)
+        .expect("read msg2");
 
     let client_key = initiator.resumption_key();
     let server_key = responder.resumption_key();

@@ -23,7 +23,8 @@ fn the_documented_constants_are_the_real_ones() {
     assert_eq!(fectp::MAX_QUEUED, 4, "API.md says 4 per peer");
     assert_eq!(fectp::MAX_PEERS, 1024, "API.md says 1024");
     assert_eq!(
-        fectp::MAX_HANDSHAKES_PER_SECOND, 512,
+        fectp::MAX_HANDSHAKES_PER_SECOND,
+        512,
         "API.md says 512 new sessions a second"
     );
     assert_eq!(fectp::CODEC_OVERHEAD, 4, "API.md says 4 bytes");
@@ -41,7 +42,8 @@ fn every_send_has_the_shape_the_reference_claims() {
     let echo = Echo::start();
     let conn =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
 
     let shape = PayloadType::I16 { channels: 2 };
     let small = [0x11u8; 64];
@@ -148,7 +150,8 @@ fn one_receive_method_covers_every_kind_of_message() {
     let echo = Echo::start();
     let conn =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
 
     let mut buf = vec![0u8; 8192];
 
@@ -179,7 +182,8 @@ fn one_receive_method_covers_every_kind_of_message() {
         big.len() > conn.max_payload(),
         "this must not fit in one frame or it tests nothing"
     );
-    conn.send_reliable(&big, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(5)))
+    conn.send_reliable(&big, PayloadType::Opaque)
+        .and_then(|()| conn.flush(Duration::from_secs(5)))
         .expect("send_reliable");
     let n = conn.recv(&mut buf).expect("recv");
     assert_eq!(n, big.len(), "fragmented messages arrive whole");

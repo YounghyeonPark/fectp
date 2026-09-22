@@ -282,8 +282,5 @@ fn growth_slows_once_past_the_threshold() {
         avoidance > MIN_CWND,
         "it should have climbed out of the floor by now"
     );
-    assert!(
-        avoidance <= MAX_IN_FLIGHT,
-        "and not past the slot count"
-    );
+    assert!(avoidance <= MAX_IN_FLIGHT, "and not past the slot count");
 }

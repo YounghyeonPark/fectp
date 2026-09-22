@@ -12,18 +12,20 @@ use fectp_core::codec::{
     CODEC_TRANSPOSE, CODEC_ZSTD, MAX_ORIGINAL_LEN,
 };
 use fectp_core::frame::{
-    FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN, VERSION,
+    FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN,
+    VERSION,
 };
 use fectp_core::keys::DHLEN;
-use fectp_core::reliability::{Ack, ACK_BLOCK_LEN, ACK_WINDOW, MESSAGE_ID_LEN};
 use fectp_core::noise::{
-    HASHLEN, KEYLEN, MSG1_OVERHEAD, MSG2_OVERHEAD, PROTOCOL_NAME, PSK_LEN,
-    RESUME_MSG_OVERHEAD, RESUME_PROTOCOL_NAME, TAGLEN,
+    HASHLEN, KEYLEN, MSG1_OVERHEAD, MSG2_OVERHEAD, PROTOCOL_NAME, PSK_LEN, RESUME_MSG_OVERHEAD,
+    RESUME_PROTOCOL_NAME, TAGLEN,
 };
+use fectp_core::reliability::{Ack, ACK_BLOCK_LEN, ACK_WINDOW, MESSAGE_ID_LEN};
 use fectp_core::session::{
-    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket,
-    CAPS_LEN, CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
-    TICKET_ID_LEN, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
+    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket, CAPS_LEN, CAP_RELIABLE,
+    CAP_ZSTD, DATA_OVERHEAD, INITIATOR_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
+    RESPONDER_OVERHEAD, TICKET_ID_LEN,
+};
 
 /// SPEC §2 — cipher suite sizes.
 #[test]
@@ -90,10 +92,7 @@ fn frame_type_ids() {
         let mut buf = [0u8; HEADER_LEN];
         Header::new(frame_type, 0).encode(&mut buf).expect("encode");
         assert_eq!(buf[0] & 0x0f, id, "{frame_type:?}");
-        assert_eq!(
-            Header::decode(&buf).expect("decode").frame_type,
-            frame_type
-        );
+        assert_eq!(Header::decode(&buf).expect("decode").frame_type, frame_type);
     }
 
     // Every id the specification does not define must be rejected. Checking
@@ -102,7 +101,9 @@ fn frame_type_ids() {
     const DEFINED: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
     for id in 0..16u8 {
         let mut buf = [0u8; HEADER_LEN];
-        Header::new(FrameType::Data, 0).encode(&mut buf).expect("encode");
+        Header::new(FrameType::Data, 0)
+            .encode(&mut buf)
+            .expect("encode");
         buf[0] = (VERSION << 4) | id;
         let accepted = Header::decode(&buf).is_ok();
         assert_eq!(
@@ -123,7 +124,9 @@ fn flag_bits() {
 
     for reserved in [0x10u8, 0x20, 0x40, 0x80] {
         let mut buf = [0u8; HEADER_LEN];
-        Header::new(FrameType::Data, 0).encode(&mut buf).expect("encode");
+        Header::new(FrameType::Data, 0)
+            .encode(&mut buf)
+            .expect("encode");
         buf[1] = reserved;
         assert!(
             Header::decode(&buf).is_err(),
@@ -219,7 +222,11 @@ fn fragment_descriptor_layout() {
     };
     let mut buf = [0u8; FRAGMENT_LEN];
     fragment.encode(&mut buf).expect("encode");
-    assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8], "little-endian, in field order");
+    assert_eq!(
+        buf,
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        "little-endian, in field order"
+    );
 
     // A receiver sizes a buffer from `count`, so both bounds are normative.
     let mut absurd = [0u8; FRAGMENT_LEN];
@@ -287,7 +294,10 @@ fn resumption_constants() {
         RESUME_PROTOCOL_NAME,
         b"Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s"
     );
-    assert!(RESUME_PROTOCOL_NAME.len() > HASHLEN, "hashed, not zero-padded");
+    assert!(
+        RESUME_PROTOCOL_NAME.len() > HASHLEN,
+        "hashed, not zero-padded"
+    );
 }
 
 /// SPEC §4.6 — the ticket identifier is derived from the key, not assigned.
@@ -480,17 +490,26 @@ fn leb128_has_exactly_one_encoding_per_value() {
     ] {
         let mut buf = [0u8; varint::MAX_LEN];
         let n = varint::encode(value, &mut buf).expect("encode");
-        assert_eq!(n, expected_len, "{value} must encode in {expected_len} bytes");
+        assert_eq!(
+            n, expected_len,
+            "{value} must encode in {expected_len} bytes"
+        );
         assert_eq!(varint::decode(&buf[..n]).expect("decode"), (value, n));
     }
 
     // "a final byte of `0x00` preceded by at least one continuation byte"
     assert!(varint::decode(&[0x80, 0x00]).is_err(), "padded zero");
-    assert!(varint::decode(&[0x80, 0x80, 0x00]).is_err(), "twice-padded zero");
+    assert!(
+        varint::decode(&[0x80, 0x80, 0x00]).is_err(),
+        "twice-padded zero"
+    );
     assert!(varint::decode(&[0xff, 0x00]).is_err(), "padded 127");
 
     // "an encoding longer than 5 bytes"
-    assert!(varint::decode(&[0x80; 6]).is_err(), "six continuation bytes");
+    assert!(
+        varint::decode(&[0x80; 6]).is_err(),
+        "six continuation bytes"
+    );
 
     // "any final byte whose bits would overflow a `u32`"
     assert!(
@@ -511,13 +530,22 @@ fn message_identifiers_wrap() {
     // "the one a shorter distance ahead is the later one"
     let mut window = DedupWindow::new();
     assert!(window.accept(u32::MAX));
-    assert!(window.accept(0), "SPEC.md §5.5: the identifier after u32::MAX is later");
-    assert!(!window.accept(u32::MAX), "and the one before it is now a duplicate");
+    assert!(
+        window.accept(0),
+        "SPEC.md §5.5: the identifier after u32::MAX is later"
+    );
+    assert!(
+        !window.accept(u32::MAX),
+        "and the one before it is now a duplicate"
+    );
 
     // §5.7 — "bit `i` set means `highest - 1 - i`, with the subtraction wrapping"
     let ack = Ack {
         highest: 0,
         bitmap: 0b1,
     };
-    assert!(ack.covers(u32::MAX), "SPEC.md §5.7: bit 0 of a highest of 0 names u32::MAX");
+    assert!(
+        ack.covers(u32::MAX),
+        "SPEC.md §5.7: bit 0 of a highest of 0 names u32::MAX"
+    );
 }

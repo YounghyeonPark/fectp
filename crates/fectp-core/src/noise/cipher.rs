@@ -30,7 +30,10 @@ pub struct CipherState {
 impl CipherState {
     /// Creates an unkeyed `CipherState`. Encryption is a no-op until keyed.
     pub fn new() -> Self {
-        Self { key: None, nonce: 0 }
+        Self {
+            key: None,
+            nonce: 0,
+        }
     }
 
     /// Installs `key` and resets the nonce counter, per Noise `InitializeKey`.

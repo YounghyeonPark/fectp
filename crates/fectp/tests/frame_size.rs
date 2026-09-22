@@ -47,7 +47,9 @@ fn incompressible(len: usize) -> Vec<u8> {
 fn exclusive() -> MutexGuard<'static, ()> {
     // A test that panics while holding it should not make every later test
     // fail for a different reason than the one that broke.
-    CEILING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    CEILING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A default frame gives up a fifth of what ethernet would have carried, and
@@ -65,9 +67,10 @@ fn raising_the_ceiling_puts_more_in_every_frame() {
     );
 
     let echo = Echo::start();
-    let conn = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-        .expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    let conn =
+        Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
     let small = conn.max_payload();
     assert!(
         small < fectp::DEFAULT_MAX_DATAGRAM,
@@ -76,7 +79,8 @@ fn raising_the_ceiling_puts_more_in_every_frame() {
 
     // One byte past it is refused, which is what makes the limit the limit.
     assert!(
-        conn.send(&incompressible(small + 1), PayloadType::Opaque).is_err(),
+        conn.send(&incompressible(small + 1), PayloadType::Opaque)
+            .is_err(),
         "the frame limit must actually bound an unreliable send"
     );
     drop(conn);
@@ -92,9 +96,10 @@ fn raising_the_ceiling_puts_more_in_every_frame() {
     // A fresh endpoint, because the value travels in the handshake: a peer
     // already told 1200 goes on believing it.
     let echo = Echo::start();
-    let conn = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-        .expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    let conn =
+        Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
     let large = conn.max_payload();
 
     assert!(

@@ -247,7 +247,9 @@ fn a_forged_frame_does_not_protect_a_session_from_eviction() {
     let relay = Injector::spawn(echo.addr);
     let quiet =
         Connection::connect(relay.addr, &echo.public, &Identity::generate()).expect("connect");
-    let captured = relay.last().expect("the handshake passed through the relay");
+    let captured = relay
+        .last()
+        .expect("the handshake passed through the relay");
     relay.send_from_the_peers_address(forge_data_frame_for(&captured));
     // Long enough for the forgery to be received and acted on.
     thread::sleep(Duration::from_millis(300));
@@ -283,7 +285,9 @@ fn a_forged_frame_does_not_hold_a_dead_session_open() {
     let relay = Injector::spawn(echo.addr);
     let conn =
         Connection::connect(relay.addr, &echo.public, &Identity::generate()).expect("connect");
-    let captured = relay.last().expect("the handshake passed through the relay");
+    let captured = relay
+        .last()
+        .expect("the handshake passed through the relay");
 
     // Noise from the peer's own address, over and over, while the peer itself
     // says nothing further.

@@ -358,9 +358,9 @@ pub unsafe extern "C" fn fectp_initiator_write_init(
         let initiator = unsafe { &mut *initiator };
         // SAFETY: the caller guarantees the buffers; they do not alias, being
         // one read-only and one write-only argument.
-        let (Some(payload), Some(out)) =
-            (unsafe { input(payload, payload_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(payload), Some(out)) = (unsafe { input(payload, payload_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         match initiator.inner.write_init(&mut OsRng, payload, out) {
@@ -407,9 +407,9 @@ pub unsafe extern "C" fn fectp_initiator_read_response(
         *slot = core::ptr::null_mut();
 
         // SAFETY: the caller guarantees the buffers, which do not alias.
-        let (Some(frame), Some(out)) =
-            (unsafe { input(frame, frame_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(frame), Some(out)) = (unsafe { input(frame, frame_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         match owned.inner.read_response(frame, out) {
@@ -489,9 +489,9 @@ pub unsafe extern "C" fn fectp_responder_read_init(
         // SAFETY: the caller guarantees a live handle, borrowed only here.
         let responder = unsafe { &mut *responder };
         // SAFETY: the caller guarantees the buffers, which do not alias.
-        let (Some(frame), Some(out)) =
-            (unsafe { input(frame, frame_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(frame), Some(out)) = (unsafe { input(frame, frame_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         match responder.inner.read_init(frame, out) {
@@ -536,9 +536,9 @@ pub unsafe extern "C" fn fectp_responder_write_response(
         *slot = core::ptr::null_mut();
 
         // SAFETY: the caller guarantees the buffers, which do not alias.
-        let (Some(payload), Some(out)) =
-            (unsafe { input(payload, payload_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(payload), Some(out)) = (unsafe { input(payload, payload_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         match owned.inner.write_response(&mut OsRng, payload, out) {
@@ -594,9 +594,9 @@ pub unsafe extern "C" fn fectp_session_seal(
         // SAFETY: the caller guarantees a live handle, borrowed only here.
         let session = unsafe { &mut *session };
         // SAFETY: the caller guarantees the buffers, which do not alias.
-        let (Some(payload), Some(out)) =
-            (unsafe { input(payload, payload_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(payload), Some(out)) = (unsafe { input(payload, payload_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         match session.inner.seal(payload, 0, out) {
@@ -633,9 +633,9 @@ pub unsafe extern "C" fn fectp_session_open(
         // SAFETY: the caller guarantees a live handle, borrowed only here.
         let session = unsafe { &mut *session };
         // SAFETY: the caller guarantees the buffers, which do not alias.
-        let (Some(frame), Some(out)) =
-            (unsafe { input(frame, frame_len) }, unsafe { output(out, out_len) })
-        else {
+        let (Some(frame), Some(out)) = (unsafe { input(frame, frame_len) }, unsafe {
+            output(out, out_len)
+        }) else {
             return FECTP_ERR_NULL;
         };
         // The core decrypts in place; the caller's frame is not ours to write

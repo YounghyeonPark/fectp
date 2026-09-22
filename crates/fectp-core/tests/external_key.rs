@@ -147,7 +147,9 @@ fn an_initiator_asks_its_element_twice() {
 
     let mut initiator = Initiator::new(&client, server_public, 1, caps()).expect("initiator");
     let mut msg1 = vec![0u8; fectp_core::session::INITIATOR_OVERHEAD + 8];
-    let n = initiator.write_init(&mut OsRng, &[], &mut msg1).expect("msg1");
+    let n = initiator
+        .write_init(&mut OsRng, &[], &mut msg1)
+        .expect("msg1");
 
     let mut responder = Responder::new(&server, caps());
     let mut staging = vec![0u8; msg1.len()];

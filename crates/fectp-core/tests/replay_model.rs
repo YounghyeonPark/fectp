@@ -175,12 +175,18 @@ fn the_window_edge_is_where_the_document_puts_it() {
     window.commit(1000);
 
     // "Number of sequence numbers below the newest that remain acceptable."
-    assert!(window.check(1000 - (REPLAY_WINDOW - 1)).is_ok(), "the last one inside");
+    assert!(
+        window.check(1000 - (REPLAY_WINDOW - 1)).is_ok(),
+        "the last one inside"
+    );
     assert!(
         matches!(window.check(1000 - REPLAY_WINDOW), Err(Error::Replay)),
         "one past the edge is a replay"
     );
-    assert!(matches!(window.check(1000), Err(Error::Replay)), "the highest itself");
+    assert!(
+        matches!(window.check(1000), Err(Error::Replay)),
+        "the highest itself"
+    );
     assert!(window.check(1001).is_ok(), "anything newer");
 
     // A jump clean past the window leaves nothing behind it acceptable.

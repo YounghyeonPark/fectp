@@ -359,7 +359,10 @@ fn a_session_that_never_spoke_is_not_sent_keepalives() {
 
     // The handshake response is the one datagram this exchange is owed.
     let answered = sock.recv(&mut wire).is_ok();
-    assert!(answered, "the handshake must have completed for this to mean anything");
+    assert!(
+        answered,
+        "the handshake must have completed for this to mean anything"
+    );
 
     // From here the session exists and has never spoken. Nothing more should
     // arrive.

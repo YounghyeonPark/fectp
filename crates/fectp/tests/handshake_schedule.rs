@@ -239,11 +239,7 @@ fn warm_up(client: &mut Endpoint, addr: SocketAddr, key: &PeerKey) -> Duration {
 /// the one taken and the resend that got through — is what makes a trial
 /// countable. The property asserted afterwards is the same either way; only
 /// interference is retried.
-fn recovery_from_one_lost_frame(
-    client: &mut Endpoint,
-    relay: &Relay,
-    key: &PeerKey,
-) -> Duration {
+fn recovery_from_one_lost_frame(client: &mut Endpoint, relay: &Relay, key: &PeerKey) -> Duration {
     for _ in 0..TRIALS {
         let before = relay.opening_frames();
         relay.arm();

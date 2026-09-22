@@ -138,7 +138,11 @@ fn a_lost_opening_frame_is_sent_again() {
         .expect("a lost opening frame must be resent, not fatal");
     let elapsed = started.elapsed();
 
-    assert_eq!(relay.dropped(), 1, "the relay must actually have dropped one");
+    assert_eq!(
+        relay.dropped(),
+        1,
+        "the relay must actually have dropped one"
+    );
     assert!(
         elapsed < Duration::from_secs(4),
         "connect took {elapsed:?}: it waited out the timeout instead of resending"

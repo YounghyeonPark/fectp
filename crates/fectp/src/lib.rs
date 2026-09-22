@@ -97,10 +97,10 @@ use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
 mod endpoint;
 pub mod udp;
 
-use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
@@ -115,13 +115,13 @@ use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
 
 pub use compress::PayloadType;
-pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 pub use endpoint::{
     Endpoint, Event, PeerId, HANDSHAKE_ATTEMPTS, MAX_HANDSHAKES_PER_SECOND,
     MAX_MIGRATION_ATTEMPTS_PER_PEER, MAX_PEERS, MIN_KEEPALIVE, MIN_PEER_TIMEOUT,
 };
+pub use fectp_core::codec::{CODECS_CORE as CORE_CODECS, CODEC_HEADER_LEN as CODEC_OVERHEAD};
 pub use pipeline::MAX_QUEUED;
-pub use fectp_core::codec::{CODEC_HEADER_LEN as CODEC_OVERHEAD, CODECS_CORE as CORE_CODECS};
+pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 /// How long a handshake waits for the peer's reply before giving up.
 ///
 /// Applies to every way of opening a connection, which is why none of them
@@ -164,7 +164,10 @@ pub use udp::{
 ///
 /// Platforms disagree: Unix reports `WouldBlock`, Windows `TimedOut`.
 pub(crate) fn is_timeout(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 /// Whether an error is the kernel reporting an ICMP message about an *earlier*
@@ -186,7 +189,6 @@ pub(crate) fn is_stale_unreachable(e: &io::Error) -> bool {
         io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
     )
 }
-
 
 /// How long to wait for a handshake reply before sending the opening frame again.
 ///
@@ -212,11 +214,7 @@ const HANDSHAKE_RETRY_MS: u64 = 250;
 /// (D71). A `Connection` is one blocking call with nothing before or after it,
 /// so there is nowhere to keep what a path measured and nothing to keep it
 /// from: the first handshake to an address is the only handshake there is.
-fn exchange_handshake(
-    transport: &mut UdpTransport,
-    frame: &[u8],
-    rx: &mut [u8],
-) -> Result<usize> {
+fn exchange_handshake(transport: &mut UdpTransport, frame: &[u8], rx: &mut [u8]) -> Result<usize> {
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
 
     for attempt in 1u64.. {
@@ -249,9 +247,7 @@ fn exchange_handshake(
 fn resolve(addr: impl ToSocketAddrs) -> Result<SocketAddr> {
     addr.to_socket_addrs()?
         .next()
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no address resolved").into()
-        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no address resolved").into())
 }
 
 /// Errors surfaced by the FECTP API.
@@ -301,7 +297,10 @@ impl std::fmt::Display for Error {
             Error::Protocol(e) => write!(f, "protocol error: {e}"),
             Error::Decompress => f.write_str("could not decompress payload"),
             Error::PayloadTooLarge { len, limit } => {
-                write!(f, "payload of {len} bytes exceeds the {limit}-byte frame limit")
+                write!(
+                    f,
+                    "payload of {len} bytes exceeds the {limit}-byte frame limit"
+                )
             }
             Error::Handshake => f.write_str("handshake failed"),
             Error::Unacknowledged { count } => {
@@ -312,9 +311,7 @@ impl std::fmt::Display for Error {
             }
             Error::UnknownTicket => f.write_str("unknown or already-used resumption ticket"),
             Error::UnknownPeer => f.write_str("no such connected peer"),
-            Error::MissingPeerKey => {
-                f.write_str("public-key mode requires the peer's public key")
-            }
+            Error::MissingPeerKey => f.write_str("public-key mode requires the peer's public key"),
             Error::Closed => f.write_str("the connection is closed"),
         }
     }
@@ -634,10 +631,7 @@ impl Core {
     /// The secret is symmetric: anyone holding it can impersonate either side.
     /// That is fine within one system and wrong across organisations, where
     /// [`connect`](Self::connect) and its per-peer identities belong.
-    pub fn connect_psk(
-        addr: impl ToSocketAddrs,
-        secret: &[u8],
-    ) -> Result<Self> {
+    pub fn connect_psk(addr: impl ToSocketAddrs, secret: &[u8]) -> Result<Self> {
         Self::connect_psk_and_send(addr, secret, &[])
     }
 
@@ -674,7 +668,6 @@ impl Core {
         conn.queue_first(reply);
         Ok(conn)
     }
-
 
     /// Puts whatever the peer sent alongside its handshake reply where
     /// `recv` will find it.
@@ -777,9 +770,6 @@ impl Core {
         self.read_timeout = timeout;
         Ok(())
     }
-
-
-
 
     /// Sends `data`, telling the transport what shape it has.
     ///
@@ -946,7 +936,12 @@ impl Connection {
         identity: &Identity,
         zero_rtt: &[u8],
     ) -> Result<Self> {
-        Self::wrap(Core::connect_and_send(addr, peer_public, identity, zero_rtt)?)
+        Self::wrap(Core::connect_and_send(
+            addr,
+            peer_public,
+            identity,
+            zero_rtt,
+        )?)
     }
 
     /// Redeems a resumption ticket, sparing three of the four key agreements.
@@ -969,10 +964,7 @@ impl Connection {
     }
 
     /// Connects in pre-shared-key mode.
-    pub fn connect_psk(
-        addr: impl ToSocketAddrs,
-        secret: &[u8],
-    ) -> Result<Self> {
+    pub fn connect_psk(addr: impl ToSocketAddrs, secret: &[u8]) -> Result<Self> {
         Self::wrap(Core::connect_psk(addr, secret)?)
     }
 
@@ -985,7 +977,6 @@ impl Connection {
     ) -> Result<Self> {
         Self::wrap(Core::connect_psk_and_send(addr, secret, zero_rtt)?)
     }
-
 
     // ── asking about the connection ───────────────────────────────────────
 
@@ -1034,7 +1025,9 @@ impl Connection {
 
     /// Fragmented messages this side has begun receiving but not completed.
     pub fn reassembling(&self) -> usize {
-        self.core().map(|c| c.peer.reassembly.in_progress()).unwrap_or(0)
+        self.core()
+            .map(|c| c.peer.reassembly.in_progress())
+            .unwrap_or(0)
     }
 
     /// Reliable messages still awaiting acknowledgement.
@@ -1049,9 +1042,7 @@ impl Connection {
         self.core().map(|c| c.peer.retransmit.rto_ms()).unwrap_or(0)
     }
 
-
     // ── settings ──────────────────────────────────────────────────────────
-
 
     /// Pads outgoing frames to a 64-byte boundary to mask payload lengths.
     ///
@@ -1297,10 +1288,7 @@ impl Connection {
             // remaining deadline with nothing left to wait for, and `flush`
             // cannot re-check its own exit condition until this returns.
             // Measured at 58 seconds, three times in one run of 200 messages.
-            if out.is_none()
-                && core.peer.retransmit.in_flight() == 0
-                && core.peer.queued() == 0
-            {
+            if out.is_none() && core.peer.retransmit.in_flight() == 0 && core.peer.queued() == 0 {
                 return Ok(None);
             }
             // Before working out how long to sleep, say something if it has
@@ -1407,7 +1395,6 @@ impl Connection {
     }
 }
 
-
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut out = f.debug_struct("Connection");
@@ -1420,4 +1407,3 @@ impl std::fmt::Debug for Connection {
         .finish_non_exhaustive()
     }
 }
-

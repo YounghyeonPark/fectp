@@ -47,7 +47,7 @@ pub use error::{Error, Result};
 pub use keys::{Keypair, PublicKey, ANONYMOUS, DHLEN};
 pub use reliability::{Ack, DedupWindow, Due, MessageId, RetransmitQueue};
 pub use session::{
-    preshared_key, Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder,
+    preshared_key, Capabilities, Initiator, Responder, ResumeInitiator, ResumeResponder,
     ResumptionTicket, Session,
 };
 pub use transport::Transport;

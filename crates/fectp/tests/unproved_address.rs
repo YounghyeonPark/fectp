@@ -48,8 +48,9 @@ fn a_reply_goes_to_an_address_that_has_not_answered() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut peer = None;
     while Instant::now() < deadline && peer.is_none() {
-        if let Ok(Event::Connected { peer: id, zero_rtt, .. }) =
-            server.poll(Some(Duration::from_millis(1)))
+        if let Ok(Event::Connected {
+            peer: id, zero_rtt, ..
+        }) = server.poll(Some(Duration::from_millis(1)))
         {
             assert_eq!(zero_rtt, b"one small datagram");
             peer = Some(id);

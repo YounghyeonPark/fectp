@@ -34,7 +34,10 @@
 use proptest::prelude::*;
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, ResumeInitiator, ResumeResponder, Responder, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
+use fectp_core::session::{
+    Capabilities, Initiator, Responder, ResumeInitiator, ResumeResponder, INITIATOR_OVERHEAD,
+    RESPONDER_OVERHEAD,
+};
 use rand_core::OsRng;
 
 /// Fixed secrets, so a shrunk counterexample is reproducible from its seed.

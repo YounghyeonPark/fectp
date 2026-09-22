@@ -28,10 +28,19 @@ fn main() {
     let keypair = size_of::<Keypair>();
 
     println!("Per-session state, in bytes:\n");
-    println!("  {:<18}{session:>6}   two cipher states and the sequencing", "Session");
+    println!(
+        "  {:<18}{session:>6}   two cipher states and the sequencing",
+        "Session"
+    );
     println!("  {:<18}{keypair:>6}   this peer's static key", "Keypair");
-    println!("  {:<18}{dedup:>6}   receiver side of the reliability layer", "DedupWindow");
-    println!("  {:<18}{caps:>6}   what the peer said it can do", "Capabilities");
+    println!(
+        "  {:<18}{dedup:>6}   receiver side of the reliability layer",
+        "DedupWindow"
+    );
+    println!(
+        "  {:<18}{caps:>6}   what the peer said it can do",
+        "Capabilities"
+    );
     println!(
         "  {:<18}{queue:>6}   sender side; only if sending reliably",
         "RetransmitQueue"
@@ -46,5 +55,8 @@ fn main() {
     println!("Buffers are the caller's, and dominate: a peer that sends and");
     println!("receives at the frame limit needs two of them. At the default");
     println!("1200-byte datagram that is 2400 bytes, so a full-duplex reliable");
-    println!("session costs roughly {} bytes of RAM in total.", full + 2400);
+    println!(
+        "session costs roughly {} bytes of RAM in total.",
+        full + 2400
+    );
 }

@@ -89,7 +89,8 @@ fn main() -> fectp::Result<()> {
         let greeting = format!("hello from {}", node.name);
         let peers: Vec<PeerId> = node.peers.keys().copied().collect();
         for peer in peers {
-            node.endpoint.send(peer, greeting.as_bytes(), PayloadType::Opaque)?;
+            node.endpoint
+                .send(peer, greeting.as_bytes(), PayloadType::Opaque)?;
         }
     }
 
@@ -99,7 +100,8 @@ fn main() -> fectp::Result<()> {
     while delivered < expected_messages && Instant::now() < deadline {
         delivered = 0;
         for node in nodes.iter_mut() {
-            if let Ok(Event::Message { data, .. }) = node.endpoint.poll(Some(Duration::from_millis(20)))
+            if let Ok(Event::Message { data, .. }) =
+                node.endpoint.poll(Some(Duration::from_millis(20)))
             {
                 node.heard.push(String::from_utf8_lossy(&data).into_owned());
             }

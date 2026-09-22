@@ -2,10 +2,10 @@
 //! guarantees a datagram transport forces on us (reorder tolerance, replay
 //! rejection, tamper detection).
 
+use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
 use fectp_core::error::Error;
 use fectp_core::frame::{FrameType, Header, FLAG_COMPRESSED, FLAG_PADDED, HEADER_LEN};
 use fectp_core::keys::Keypair;
-use fectp_core::codec::{CODECS_CORE, CODEC_ZSTD};
 use fectp_core::session::{
     Capabilities, Initiator, Responder, CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, PAD_BLOCK,
 };
@@ -76,7 +76,8 @@ fn connect(
 
 #[test]
 fn handshake_carries_zero_rtt_data() {
-    let (_client, _server, zero_rtt) = connect(server_caps(), server_caps(), b"first reading: 23.5");
+    let (_client, _server, zero_rtt) =
+        connect(server_caps(), server_caps(), b"first reading: 23.5");
     assert_eq!(
         zero_rtt, b"first reading: 23.5",
         "IK must deliver application data in the very first message"
@@ -88,13 +89,17 @@ fn data_flows_in_both_directions() {
     let (mut client, mut server, _) = connect(server_caps(), server_caps(), b"");
     let mut frame = [0u8; 512];
 
-    let n = client.seal(b"client to server", 0, &mut frame).expect("seal");
+    let n = client
+        .seal(b"client to server", 0, &mut frame)
+        .expect("seal");
     let o = server.open(&mut frame[..n]).expect("open");
     let (header, len) = (o.header, o.len);
     assert_eq!(header.frame_type, FrameType::Data);
     assert_eq!(&frame[HEADER_LEN..HEADER_LEN + len], b"client to server");
 
-    let n = server.seal(b"server to client", 0, &mut frame).expect("seal");
+    let n = server
+        .seal(b"server to client", 0, &mut frame)
+        .expect("seal");
     let len = client.open(&mut frame[..n]).expect("open").len;
     assert_eq!(&frame[HEADER_LEN..HEADER_LEN + len], b"server to client");
 }
@@ -236,7 +241,9 @@ fn unknown_flag_bits_are_rejected() {
 #[test]
 fn unknown_version_is_rejected() {
     let mut buf = [0u8; HEADER_LEN];
-    Header::new(FrameType::Data, 1).encode(&mut buf).expect("encode");
+    Header::new(FrameType::Data, 1)
+        .encode(&mut buf)
+        .expect("encode");
     buf[0] = (9 << 4) | (buf[0] & 0x0f);
     assert_eq!(Header::decode(&buf), Err(Error::UnsupportedVersion));
 }
@@ -281,7 +288,10 @@ fn padding_masks_the_payload_length() {
         let (header, out_len) = (o.header, o.len);
         assert!(header.flags & FLAG_PADDED != 0);
         assert_eq!(out_len, len, "the real length must survive the padding");
-        assert_eq!(&frame[HEADER_LEN..HEADER_LEN + out_len], &vec![0xAB; len][..]);
+        assert_eq!(
+            &frame[HEADER_LEN..HEADER_LEN + out_len],
+            &vec![0xAB; len][..]
+        );
     }
     assert!(
         sizes.windows(2).all(|w| w[0] == w[1]),
@@ -317,7 +327,7 @@ fn padding_is_per_frame_not_per_session() {
         let mut frame = [0u8; 512];
         let n = client.seal(b"mixed", 0, &mut frame).expect("seal");
         let o = server.open(&mut frame[..n]).expect("open");
-    let (header, len) = (o.header, o.len);
+        let (header, len) = (o.header, o.len);
         assert_eq!(header.flags & FLAG_PADDED != 0, padded);
         assert_eq!(&frame[HEADER_LEN..HEADER_LEN + len], b"mixed");
     }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fectp::{Connection, Event, Identity, PayloadType, Endpoint};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SECRET: &[u8] = b"lab-instrument-7";
@@ -68,7 +68,6 @@ fn psk_server() -> Echo {
     Echo::spawn(Endpoint::bind_psk("127.0.0.1:0", SECRET).expect("bind"))
 }
 
-
 fn exchange(conn: &mut Connection, message: &[u8]) -> Vec<u8> {
     conn.set_read_timeout(Some(TIMEOUT)).expect("timeout");
     conn.send(message, PayloadType::Opaque).expect("send");
@@ -83,8 +82,7 @@ fn exchange(conn: &mut Connection, message: &[u8]) -> Vec<u8> {
 fn public_key_mode_round_trips() {
     let echo = public_key_server();
     let public = echo.public.expect("public-key mode presents an identity");
-    let mut conn =
-        Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
+    let mut conn = Connection::connect(echo.addr, &public, &Identity::generate()).expect("connect");
     assert_eq!(exchange(&mut conn, b"public key"), b"public key");
     assert!(conn.resumption_ticket().is_some());
 }
@@ -101,10 +99,7 @@ fn psk_mode_round_trips() {
     assert_eq!(exchange(&mut conn, b"shared secret"), b"shared secret");
 }
 
-
 // -------------------------------------------------- modes do not mix ------
-
-
 
 #[test]
 fn the_wrong_shared_secret_is_refused() {
@@ -173,7 +168,6 @@ fn the_upper_layers_behave_identically_in_every_mode() {
     }
 }
 
-
 #[test]
 fn many_peers_work_in_psk_mode() {
     const PEERS: usize = 4;
@@ -202,8 +196,7 @@ fn a_shared_secret_is_reusable_but_a_ticket_is_not() {
     let start = Instant::now();
     let mut connections = 0;
     while start.elapsed() < Duration::from_secs(2) && connections < 3 {
-        let mut conn =
-            Connection::connect_psk(echo.addr, SECRET).expect("reconnect");
+        let mut conn = Connection::connect_psk(echo.addr, SECRET).expect("reconnect");
         assert_eq!(exchange(&mut conn, b"again"), b"again");
         connections += 1;
     }

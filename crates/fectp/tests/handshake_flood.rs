@@ -67,7 +67,10 @@ fn measure_what_a_flood_costs() {
     let rate = made as f64 / elapsed.as_secs_f64();
     println!("\n  handshakes completed : {made} in {elapsed:?} ({rate:.0}/s)");
     println!("  peers now filed      : {peers}");
-    println!("  session state each   : 294 bytes, so {} KiB held", peers * 294 / 1024);
+    println!(
+        "  session state each   : 294 bytes, so {} KiB held",
+        peers * 294 / 1024
+    );
     println!("  none of them ever sent a byte.\n");
 }
 
@@ -110,7 +113,11 @@ fn unparseable_datagrams_do_not_become_peers() {
             Ok(_) => panic!("random bytes must not surface as an event"),
         }
     }
-    assert_eq!(server.peer_count(), 0, "random bytes must not become sessions");
+    assert_eq!(
+        server.peer_count(),
+        0,
+        "random bytes must not become sessions"
+    );
 }
 
 /// The table is bounded, and what it drops to stay bounded is the silent.
@@ -149,7 +156,8 @@ fn the_peer_table_is_bounded_and_evicts_the_silent_first() {
         thread::spawn(move || {
             let conn = Connection::connect(addr, &public, &Identity::generate())
                 .expect("the honest peer must get in before the flood starts");
-            conn.set_read_timeout(Some(Duration::from_millis(500))).expect("timeout");
+            conn.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("timeout");
             let mut buf = vec![0u8; 256];
 
             // Returns whether it was still being answered when told to stop.
@@ -298,9 +306,10 @@ fn the_peer_table_is_bounded_and_evicts_the_silent_first() {
 #[test]
 fn a_flood_does_not_slow_an_established_peer() {
     let echo = Echo::start();
-    let good = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-        .expect("connect");
-    good.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    let good =
+        Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
+    good.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
 
     let addr = echo.addr();
     let public = echo.public();
@@ -371,7 +380,9 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     // and can send it again from the same address it originally came from,
     // which is what makes the responder file it against the same pair.
     let relay = UdpSocket::bind("127.0.0.1:0").expect("relay bind");
-    relay.set_read_timeout(Some(Duration::from_millis(25))).expect("timeout");
+    relay
+        .set_read_timeout(Some(Duration::from_millis(25)))
+        .expect("timeout");
     let relay_addr = relay.local_addr().expect("addr");
     let server = echo.addr();
 
@@ -411,9 +422,10 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
         }
     });
 
-    let conn = Connection::connect(relay_addr, &echo.public(), &Identity::generate())
-        .expect("connect");
-    conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    let conn =
+        Connection::connect(relay_addr, &echo.public(), &Identity::generate()).expect("connect");
+    conn.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
 
     let mut buf = vec![0u8; 1024];
     assert!(
@@ -427,7 +439,11 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     while replayed.load(Ordering::Relaxed) == 0 && waited.elapsed() < Duration::from_secs(2) {
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(replayed.load(Ordering::Relaxed), 1, "the replay must have gone out");
+    assert_eq!(
+        replayed.load(Ordering::Relaxed),
+        1,
+        "the replay must have gone out"
+    );
     thread::sleep(Duration::from_millis(200));
 
     // The session the frame named must still be the one that works.

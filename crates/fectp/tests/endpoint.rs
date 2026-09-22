@@ -9,13 +9,16 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use fectp::{Connection, Event, Identity, PayloadType, Endpoint, Ticket};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType, Ticket};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(200);
 
 /// Runs an echo server until it has echoed `expected` messages.
-fn spawn_echo(mut server: Endpoint, expected: usize) -> (mpsc::Receiver<()>, thread::JoinHandle<usize>) {
+fn spawn_echo(
+    mut server: Endpoint,
+    expected: usize,
+) -> (mpsc::Receiver<()>, thread::JoinHandle<usize>) {
     let (ready_tx, ready_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         ready_tx.send(()).expect("ready");
@@ -66,7 +69,9 @@ fn concurrent_peers_do_not_steal_each_others_traffic() {
     for round in 0..PER_PEER {
         for (index, client) in clients.iter_mut().enumerate() {
             let message = format!("peer {index} round {round}");
-            client.send(message.as_bytes(), PayloadType::Opaque).expect("send");
+            client
+                .send(message.as_bytes(), PayloadType::Opaque)
+                .expect("send");
 
             let mut buf = vec![0u8; 4096];
             let n = client.recv(&mut buf).expect("recv");
@@ -164,8 +169,7 @@ fn the_server_delivers_reliably_to_a_chosen_peer() {
     let handle = thread::spawn(move || {
         let clients: Vec<Connection> = (0..PEERS)
             .map(|_| {
-                let c =
-                    Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+                let c = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
                 c.set_read_timeout(Some(TIMEOUT)).expect("timeout");
                 c
             })
@@ -222,8 +226,7 @@ fn a_peer_can_resume_against_the_server() {
         ticket_tx.send(key).expect("ticket");
 
         go_rx.recv().expect("go");
-        let resumed = Connection::resume(addr, &Ticket::from_key(key), &public)
-            .expect("resume");
+        let resumed = Connection::resume(addr, &Ticket::from_key(key), &public).expect("resume");
         resumed.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         resumed.send(b"second", PayloadType::Opaque).expect("send");
         let n = resumed.recv(&mut buf).expect("echo");
@@ -252,7 +255,10 @@ fn a_peer_can_resume_against_the_server() {
         }
     }
 
-    assert!(resumed_seen, "the server must report the second peer as resumed");
+    assert!(
+        resumed_seen,
+        "the server must report the second peer as resumed"
+    );
     assert_eq!(handle.join().expect("thread"), b"second");
 }
 
@@ -301,7 +307,9 @@ fn garbage_and_stray_datagrams_are_ignored() {
         let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
         client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
         stray.send_to(&[0x11; 200], addr).expect("noise");
-        client.send(b"real message", PayloadType::Opaque).expect("send");
+        client
+            .send(b"real message", PayloadType::Opaque)
+            .expect("send");
 
         let mut buf = vec![0u8; 4096];
         let n = client.recv(&mut buf).expect("recv");
@@ -373,7 +381,10 @@ fn an_abandoned_single_message_is_reported() {
     let mut reported = None;
     while reported.is_none() && std::time::Instant::now() < deadline {
         match server.poll(Some(POLL)) {
-            Ok(Event::Sent { peer: id, delivered }) => reported = Some((id, delivered)),
+            Ok(Event::Sent {
+                peer: id,
+                delivered,
+            }) => reported = Some((id, delivered)),
             Ok(_) => {}
             Err(e) => panic!("poll failed: {e:?}"),
         }
@@ -435,7 +446,9 @@ fn a_delivered_single_message_is_not_reported() {
         if let Ok(Event::Sent { delivered, .. }) = server.poll(Some(Duration::from_millis(20))) {
             panic!("a delivered single message raised Sent(delivered: {delivered})");
         }
-        client.set_read_timeout(Some(Duration::from_millis(20))).expect("timeout");
+        client
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("timeout");
         let _ = client.recv(&mut buf);
     }
 }
@@ -483,7 +496,10 @@ fn an_abandoned_fragmented_message_is_reported_once() {
     let mut reports = 0usize;
     while std::time::Instant::now() < deadline {
         if let Ok(Event::Sent { delivered, .. }) = server.poll(Some(POLL)) {
-            assert!(!delivered, "nothing was acknowledged, so nothing was delivered");
+            assert!(
+                !delivered,
+                "nothing was acknowledged, so nothing was delivered"
+            );
             reports += 1;
             // Keep polling briefly: a second report is the failure being
             // tested for, and returning on the first would never see it.

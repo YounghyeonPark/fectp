@@ -67,6 +67,9 @@ fn main() -> fectp::Result<()> {
     }
 
     clients.join().expect("client thread")?;
-    println!("echoed {echoed}/{expected} messages across {} peers", server.peer_count());
+    println!(
+        "echoed {echoed}/{expected} messages across {} peers",
+        server.peer_count()
+    );
     Ok(())
 }

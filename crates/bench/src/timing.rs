@@ -54,7 +54,12 @@ pub fn measure<F: FnMut()>(warmup: usize, samples: usize, mut f: F) -> Stats {
 /// noise around it, so timing one at a time cannot resolve a difference of a
 /// microsecond — it will happily report that adding work made something
 /// faster. Timing a batch and dividing amortises that noise away.
-pub fn measure_batched<F: FnMut()>(warmup: usize, batches: usize, per_batch: usize, mut f: F) -> Stats {
+pub fn measure_batched<F: FnMut()>(
+    warmup: usize,
+    batches: usize,
+    per_batch: usize,
+    mut f: F,
+) -> Stats {
     for _ in 0..warmup {
         f();
     }
@@ -71,11 +76,7 @@ pub fn measure_batched<F: FnMut()>(warmup: usize, batches: usize, per_batch: usi
 
 /// Times an operation that reports its own duration, for cases where setup
 /// must not be counted.
-pub fn measure_reported<F: FnMut() -> Duration>(
-    warmup: usize,
-    samples: usize,
-    mut f: F,
-) -> Stats {
+pub fn measure_reported<F: FnMut() -> Duration>(warmup: usize, samples: usize, mut f: F) -> Stats {
     for _ in 0..warmup {
         f();
     }

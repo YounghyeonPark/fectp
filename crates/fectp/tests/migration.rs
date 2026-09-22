@@ -201,7 +201,6 @@ impl Drop for Rebinding {
     }
 }
 
-
 /// A relay that can hand one datagram to the server from a second source port
 /// and then say nothing more from it — an on-path attacker forwarding a
 /// genuine frame under an address it wants the session pointed at.
@@ -499,7 +498,10 @@ fn a_peer_that_changes_address_keeps_its_session() {
 
     let moves = echo.moves();
     assert_eq!(moves.len(), 1, "exactly one move should be reported");
-    assert_ne!(moves[0].0, moves[0].1, "a move goes from one address to another");
+    assert_ne!(
+        moves[0].0, moves[0].1,
+        "a move goes from one address to another"
+    );
 }
 
 #[test]

@@ -22,7 +22,9 @@
 use core::mem::{size_of, ManuallyDrop};
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder, ResumptionTicket, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
+use fectp_core::session::{
+    Capabilities, Initiator, Responder, ResumptionTicket, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD,
+};
 use rand_core::OsRng;
 
 /// The bytes of `value`, then the bytes of the same memory after dropping it.

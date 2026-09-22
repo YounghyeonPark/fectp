@@ -56,7 +56,10 @@ pub fn max_datagram() -> usize {
 /// Clamped to [`MIN_MAX_DATAGRAM`] and to 65535, which is what the capability
 /// field can express.
 pub fn set_max_datagram(size: usize) {
-    MAX_DATAGRAM.store(size.clamp(MIN_MAX_DATAGRAM, u16::MAX as usize), Ordering::Relaxed);
+    MAX_DATAGRAM.store(
+        size.clamp(MIN_MAX_DATAGRAM, u16::MAX as usize),
+        Ordering::Relaxed,
+    );
 }
 
 /// A UDP socket carrying one peer's datagrams.
@@ -162,9 +165,7 @@ impl Transport for UdpTransport {
             None => self.socket.send(datagram)?,
         };
         if n != datagram.len() {
-            return Err(io::Error::other(
-                "datagram was truncated on send",
-            ));
+            return Err(io::Error::other("datagram was truncated on send"));
         }
         Ok(())
     }

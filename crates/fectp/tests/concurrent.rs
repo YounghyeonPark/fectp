@@ -41,7 +41,8 @@ fn sending_works_while_another_thread_is_blocked_reading() {
         });
 
         std::thread::sleep(Duration::from_millis(50));
-        conn.send(b"sent while the reader waits", PayloadType::Opaque).expect("send");
+        conn.send(b"sent while the reader waits", PayloadType::Opaque)
+            .expect("send");
 
         let message = reader.join().expect("reader thread").expect("recv");
         assert_eq!(message, b"sent while the reader waits");
@@ -57,7 +58,8 @@ fn both_directions_run_at_once() {
     std::thread::scope(|s| {
         s.spawn(|| {
             for i in 0..MESSAGES {
-                conn.send(&(i as u32).to_le_bytes(), PayloadType::Opaque).expect("send");
+                conn.send(&(i as u32).to_le_bytes(), PayloadType::Opaque)
+                    .expect("send");
             }
         });
 
@@ -92,7 +94,8 @@ fn a_blocked_read_does_not_hold_up_a_send() {
         std::thread::sleep(Duration::from_millis(50));
 
         let start = std::time::Instant::now();
-        conn.send(b"not waiting for the reader", PayloadType::Opaque).expect("send");
+        conn.send(b"not waiting for the reader", PayloadType::Opaque)
+            .expect("send");
         let elapsed = start.elapsed();
 
         assert!(
@@ -118,7 +121,10 @@ fn reliable_delivery_works_across_threads() {
                 // The congestion window starts small and widens as
                 // acknowledgements arrive, so a sender has to be prepared to
                 // wait rather than assuming the memory bound is the limit.
-                while conn.send_reliable(&i.to_le_bytes(), PayloadType::Opaque).is_err() {
+                while conn
+                    .send_reliable(&i.to_le_bytes(), PayloadType::Opaque)
+                    .is_err()
+                {
                     conn.flush(TIMEOUT).expect("flush to make room");
                 }
             }

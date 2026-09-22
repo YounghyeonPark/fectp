@@ -73,10 +73,7 @@ fn a_ticket_stops_being_redeemable_once_it_has_expired() {
     // A second ticket, then left to go stale.
     let client = std::thread::spawn(move || {
         let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
-        *conn
-            .resumption_ticket()
-            .expect("encrypted")
-            .key()
+        *conn.resumption_ticket().expect("encrypted").key()
     });
     serve(&mut server, Duration::from_millis(300));
     let stale = client.join().expect("client");

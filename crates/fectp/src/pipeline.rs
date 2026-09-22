@@ -16,13 +16,12 @@ use fectp_core::reliability::{
     Ack, DedupWindow, Due, MessageId, RetransmitQueue, MAX_IN_FLIGHT, MESSAGE_ID_LEN,
 };
 use fectp_core::session::{
-    DATA_OVERHEAD, Opened, PATH_TOKEN_LEN, ResumptionTicket, Session, TICKET_ID_LEN,
+    Opened, ResumptionTicket, Session, DATA_OVERHEAD, PATH_TOKEN_LEN, TICKET_ID_LEN,
 };
 use fectp_core::PublicKey;
 
 use crate::compress::{self, PayloadType};
 use crate::{Error, Result};
-
 
 /// Messages a peer may have part-sent at once.
 ///
@@ -437,8 +436,7 @@ impl Peer {
         datagram_limit: usize,
         tx: &mut [u8],
     ) -> Result<usize> {
-        let limit =
-            self.payload_room(datagram_limit, message_id.is_some(), fragment.is_some());
+        let limit = self.payload_room(datagram_limit, message_id.is_some(), fragment.is_some());
         let peer_caps = self.session.peer_capabilities();
 
         let mut primary = core::mem::take(&mut self.primary);
@@ -518,7 +516,6 @@ impl Peer {
         self.secondary = secondary;
         result
     }
-
 
     /// Splits `data` across frames and queues it.
     ///
@@ -618,7 +615,14 @@ impl Peer {
                 count: job.count,
             };
 
-            let n = self.seal(&chunk, payload_type, Some(id), Some(fragment), datagram_limit, tx)?;
+            let n = self.seal(
+                &chunk,
+                payload_type,
+                Some(id),
+                Some(fragment),
+                datagram_limit,
+                tx,
+            )?;
             send(&tx[..n])?;
             self.pending.push(Pending {
                 id,
@@ -1164,7 +1168,11 @@ mod reassembly_tests {
     #[test]
     fn a_duplicate_after_completion_starts_the_message_again() {
         let mut reassembly = Reassembly::new();
-        let only = Fragment { message: 1, index: 0, count: 1 };
+        let only = Fragment {
+            message: 1,
+            index: 0,
+            count: 1,
+        };
 
         let first = reassembly.accept(only, b"whole").expect("accept");
         assert_eq!(first.as_deref(), Some(&b"whole"[..]));
@@ -1182,10 +1190,18 @@ mod reassembly_tests {
     #[test]
     fn a_count_that_changes_mid_message_is_refused() {
         let mut reassembly = Reassembly::new();
-        let first = Fragment { message: 9, index: 0, count: 4 };
+        let first = Fragment {
+            message: 9,
+            index: 0,
+            count: 4,
+        };
         assert!(reassembly.accept(first, &[1, 2, 3, 4]).is_ok());
 
-        let contradiction = Fragment { message: 9, index: 1, count: 7 };
+        let contradiction = Fragment {
+            message: 9,
+            index: 1,
+            count: 7,
+        };
         assert!(
             reassembly.accept(contradiction, &[5, 6, 7, 8]).is_err(),
             "the same message cannot have been cut two ways"
@@ -1204,7 +1220,11 @@ mod reassembly_tests {
     #[test]
     fn unequal_fragments_before_the_last_are_refused() {
         let mut reassembly = Reassembly::new();
-        let at = |index| Fragment { message: 3, index, count: 3 };
+        let at = |index| Fragment {
+            message: 3,
+            index,
+            count: 3,
+        };
         assert!(reassembly.accept(at(0), &[0u8; 100]).is_ok());
         assert!(
             reassembly.accept(at(1), &[0u8; 60]).is_err(),

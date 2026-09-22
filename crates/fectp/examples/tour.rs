@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use fectp::{Connection, Event, Identity, PayloadType, Endpoint, Ticket};
+use fectp::{Connection, Endpoint, Event, Identity, PayloadType, Ticket};
 
 fn main() -> fectp::Result<()> {
     identities()?;
@@ -128,7 +128,10 @@ fn modes() -> fectp::Result<()> {
         let key = *Identity::generate().public();
         Ok(Connection::connect(addr, &key, &Identity::generate()).is_err())
     })?;
-    assert!(refused, "a public-key client must not reach a pre-shared-key server");
+    assert!(
+        refused,
+        "a public-key client must not reach a pre-shared-key server"
+    );
 
     println!("modes: psk payload {psk}, mismatched modes refused");
     Ok(())
@@ -144,7 +147,10 @@ fn shortest_pair() -> fectp::Result<()> {
         let mut buf = vec![0u8; 2048];
         let n = conn.recv(&mut buf)?;
         assert_eq!(&buf[..n], b"hello");
-        println!("shortest pair: echoed {n} bytes, max payload {}", conn.max_payload());
+        println!(
+            "shortest pair: echoed {n} bytes, max payload {}",
+            conn.max_payload()
+        );
         Ok(())
     })
 }
@@ -200,7 +206,10 @@ fn reliable_delivery() -> fectp::Result<()> {
         // More than the congestion window opens at, so this exercises the
         // waiting a caller has to be ready for.
         for i in 0..12u32 {
-            while conn.send_reliable(&i.to_le_bytes(), PayloadType::Opaque).is_err() {
+            while conn
+                .send_reliable(&i.to_le_bytes(), PayloadType::Opaque)
+                .is_err()
+            {
                 conn.flush(Duration::from_secs(2))?;
             }
         }
@@ -230,7 +239,10 @@ fn duplex() -> fectp::Result<()> {
             });
 
             std::thread::sleep(Duration::from_millis(20));
-            conn.send(b"sent while the other thread is blocked reading", PayloadType::Opaque)?;
+            conn.send(
+                b"sent while the other thread is blocked reading",
+                PayloadType::Opaque,
+            )?;
 
             let message = reader.join().expect("reader thread")?;
             assert_eq!(message, b"sent while the other thread is blocked reading");
@@ -251,7 +263,8 @@ fn large_messages() -> fectp::Result<()> {
         // server is an `Endpoint`, and the reply only
         // gets back because it codes down into a single frame.
         let recording = vec![0x5Au8; conn.max_payload() * 5];
-        conn.send_reliable(&recording, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(10)))?;
+        conn.send_reliable(&recording, PayloadType::Opaque)
+            .and_then(|()| conn.flush(Duration::from_secs(10)))?;
 
         let mut buf = vec![0u8; recording.len()];
         let n = conn.recv(&mut buf)?;
@@ -375,7 +388,10 @@ fn resumption() -> fectp::Result<()> {
         assert_eq!(&buf[..n], b"second");
 
         // The next ticket replaces the spent one.
-        assert_ne!(conn.resumption_ticket().expect("encrypted").id(), ticket.id());
+        assert_ne!(
+            conn.resumption_ticket().expect("encrypted").id(),
+            ticket.id()
+        );
         Ok(())
     })
 }
@@ -458,12 +474,16 @@ fn peer_to_peer() -> fectp::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let (mut on_a, mut on_b) = (None, None);
     while (on_a.is_none() || on_b.is_none()) && std::time::Instant::now() < deadline {
-        if let Ok(Event::Connected { peer, initiated, .. }) = a.poll(Some(Duration::from_millis(20)))
+        if let Ok(Event::Connected {
+            peer, initiated, ..
+        }) = a.poll(Some(Duration::from_millis(20)))
         {
             assert!(initiated, "A dialled");
             on_a = Some(peer);
         }
-        if let Ok(Event::Connected { peer, initiated, .. }) = b.poll(Some(Duration::from_millis(20)))
+        if let Ok(Event::Connected {
+            peer, initiated, ..
+        }) = b.poll(Some(Duration::from_millis(20)))
         {
             assert!(!initiated, "B was dialled");
             on_b = Some(peer);

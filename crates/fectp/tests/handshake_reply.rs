@@ -34,14 +34,11 @@ fn a_peer_gets_the_answer_in_the_same_round_trip() {
     // A sensor: wakes, reports with the handshake, and wants the answer before
     // it can sleep again.
     let sensor = std::thread::spawn(move || {
-        let conn = Connection::connect_and_send(
-            addr,
-            &public,
-            &Identity::generate(),
-            b"reading: 23.5",
-        )
-        .expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        let conn =
+            Connection::connect_and_send(addr, &public, &Identity::generate(), b"reading: 23.5")
+                .expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
 
         // No send of its own: whatever comes back rode in the handshake.
         let mut buf = vec![0u8; 1024];
@@ -71,7 +68,8 @@ fn an_ordinary_connect_receives_it_as_well() {
 
     let client = std::thread::spawn(move || {
         let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
-        conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
         let mut buf = vec![0u8; 256];
         let n = conn.recv(&mut buf).expect("recv");
         buf[..n].to_vec()
@@ -92,13 +90,16 @@ fn every_peer_gets_it_not_only_the_first() {
     let public = *identity.public();
     let mut server = Endpoint::bind("127.0.0.1:0", identity).expect("bind");
     let addr = server.local_addr().expect("addr");
-    server.set_handshake_reply(b"same for everyone").expect("fits");
+    server
+        .set_handshake_reply(b"same for everyone")
+        .expect("fits");
 
     let clients = std::thread::spawn(move || {
         let mut seen = Vec::new();
         for _ in 0..3 {
             let conn = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
-            conn.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+            conn.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
             let mut buf = vec![0u8; 256];
             let n = conn.recv(&mut buf).expect("recv");
             seen.push(buf[..n].to_vec());
@@ -124,7 +125,9 @@ fn a_reply_that_would_not_fit_is_refused_at_once() {
     let mut server = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
 
     assert!(
-        server.set_handshake_reply(&vec![0u8; fectp::DEFAULT_MAX_DATAGRAM]).is_err(),
+        server
+            .set_handshake_reply(&vec![0u8; fectp::DEFAULT_MAX_DATAGRAM])
+            .is_err(),
         "a payload the size of a whole frame leaves no room for the handshake"
     );
     // And having been refused, nothing was kept.

@@ -197,9 +197,7 @@ impl TlsSetup {
         let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("self-signed certificate");
         let cert = issued.cert.der().clone();
-        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            issued.key_pair.serialize_der().into(),
-        );
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(issued.key_pair.serialize_der().into());
 
         let server = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -312,7 +310,10 @@ pub fn tls_connect(setup: &TlsSetup, addr: SocketAddr) -> TlsClient {
     // message.
     stream.flush().expect("flush");
     while stream.conn.is_handshaking() {
-        stream.conn.complete_io(&mut stream.sock).expect("handshake");
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .expect("handshake");
     }
     TlsClient { stream, written }
 }
@@ -333,7 +334,10 @@ pub fn tls_round_trip(client: &mut TlsClient, payload: &[u8], buf: &mut [u8]) {
     let mut back = [0u8; 4];
     client.stream.read_exact(&mut back).expect("read header");
     let len = u32::from_le_bytes(back) as usize;
-    client.stream.read_exact(&mut buf[..len]).expect("read body");
+    client
+        .stream
+        .read_exact(&mut buf[..len])
+        .expect("read body");
 }
 
 // ───────────────────────────────────────────────────────── lossy path ─────
@@ -705,10 +709,7 @@ fn spawn_return_path_until(
             let Ok(n) = back.recv(&mut buf) else {
                 continue;
             };
-            if expired
-                .as_ref()
-                .is_some_and(|e| e.load(Ordering::SeqCst))
-            {
+            if expired.as_ref().is_some_and(|e| e.load(Ordering::SeqCst)) {
                 continue;
             }
             let Some(dest) = *client.lock().expect("lock") else {
@@ -839,14 +840,10 @@ impl JitterRelay {
                 // the next 2 ms tick, which for the 0-2 ms row is the whole
                 // quantity being measured — the same fault the reordering
                 // relay had, where it turned a 5 ms delay into thirty seconds.
-                let wait = held
-                    .iter()
-                    .map(|(_, due)| *due)
-                    .min()
-                    .map_or(IDLE, |due| {
-                        due.saturating_duration_since(Instant::now())
-                            .clamp(Duration::from_micros(100), IDLE)
-                    });
+                let wait = held.iter().map(|(_, due)| *due).min().map_or(IDLE, |due| {
+                    due.saturating_duration_since(Instant::now())
+                        .clamp(Duration::from_micros(100), IDLE)
+                });
                 let _ = front_rx.set_read_timeout(Some(wait));
 
                 let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
@@ -893,7 +890,12 @@ pub struct AsymmetricRelay {
 }
 
 impl AsymmetricRelay {
-    pub fn spawn(server: SocketAddr, forward_per_mille: u32, back_per_mille: u32, seed: u64) -> Self {
+    pub fn spawn(
+        server: SocketAddr,
+        forward_per_mille: u32,
+        back_per_mille: u32,
+        seed: u64,
+    ) -> Self {
         let (front, back, addr, stop, client) = relay_sockets(server);
 
         let front_rx = front.try_clone().expect("clone");

@@ -153,7 +153,14 @@ fn a_retransmitted_message_is_not_measured() {
     let id = queue.register(now).expect("register");
     now += 40;
     let mut acked = [0 as MessageId; MAX_IN_FLIGHT];
-    queue.on_ack(&Ack { highest: id, bitmap: u64::MAX }, now, &mut acked);
+    queue.on_ack(
+        &Ack {
+            highest: id,
+            bitmap: u64::MAX,
+        },
+        now,
+        &mut acked,
+    );
     let after_clean_sample = queue.rto_ms();
     assert!(
         after_clean_sample < INITIAL_RTO_MS,
@@ -175,7 +182,14 @@ fn a_retransmitted_message_is_not_measured() {
 
     now += 10_000;
     let before = queue.rto_ms();
-    queue.on_ack(&Ack { highest: id, bitmap: u64::MAX }, now, &mut acked);
+    queue.on_ack(
+        &Ack {
+            highest: id,
+            bitmap: u64::MAX,
+        },
+        now,
+        &mut acked,
+    );
     assert_eq!(
         queue.rto_ms(),
         before,

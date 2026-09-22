@@ -21,7 +21,12 @@ use std::time::{Duration, Instant};
 use fectp::{Endpoint, Event, Identity, MAX_TICKETS};
 
 /// Drives both sides until the client's handshake completes.
-fn connect(client: &mut Endpoint, server: &mut Endpoint, addr: std::net::SocketAddr, key: &fectp::PeerKey) {
+fn connect(
+    client: &mut Endpoint,
+    server: &mut Endpoint,
+    addr: std::net::SocketAddr,
+    key: &fectp::PeerKey,
+) {
     client.connect(addr, Some(key)).expect("connect starts");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

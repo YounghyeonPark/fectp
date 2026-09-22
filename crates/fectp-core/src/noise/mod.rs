@@ -15,9 +15,9 @@
 //! TLS 1.3 cannot do.
 
 mod cipher;
-mod resume;
 mod handshake;
 mod hash;
+mod resume;
 mod symmetric;
 
 pub use cipher::{CipherState, KEYLEN, TAGLEN};

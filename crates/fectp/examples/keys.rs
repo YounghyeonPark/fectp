@@ -74,14 +74,20 @@ fn serve() -> fectp::Result<()> {
     println!("server listening on {ADDR}");
     println!("public key: {}", to_hex(&public));
     println!("\nrun this in another terminal:");
-    println!("  cargo run -p fectp --example keys -- connect {}\n", to_hex(&public));
+    println!(
+        "  cargo run -p fectp --example keys -- connect {}\n",
+        to_hex(&public)
+    );
 
     let allowed = load_allow_list()?;
     match allowed.len() {
         0 => println!("allow-list is empty — every client will be refused until you add one."),
         n => println!("allow-list: {n} client(s)."),
     }
-    println!("(editing {} takes effect on the next connection)\n", allow_list_path().display());
+    println!(
+        "(editing {} takes effect on the next connection)\n",
+        allow_list_path().display()
+    );
 
     let mut server = Endpoint::bind(ADDR, identity)?;
     loop {
@@ -124,7 +130,10 @@ fn serve() -> fectp::Result<()> {
 /// the whole of what had to be distributed.
 fn connect(server_key: &str) -> fectp::Result<()> {
     let Some(server_public) = from_hex(server_key) else {
-        eprintln!("that is not a public key: expected 64 hex characters, got {}", server_key.len());
+        eprintln!(
+            "that is not a public key: expected 64 hex characters, got {}",
+            server_key.len()
+        );
         return Ok(());
     };
 
@@ -178,9 +187,9 @@ fn key_dir() -> PathBuf {
 
     // Falling back to the working directory rather than to a temporary one: a
     // key that quietly vanishes is worse than one in an awkward place.
-    base.unwrap_or_else(|| PathBuf::from(".")).join("fectp-example")
+    base.unwrap_or_else(|| PathBuf::from("."))
+        .join("fectp-example")
 }
-
 
 fn allow_list_path() -> PathBuf {
     key_dir().join("allowed-clients.txt")

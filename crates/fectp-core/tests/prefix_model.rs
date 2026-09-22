@@ -46,8 +46,12 @@ fn connect() -> (fectp_core::Session, fectp_core::Session) {
 
     let mut wire = [0u8; 4096];
     let mut scratch = [0u8; 4096];
-    let n = initiator.write_init(&mut OsRng, b"", &mut wire).expect("init");
-    responder.read_init(&wire[..n], &mut scratch).expect("read init");
+    let n = initiator
+        .write_init(&mut OsRng, b"", &mut wire)
+        .expect("init");
+    responder
+        .read_init(&wire[..n], &mut scratch)
+        .expect("read init");
     let (server, n) = responder
         .write_response(&mut OsRng, b"", &mut wire)
         .expect("response");
@@ -237,9 +241,21 @@ fn same_block_payloads_are_indistinguishable_with_prefixes() {
 #[test]
 fn an_incoherent_descriptor_is_refused_when_the_frame_is_opened() {
     for bad in [
-        Fragment { message: 1, index: 0, count: 0 },
-        Fragment { message: 1, index: 4, count: 4 },
-        Fragment { message: 1, index: 0, count: 4097 },
+        Fragment {
+            message: 1,
+            index: 0,
+            count: 0,
+        },
+        Fragment {
+            message: 1,
+            index: 4,
+            count: 4,
+        },
+        Fragment {
+            message: 1,
+            index: 0,
+            count: 4097,
+        },
     ] {
         let (mut client, mut server) = connect();
         let mut frame = vec![0u8; 4096];

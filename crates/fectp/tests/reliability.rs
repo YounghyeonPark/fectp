@@ -107,7 +107,9 @@ fn a_dropped_message_is_retransmitted() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    client.send_reliable(b"survives a drop", PayloadType::Opaque).expect("send");
+    client
+        .send_reliable(b"survives a drop", PayloadType::Opaque)
+        .expect("send");
     assert_eq!(client.unacknowledged(), 1);
 
     client.flush(FLUSH).expect("flush");
@@ -124,7 +126,9 @@ fn several_drops_in_a_row_are_survived() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    client.send_reliable(b"third time lucky", PayloadType::Opaque).expect("send");
+    client
+        .send_reliable(b"third time lucky", PayloadType::Opaque)
+        .expect("send");
     client.flush(FLUSH).expect("flush");
 
     assert_eq!(
@@ -143,7 +147,9 @@ fn a_lost_acknowledgement_does_not_duplicate_the_message() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    client.send_reliable(b"exactly once", PayloadType::Opaque).expect("send");
+    client
+        .send_reliable(b"exactly once", PayloadType::Opaque)
+        .expect("send");
     client.flush(FLUSH).expect("flush");
 
     // Give any duplicate time to arrive before concluding there was none.
@@ -164,7 +170,9 @@ fn only_the_lost_message_is_resent() {
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..3u8 {
-        client.send_reliable(&[i; 8], PayloadType::Opaque).expect("send");
+        client
+            .send_reliable(&[i; 8], PayloadType::Opaque)
+            .expect("send");
     }
     client.flush(FLUSH).expect("flush");
 
@@ -184,8 +192,12 @@ fn reliable_and_unreliable_messages_share_a_session() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    client.send_reliable(b"guaranteed", PayloadType::Opaque).expect("send reliable");
-    client.send(b"best effort", PayloadType::Opaque).expect("send unreliable");
+    client
+        .send_reliable(b"guaranteed", PayloadType::Opaque)
+        .expect("send reliable");
+    client
+        .send(b"best effort", PayloadType::Opaque)
+        .expect("send unreliable");
     client.flush(FLUSH).expect("flush");
 
     let mut received = echo.messages(2, TIMEOUT);
@@ -230,11 +242,15 @@ fn the_in_flight_window_is_bounded() {
     // it opens at. That is the bound now, and it is below the memory bound.
     let opened = fectp::INITIAL_CWND;
     for _ in 0..opened {
-        client.send_reliable(b"never arrives", PayloadType::Opaque).expect("send");
+        client
+            .send_reliable(b"never arrives", PayloadType::Opaque)
+            .expect("send");
     }
     assert_eq!(client.unacknowledged(), opened);
     assert!(
-        client.send_reliable(b"one too many", PayloadType::Opaque).is_err(),
+        client
+            .send_reliable(b"one too many", PayloadType::Opaque)
+            .is_err(),
         "the window must bound sending rather than growing without limit"
     );
     assert!(
@@ -250,7 +266,9 @@ fn flush_reports_messages_that_were_never_delivered() {
 
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
-    client.send_reliable(b"into the void", PayloadType::Opaque).expect("send");
+    client
+        .send_reliable(b"into the void", PayloadType::Opaque)
+        .expect("send");
 
     // Give up quickly rather than waiting out the full retry budget.
     let result = client.flush(Duration::from_millis(300));
@@ -367,7 +385,9 @@ fn a_round_trip_estimate_is_learned() {
     let client =
         Connection::connect(relay, &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..4u8 {
-        client.send_reliable(&[i; 4], PayloadType::Opaque).expect("send");
+        client
+            .send_reliable(&[i; 4], PayloadType::Opaque)
+            .expect("send");
         client.flush(FLUSH).expect("flush");
     }
 
@@ -405,7 +425,10 @@ fn a_fragmented_message_survives_a_dropped_fragment() {
             .collect()
     };
 
-    client.send_reliable(&payload, PayloadType::Opaque).and_then(|()| client.flush(FLUSH)).expect("send_reliable");
+    client
+        .send_reliable(&payload, PayloadType::Opaque)
+        .and_then(|()| client.flush(FLUSH))
+        .expect("send_reliable");
 
     let received = echo.messages(1, TIMEOUT);
     assert_eq!(received.len(), 1, "delivered once, not once per fragment");

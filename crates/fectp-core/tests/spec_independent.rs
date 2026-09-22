@@ -127,7 +127,12 @@ mod spec {
     }
 
     /// §6.1 — transform (low 4 bits) | entropy (high 4 bits), param, u16 length.
-    pub fn encode_codec_header(transform: u8, entropy: u8, param: u8, original_len: u16) -> [u8; 4] {
+    pub fn encode_codec_header(
+        transform: u8,
+        entropy: u8,
+        param: u8,
+        original_len: u16,
+    ) -> [u8; 4] {
         let mut out = [0u8; 4];
         out[0] = (transform & 0x0f) | (entropy << 4);
         out[1] = param;
@@ -183,7 +188,11 @@ mod spec {
 
     /// §6.2.1 — per channel, delta against the previous sample of that channel,
     /// zigzagged and LEB128-encoded. `W` is 2 or 4, `C` is `param`.
-    pub fn delta_encode(input: &[u8], channels: usize, width: usize) -> Result<Vec<u8>, &'static str> {
+    pub fn delta_encode(
+        input: &[u8],
+        channels: usize,
+        width: usize,
+    ) -> Result<Vec<u8>, &'static str> {
         if channels == 0 {
             return Err("channel count must be at least 1");
         }
@@ -315,9 +324,12 @@ fn frame_headers_agree_in_both_directions() {
 
     for &frame_type in spec::TYPES {
         for flags in [0u8, 0x01, 0x02, 0x04, 0x08, 0x0f] {
-            for (session_id, sequence) in
-                [(0u32, 0u64), (1, 1), (0xDEAD_BEEF, 0x0123_4567_89AB_CDEF), (u32::MAX, u64::MAX)]
-            {
+            for (session_id, sequence) in [
+                (0u32, 0u64),
+                (1, 1),
+                (0xDEAD_BEEF, 0x0123_4567_89AB_CDEF),
+                (u32::MAX, u64::MAX),
+            ] {
                 let from_spec = spec::encode_header(frame_type, flags, session_id, sequence);
 
                 // Ours reads what the document produces.
@@ -347,8 +359,14 @@ fn both_reject_the_same_headers() {
     for version in [0u8, 2, 3, 15] {
         let mut frame = spec::encode_header(3, 0, 7, 9);
         frame[0] = (version << 4) | 3;
-        assert!(spec::decode_header(&frame).is_err(), "SPEC.md §3.1: version {version}");
-        assert!(Header::decode(&frame).is_err(), "we accepted version {version}");
+        assert!(
+            spec::decode_header(&frame).is_err(),
+            "SPEC.md §3.1: version {version}"
+        );
+        assert!(
+            Header::decode(&frame).is_err(),
+            "we accepted version {version}"
+        );
     }
 
     // Every reserved type. §3.1 lists 1–7 and 10–13; the rest are reserved.
@@ -357,15 +375,27 @@ fn both_reject_the_same_headers() {
             continue;
         }
         let frame = spec::encode_header(frame_type, 0, 7, 9);
-        assert!(spec::decode_header(&frame).is_err(), "SPEC.md §3.1: type {frame_type}");
-        assert!(Header::decode(&frame).is_err(), "we accepted reserved type {frame_type}");
+        assert!(
+            spec::decode_header(&frame).is_err(),
+            "SPEC.md §3.1: type {frame_type}"
+        );
+        assert!(
+            Header::decode(&frame).is_err(),
+            "we accepted reserved type {frame_type}"
+        );
     }
 
     // Every reserved flag bit.
     for bit in [0x10u8, 0x20, 0x40, 0x80] {
         let frame = spec::encode_header(3, bit, 7, 9);
-        assert!(spec::decode_header(&frame).is_err(), "SPEC.md §3.2: flag {bit:#04x}");
-        assert!(Header::decode(&frame).is_err(), "we accepted reserved flag {bit:#04x}");
+        assert!(
+            spec::decode_header(&frame).is_err(),
+            "SPEC.md §3.2: flag {bit:#04x}"
+        );
+        assert!(
+            Header::decode(&frame).is_err(),
+            "we accepted reserved flag {bit:#04x}"
+        );
     }
 }
 
@@ -399,10 +429,7 @@ fn acknowledgement_blocks_agree() {
 fn what_an_acknowledgement_covers_agrees_with_the_document() {
     for highest in [0u32, 1, 63, 64, 65, 1000, u32::MAX] {
         for bitmap in [0u64, 1, 0b1010_1010, u64::MAX, 1 << 63] {
-            let ack = Ack {
-                highest,
-                bitmap,
-            };
+            let ack = Ack { highest, bitmap };
             // Every identifier the block could possibly speak about, and a few
             // past the edge in each direction.
             for back in 0u32..70 {
@@ -424,11 +451,17 @@ fn fragment_descriptors_agree_in_both_directions() {
     for (message, index, count) in [(0u32, 0u16, 1u16), (7, 3, 4), (u32::MAX, 4095, 4096)] {
         let from_spec = spec::encode_fragment(message, index, count);
         let ours = Fragment::decode(&from_spec).expect("SPEC.md §5.6 descriptor must decode");
-        assert_eq!((ours.message, ours.index, ours.count), (message, index, count));
+        assert_eq!(
+            (ours.message, ours.index, ours.count),
+            (message, index, count)
+        );
 
         let mut round = [0u8; 8];
         ours.encode(&mut round).expect("encode");
-        assert_eq!(round, from_spec, "our descriptor bytes differ from SPEC.md §5.6");
+        assert_eq!(
+            round, from_spec,
+            "our descriptor bytes differ from SPEC.md §5.6"
+        );
     }
 }
 
@@ -436,9 +469,9 @@ fn fragment_descriptors_agree_in_both_directions() {
 #[test]
 fn both_reject_the_same_fragment_descriptors() {
     for (message, index, count) in [
-        (0u32, 0u16, 0u16),    // count of zero
-        (0, 0, 4097),          // count above 4096
-        (0, 4096, 4096),       // index not less than count
+        (0u32, 0u16, 0u16), // count of zero
+        (0, 0, 4097),       // count above 4096
+        (0, 4096, 4096),    // index not less than count
         (0, 5, 5),
         (0, 9, 4),
     ] {
@@ -470,7 +503,10 @@ fn codec_headers_agree() {
 
                 let mut round = [0u8; 4];
                 ours.encode(&mut round).expect("encode");
-                assert_eq!(round, from_spec, "our codec header differs from SPEC.md §6.1");
+                assert_eq!(
+                    round, from_spec,
+                    "our codec header differs from SPEC.md §6.1"
+                );
             }
         }
     }
@@ -481,8 +517,21 @@ fn codec_headers_agree() {
 #[test]
 fn varints_agree_on_every_boundary() {
     for value in [
-        0u32, 1, 63, 64, 127, 128, 129, 16_383, 16_384, 2_097_151, 2_097_152,
-        268_435_455, 268_435_456, u32::MAX - 1, u32::MAX,
+        0u32,
+        1,
+        63,
+        64,
+        127,
+        128,
+        129,
+        16_383,
+        16_384,
+        2_097_151,
+        2_097_152,
+        268_435_455,
+        268_435_456,
+        u32::MAX - 1,
+        u32::MAX,
     ] {
         let from_spec = spec::leb128_encode(value);
 
@@ -507,12 +556,12 @@ fn varints_agree_on_every_boundary() {
 #[test]
 fn both_reject_the_same_varints() {
     let bad: &[&[u8]] = &[
-        &[0x80, 0x00],                    // not the shortest encoding
-        &[0x80, 0x80, 0x00],              // twice over
-        &[0xff, 0x00],                    // padded 127
-        &[0x80, 0x80, 0x80, 0x80, 0x80],  // longer than five bytes
-        &[0xff, 0xff, 0xff, 0xff, 0x7f],  // final byte overflows a u32
-        &[],                              // nothing at all
+        &[0x80, 0x00],                   // not the shortest encoding
+        &[0x80, 0x80, 0x00],             // twice over
+        &[0xff, 0x00],                   // padded 127
+        &[0x80, 0x80, 0x80, 0x80, 0x80], // longer than five bytes
+        &[0xff, 0xff, 0xff, 0xff, 0x7f], // final byte overflows a u32
+        &[],                             // nothing at all
     ];
     for bytes in bad {
         assert!(
@@ -527,7 +576,11 @@ fn both_reject_the_same_varints() {
 
     // And zigzag, which the same section defines.
     for value in [0i32, 1, -1, 2, -2, i32::MIN, i32::MAX, 12345, -12345] {
-        assert_eq!(varint::zigzag(value), spec::zigzag(value), "zigzag({value})");
+        assert_eq!(
+            varint::zigzag(value),
+            spec::zigzag(value),
+            "zigzag({value})"
+        );
         let z = spec::zigzag(value);
         assert_eq!(varint::unzigzag(z), spec::unzigzag(z));
         assert_eq!(spec::unzigzag(z), value, "zigzag must round-trip");

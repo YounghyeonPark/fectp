@@ -39,7 +39,6 @@ impl Pair {
             b_public: None,
         }
     }
-
 }
 
 /// Polls both endpoints until each reports a `Connected`, returning the handles.
@@ -66,7 +65,8 @@ fn settle(pair: &mut Pair) -> (PeerId, PeerId) {
 
 /// Sends from `from` to `to` and returns what arrived.
 fn deliver(from: &mut Endpoint, from_peer: PeerId, to: &mut Endpoint, payload: &[u8]) -> Vec<u8> {
-    from.send(from_peer, payload, PayloadType::Opaque).expect("send");
+    from.send(from_peer, payload, PayloadType::Opaque)
+        .expect("send");
     let deadline = Instant::now() + TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(Event::Message { data, .. }) = to.poll(Some(Duration::from_millis(20))) {
@@ -293,7 +293,10 @@ fn dialling_a_node_in_another_mode_fails() {
             failed = true;
         }
     }
-    assert!(failed, "a pre-shared-key node must not answer an encrypted dial");
+    assert!(
+        failed,
+        "a pre-shared-key node must not answer an encrypted dial"
+    );
     assert_eq!(node.peer_count(), 0, "and must not record a session");
 }
 

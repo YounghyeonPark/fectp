@@ -23,7 +23,10 @@ fn zigzag_keeps_small_magnitudes_small() {
     // This is the property the delta transform depends on: values near zero,
     // positive or negative, must map to small unsigned numbers.
     for value in [-1i32, 0, 1, -2, 2, -63, 63] {
-        assert!(varint::zigzag(value) < 128, "{value} should fit in one byte");
+        assert!(
+            varint::zigzag(value) < 128,
+            "{value} should fit in one byte"
+        );
         assert_eq!(varint::unzigzag(varint::zigzag(value)), value);
     }
     for value in [i32::MIN, i32::MAX, -100_000, 100_000] {
@@ -121,7 +124,10 @@ fn delta_coding_shrinks_in_proportion_to_how_slowly_the_signal_moves() {
         let block = sensor_block(512, 4, rate);
         let n = coded_len(&block, 4);
         let ratio = block.len() as f64 / n as f64;
-        println!("i16 x4ch 512 samples, {label:>6} signal: {} -> {n} bytes ({ratio:.2}x)", block.len());
+        println!(
+            "i16 x4ch 512 samples, {label:>6} signal: {} -> {n} bytes ({ratio:.2}x)",
+            block.len()
+        );
         results.push((label, ratio));
     }
 
@@ -185,7 +191,10 @@ fn partial_frames_are_rejected() {
         numeric::encode_i16(&ragged, 4, &mut out),
         Err(Error::BadHeader)
     );
-    assert_eq!(numeric::encode_i16(&ragged, 0, &mut out), Err(Error::BadHeader));
+    assert_eq!(
+        numeric::encode_i16(&ragged, 0, &mut out),
+        Err(Error::BadHeader)
+    );
 }
 
 #[test]
@@ -317,7 +326,9 @@ fn adversarial_blocks() -> Vec<(&'static str, Vec<u8>)> {
     // A monotonic ramp, the friendliest possible case.
     blocks.push((
         "ramp",
-        (0..128i16).flat_map(|i| i.wrapping_mul(300).to_le_bytes()).collect(),
+        (0..128i16)
+            .flat_map(|i| i.wrapping_mul(300).to_le_bytes())
+            .collect(),
     ));
 
     blocks
@@ -349,11 +360,13 @@ fn every_transform_reproduces_its_input_exactly() {
             let mut back = vec![0u8; original.len()];
             let decoded_len = transform
                 .reverse(&coded[..coded_len], *param, original.len(), &mut back)
-                .unwrap_or_else(|e| {
-                    panic!("{transform:?}/{param} failed to reverse {label}: {e}")
-                });
+                .unwrap_or_else(|e| panic!("{transform:?}/{param} failed to reverse {label}: {e}"));
 
-            assert_eq!(decoded_len, original.len(), "{transform:?}/{param} on {label}");
+            assert_eq!(
+                decoded_len,
+                original.len(),
+                "{transform:?}/{param} on {label}"
+            );
             assert_eq!(
                 back, original,
                 "{transform:?}/{param} did not reproduce {label} exactly"

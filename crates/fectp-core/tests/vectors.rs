@@ -38,7 +38,10 @@ use fectp_core::frame::{
     FrameType, Header, FLAG_COMPRESSED, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN,
 };
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder, CAPS_LEN, REKEY_INTERVAL, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
+use fectp_core::session::{
+    Capabilities, Initiator, Responder, CAPS_LEN, INITIATOR_OVERHEAD, REKEY_INTERVAL,
+    RESPONDER_OVERHEAD,
+};
 use rand_core::{CryptoRng, Error as RngError, RngCore};
 
 /// Where the committed file lives.
@@ -463,7 +466,13 @@ fn codec_headers(b: &mut Builder) {
         ("i32-delta", Transform::I32Delta, Entropy::None, 1, 1024),
         ("transpose", Transform::ByteTranspose, Entropy::None, 4, 256),
         ("zstd-alone", Transform::None, Entropy::Zstd, 0, 4096),
-        ("transpose-zstd", Transform::ByteTranspose, Entropy::Zstd, 8, 65535),
+        (
+            "transpose-zstd",
+            Transform::ByteTranspose,
+            Entropy::Zstd,
+            8,
+            65535,
+        ),
     ];
 
     for (name, transform, entropy, param, original_len) in cases {
@@ -585,7 +594,11 @@ fn handshake(b: &mut Builder) {
         Initiator::new(initiator_key, responder_public, SESSION_ID, caps()).expect("initiator");
     let mut msg1 = vec![0u8; INITIATOR_OVERHEAD + ZERO_RTT.len()];
     let msg1_len = initiator
-        .write_init(&mut Fixed::new(INITIATOR_EPHEMERAL_SEED), ZERO_RTT, &mut msg1)
+        .write_init(
+            &mut Fixed::new(INITIATOR_EPHEMERAL_SEED),
+            ZERO_RTT,
+            &mut msg1,
+        )
         .expect("message 1");
     msg1.truncate(msg1_len);
 
@@ -662,7 +675,10 @@ fn handshake(b: &mut Builder) {
         Fields::new()
             .word("kind", "handshake-message")
             .num("session_id", u64::from(SESSION_ID))
-            .hex("ephemeral_secret", &Fixed::new(INITIATOR_EPHEMERAL_SEED).bytes)
+            .hex(
+                "ephemeral_secret",
+                &Fixed::new(INITIATOR_EPHEMERAL_SEED).bytes,
+            )
             .hex("payload", ZERO_RTT)
             .hex("frame", &msg1)
             .done("handshake/message-1"),
@@ -672,7 +688,10 @@ fn handshake(b: &mut Builder) {
         Fields::new()
             .word("kind", "handshake-message")
             .num("session_id", u64::from(SESSION_ID))
-            .hex("ephemeral_secret", &Fixed::new(RESPONDER_EPHEMERAL_SEED).bytes)
+            .hex(
+                "ephemeral_secret",
+                &Fixed::new(RESPONDER_EPHEMERAL_SEED).bytes,
+            )
             .hex("payload", REPLY_PAYLOAD)
             .hex("frame", &msg2)
             .done("handshake/message-2"),
@@ -764,7 +783,10 @@ fn handshake(b: &mut Builder) {
     let n = client.seal(DATA_PAYLOAD, 0, &mut frame).expect("seal");
     frame.truncate(n);
     let sequence = Header::decode(&frame).expect("its own header").sequence;
-    assert_eq!(sequence, REKEY_INTERVAL, "the vector is meant to sit on the boundary");
+    assert_eq!(
+        sequence, REKEY_INTERVAL,
+        "the vector is meant to sit on the boundary"
+    );
     rekey.push(
         Fields::new()
             .word("kind", "data-frame")
@@ -894,9 +916,17 @@ fn the_file_decodes_back() {
         match v.text("kind") {
             "frame-header" => {
                 let header = Header::decode(&v.bytes("encoded")).expect("decode a header");
-                assert_eq!(header.frame_type, frame_type_from_name(v.text("frame_type")), "{name}");
+                assert_eq!(
+                    header.frame_type,
+                    frame_type_from_name(v.text("frame_type")),
+                    "{name}"
+                );
                 assert_eq!(u64::from(header.flags), v.number("flags"), "{name}");
-                assert_eq!(u64::from(header.session_id), v.number("session_id"), "{name}");
+                assert_eq!(
+                    u64::from(header.session_id),
+                    v.number("session_id"),
+                    "{name}"
+                );
                 assert_eq!(header.sequence, v.number("sequence"), "{name}");
             }
             "varint" => {
@@ -912,10 +942,22 @@ fn the_file_decodes_back() {
             }
             "codec-header" => {
                 let header = CodecHeader::decode(&v.bytes("encoded")).expect("decode");
-                assert_eq!(header.transform, transform_from_name(v.text("transform")), "{name}");
-                assert_eq!(header.entropy, entropy_from_name(v.text("entropy")), "{name}");
+                assert_eq!(
+                    header.transform,
+                    transform_from_name(v.text("transform")),
+                    "{name}"
+                );
+                assert_eq!(
+                    header.entropy,
+                    entropy_from_name(v.text("entropy")),
+                    "{name}"
+                );
                 assert_eq!(u64::from(header.param), v.number("param"), "{name}");
-                assert_eq!(u64::from(header.original_len), v.number("original_len"), "{name}");
+                assert_eq!(
+                    u64::from(header.original_len),
+                    v.number("original_len"),
+                    "{name}"
+                );
             }
             "transform" => {
                 let transform = transform_from_name(v.text("transform"));
@@ -945,7 +987,10 @@ fn the_file_decodes_back() {
         seen += 1;
     }
 
-    assert!(seen > 30, "only {seen} vectors were read; the file looks truncated");
+    assert!(
+        seen > 30,
+        "only {seen} vectors were read; the file looks truncated"
+    );
     replay_the_handshake(&parsed);
 }
 
@@ -1025,7 +1070,11 @@ fn replay_the_handshake(parsed: &Parsed) {
     let (mut client, reply_len) = initiator
         .read_response(&frame2, &mut reply)
         .expect("the file's message 2 is readable");
-    assert_eq!(reply[..reply_len], msg2.bytes("payload")[..], "the reply payload");
+    assert_eq!(
+        reply[..reply_len],
+        msg2.bytes("payload")[..],
+        "the reply payload"
+    );
 
     // Now every data frame in the file, opened by the session that handshake
     // produced. The client opens what the responder sent; the client's own
@@ -1072,5 +1121,8 @@ fn replay_the_handshake(parsed: &Parsed) {
     }
 
     assert!(opened >= 1, "no frame from the responder was opened");
-    assert!(sealed_again >= 3, "only {sealed_again} initiator frames were re-sealed");
+    assert!(
+        sealed_again >= 3,
+        "only {sealed_again} initiator frames were re-sealed"
+    );
 }

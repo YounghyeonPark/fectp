@@ -42,7 +42,11 @@ fn main() {
     // slower, so the sentence was not a detail.
     println!(
         "\nLoopback, {} build, median of {SAMPLES} samples after {WARMUP} warmup runs.",
-        if cfg!(debug_assertions) { "debug" } else { "release" }
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
     );
     if cfg!(debug_assertions) {
         println!("Every figure below is meaningless: a debug build opens a connection");
@@ -102,7 +106,10 @@ fn main() {
 // ─────────────────────────────────────────────── 1. connection setup ──────
 
 fn connection_setup() {
-    heading("1. Opening a connection", "wall time from call to usable session");
+    heading(
+        "1. Opening a connection",
+        "wall time from call to usable session",
+    );
 
     let pk = FectpEcho::public_key();
     let pk_public = pk.public.expect("identity");
@@ -118,8 +125,7 @@ fn connection_setup() {
         let ticket = conn.resumption_ticket().expect("encrypted");
         drop(conn);
         let start = std::time::Instant::now();
-        let _ = Connection::resume(pk.addr, &ticket, &pk_public)
-            .expect("resume");
+        let _ = Connection::resume(pk.addr, &ticket, &pk_public).expect("resume");
         start.elapsed()
     });
     drop(pk);
@@ -129,7 +135,6 @@ fn connection_setup() {
         Connection::connect_psk(psk.addr, SECRET).expect("connect");
     });
     drop(psk);
-
 
     let tls_setup = TlsSetup::new();
     let tls = TlsEcho::spawn(std::sync::Arc::clone(&tls_setup.server));
@@ -190,15 +195,14 @@ fn round_trip_latency() {
     drop(udp);
 
     let pk = FectpEcho::public_key();
-    let mut conn =
-        connect_or_retry(pk.addr, &pk.public.expect("identity"));
-    conn.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
+    let mut conn = connect_or_retry(pk.addr, &pk.public.expect("identity"));
+    conn.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
     let fectp_stats = measure(WARMUP, SAMPLES, || {
         transports::fectp_round_trip(&mut conn, &payload, &mut buf);
     });
     drop(conn);
     drop(pk);
-
 
     let tls_setup = TlsSetup::new();
     let tls = TlsEcho::spawn(std::sync::Arc::clone(&tls_setup.server));
@@ -226,24 +230,29 @@ fn round_trip_latency() {
 
     row_header(&["", "median", "p95", "vs raw UDP"]);
     let base = udp_stats.median_us();
-    row(&["raw UDP (no encryption)", &us(udp_stats.median_us()), &us(udp_stats.p95.as_secs_f64()*1e6), "—"]);
+    row(&[
+        "raw UDP (no encryption)",
+        &us(udp_stats.median_us()),
+        &us(udp_stats.p95.as_secs_f64() * 1e6),
+        "—",
+    ]);
     row(&[
         "FECTP, encrypted",
         &us(fectp_stats.median_us()),
-        &us(fectp_stats.p95.as_secs_f64()*1e6),
+        &us(fectp_stats.p95.as_secs_f64() * 1e6),
         &format!("{:+.0}%", (fectp_stats.median_us() / base - 1.0) * 100.0),
     ]);
     row(&[
         "TCP + TLS 1.3",
         &us(tls_stats.median_us()),
-        &us(tls_stats.p95.as_secs_f64()*1e6),
+        &us(tls_stats.p95.as_secs_f64() * 1e6),
         &format!("{:+.0}%", (tls_stats.median_us() / base - 1.0) * 100.0),
     ]);
     let noise = (udp_control.median_us() / base - 1.0) * 100.0;
     row(&[
         "raw UDP again (control)",
         &us(udp_control.median_us()),
-        &us(udp_control.p95.as_secs_f64()*1e6),
+        &us(udp_control.p95.as_secs_f64() * 1e6),
         &format!("{noise:+.0}%"),
     ]);
     println!();
@@ -264,9 +273,7 @@ fn round_trip_latency() {
     let clears = |over: f64| over.abs() > bar;
     match (clears(fectp_over), clears(tls_over)) {
         (true, true) => note("Both FECTP and TLS clear it on this run."),
-        (false, true) => {
-            note("TLS clears it; the gap between raw UDP and FECTP does not, and is")
-        }
+        (false, true) => note("TLS clears it; the gap between raw UDP and FECTP does not, and is"),
         (false, false) => note("Neither clears it on this run: this table says nothing"),
         (true, false) => note("FECTP clears it and TLS does not, which is odd enough to"),
     }
@@ -331,10 +338,10 @@ fn per_message_overhead() {
     for _ in 0..MESSAGES {
         transports::tls_round_trip(&mut client, &payload, &mut buf);
     }
-    let tls_per_message =
-        (client.written.load(std::sync::atomic::Ordering::Relaxed) - before) as f64
-            / MESSAGES as f64
-            - 256.0;
+    let tls_per_message = (client.written.load(std::sync::atomic::Ordering::Relaxed) - before)
+        as f64
+        / MESSAGES as f64
+        - 256.0;
     drop(client);
     drop(tls);
 
@@ -374,10 +381,8 @@ fn crypto_cost() {
     });
     drop(sink);
 
-
     let pk = FectpEcho::public_key_drain();
-    let conn =
-        connect_or_retry(pk.addr, &pk.public.expect("identity"));
+    let conn = connect_or_retry(pk.addr, &pk.public.expect("identity"));
     let sealed = measure_batched(WARMUP, 40, 500, || {
         conn.send(&payload, PayloadType::Opaque).expect("send");
     });
@@ -676,13 +681,8 @@ fn refused_compression_cost() {
     ] {
         let attempt = measure_batched(50, 40, 200, || {
             let (mut a, mut b) = (Vec::new(), Vec::new());
-            let _ = fectp::compress::encode_payload(
-                &bytes,
-                PayloadType::Opaque,
-                full,
-                &mut a,
-                &mut b,
-            );
+            let _ =
+                fectp::compress::encode_payload(&bytes, PayloadType::Opaque, full, &mut a, &mut b);
         });
         let (mut a, mut b) = (Vec::new(), Vec::new());
         let paid =
@@ -775,7 +775,6 @@ fn ratio(raw: usize, coded: usize) -> String {
     format!("{:.2}x", raw as f64 / coded as f64)
 }
 
-
 // ───────────────────────────────────────────────────────── 8. loss ────────
 
 /// What everything above does not measure.
@@ -826,8 +825,7 @@ fn under_loss() {
             let relay = LossyRelay::spawn(echo.addr, rate, 0x1234_5678 + sample as u64);
             let public = echo.public.expect("identity");
 
-            let conn =
-                connect_or_retry(relay.addr, &public);
+            let conn = connect_or_retry(relay.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(30)))
                 .expect("timeout");
 
@@ -952,8 +950,7 @@ fn under_loss() {
             let relay = LossyRelay::spawn(echo.addr, rate, 0xABCD_EF01 + sample as u64);
             let public = echo.public.expect("identity");
 
-            let conn =
-                connect_or_retry(relay.addr, &public);
+            let conn = connect_or_retry(relay.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(60)))
                 .expect("timeout");
 
@@ -1057,9 +1054,11 @@ fn other_things_a_path_does() {
     // the full `d`, which is `every` times as much latency — it was not a
     // control for these rows but a much harsher path, and it duly came out
     // forty times slower than the row it was supposed to bound.
-    let mut rows: Vec<(String, u64, Duration)> =
-        vec![("none".to_string(), 0, Duration::ZERO)];
-    for (every, delay) in [(10u64, Duration::from_millis(2)), (5, Duration::from_millis(5))] {
+    let mut rows: Vec<(String, u64, Duration)> = vec![("none".to_string(), 0, Duration::ZERO)];
+    for (every, delay) in [
+        (10u64, Duration::from_millis(2)),
+        (5, Duration::from_millis(5)),
+    ] {
         let matched = delay / every as u32;
         rows.push((
             format!(
@@ -1070,10 +1069,7 @@ fn other_things_a_path_does() {
             matched,
         ));
         rows.push((
-            format!(
-                "1 in {every} by {:.0} ms",
-                delay.as_secs_f64() * 1000.0
-            ),
+            format!("1 in {every} by {:.0} ms", delay.as_secs_f64() * 1000.0),
             every,
             delay,
         ));
@@ -1159,7 +1155,9 @@ fn other_things_a_path_does() {
         const SIZE: usize = 256 * 1024;
         let payload = datasets::incompressible(SIZE);
         let start = std::time::Instant::now();
-        let outcome = conn.send_reliable(&payload, PayloadType::Opaque).and_then(|()| conn.flush(Duration::from_secs(60)));
+        let outcome = conn
+            .send_reliable(&payload, PayloadType::Opaque)
+            .and_then(|()| conn.flush(Duration::from_secs(60)));
         let elapsed = start.elapsed();
 
         let offered = relay.offered.load(std::sync::atomic::Ordering::Relaxed);
@@ -1302,8 +1300,7 @@ fn jitter_asymmetry_and_crowding() {
             let public = echo.public.expect("identity");
             let relay = JitterRelay::spawn(echo.addr, spread, 0x5EED_1234 + pass as u64);
 
-            let conn =
-                connect_or_retry(relay.addr, &public);
+            let conn = connect_or_retry(relay.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(60)))
                 .expect("timeout");
 
@@ -1500,8 +1497,7 @@ fn jitter_asymmetry_and_crowding() {
                 })
                 .collect();
 
-            let mut conn =
-                connect_or_retry(echo.addr, &public);
+            let mut conn = connect_or_retry(echo.addr, &public);
             conn.set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buf = vec![0u8; 4096];

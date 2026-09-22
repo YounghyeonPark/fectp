@@ -5,15 +5,15 @@ use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
+use crate::fragment::{Fragment, FRAGMENT_LEN};
 use crate::frame::{FrameType, Header, FLAG_FRAGMENT, FLAG_PADDED, FLAG_RELIABLE, HEADER_LEN};
 use crate::keys::{Keypair, PublicKey, StaticKey};
-use crate::fragment::{Fragment, FRAGMENT_LEN};
-use crate::reliability::{Ack, MessageId, ACK_BLOCK_LEN, MESSAGE_ID_LEN};
 use crate::noise::{
     hash, CipherState, HandshakeState, ResumeHandshake, MSG1_OVERHEAD, MSG1_PAYLOAD_OFFSET,
     MSG2_OVERHEAD, MSG2_PAYLOAD_OFFSET, PSK_LEN, RESUME_MSG_OVERHEAD, RESUME_PAYLOAD_OFFSET,
     TAGLEN,
 };
+use crate::reliability::{Ack, MessageId, ACK_BLOCK_LEN, MESSAGE_ID_LEN};
 
 /// Size of the capability block that prefixes every handshake payload.
 pub const CAPS_LEN: usize = 8;
@@ -498,7 +498,9 @@ impl Session {
         out: &mut [u8],
     ) -> Result<usize> {
         let padded = self.padding;
-        self.seal_frame_padded(frame_type, payload, message_id, fragment, flags, padded, out)
+        self.seal_frame_padded(
+            frame_type, payload, message_id, fragment, flags, padded, out,
+        )
     }
 
     /// As [`Session::seal_frame`], with padding stated rather than inherited.
@@ -588,7 +590,8 @@ impl Session {
         body[at..at + payload.len()].copy_from_slice(payload);
         body[at + payload.len()..plaintext_len].fill(0);
 
-        self.send.encrypt_at(hdr, self.send_seq, body, plaintext_len)?;
+        self.send
+            .encrypt_at(hdr, self.send_seq, body, plaintext_len)?;
         self.send_seq += 1;
         Ok(total)
     }
@@ -742,7 +745,6 @@ impl Session {
     pub fn parse_ack(plaintext: &[u8]) -> Result<Ack> {
         Ack::decode(plaintext)
     }
-
 }
 
 /// Bytes that a message-1 frame adds on top of its application payload.
@@ -852,8 +854,7 @@ impl<S: StaticKey> Initiator<S> {
     /// length is returned alongside the session.
     pub fn read_response(mut self, frame: &[u8], out: &mut [u8]) -> Result<(Session, usize)> {
         let header = Header::decode(frame)?;
-        if header.frame_type != FrameType::HandshakeResponse
-            || header.session_id != self.session_id
+        if header.frame_type != FrameType::HandshakeResponse || header.session_id != self.session_id
         {
             return Err(Error::BadHeader);
         }
@@ -1444,7 +1445,9 @@ mod hostile_peer {
         // The first frames of the next generation overtake it.
         let mut wire = [0u8; 128];
         let n = client.seal(b"after", 0, &mut wire).expect("seal");
-        let opened = server.open(&mut wire[..n]).expect("the new generation opens");
+        let opened = server
+            .open(&mut wire[..n])
+            .expect("the new generation opens");
         assert_eq!(&wire[HEADER_LEN..HEADER_LEN + opened.len], b"after");
 
         // And the straggler still opens, under the key kept for exactly this.
@@ -1465,7 +1468,9 @@ mod hostile_peer {
 
         // The control: untouched, it opens.
         let mut honest = wire;
-        server.open(&mut honest[..n]).expect("the honest frame opens");
+        server
+            .open(&mut honest[..n])
+            .expect("the honest frame opens");
 
         let (mut client, mut server) = connect();
         let n = client.seal(b"hello", 0, &mut wire).expect("seal");
@@ -1584,8 +1589,12 @@ mod hostile_peer {
 
         let mut wire = [0u8; 4096];
         let mut scratch = [0u8; 4096];
-        let n = initiator.write_init(&mut OsRng, b"", &mut wire).expect("init");
-        responder.read_init(&wire[..n], &mut scratch).expect("read init");
+        let n = initiator
+            .write_init(&mut OsRng, b"", &mut wire)
+            .expect("init");
+        responder
+            .read_init(&wire[..n], &mut scratch)
+            .expect("read init");
         let (server, n) = responder
             .write_response(&mut OsRng, b"", &mut wire)
             .expect("response");
@@ -1632,9 +1641,14 @@ mod hostile_peer {
 
         // Unpadded, unreliable: the plaintext is the payload.
         let n = seal_verbatim(&mut client, 0, b"an honest frame", &mut frame);
-        let opened = server.open(&mut frame[..n]).expect("a truthful frame must open");
+        let opened = server
+            .open(&mut frame[..n])
+            .expect("a truthful frame must open");
         assert_eq!(opened.len, b"an honest frame".len());
-        assert_eq!(&frame[HEADER_LEN..HEADER_LEN + opened.len], b"an honest frame");
+        assert_eq!(
+            &frame[HEADER_LEN..HEADER_LEN + opened.len],
+            b"an honest frame"
+        );
 
         // Padded, with a length prefix that tells the truth. Fixed arrays
         // throughout: this crate allocates nothing, and a test that needed a
@@ -1644,7 +1658,9 @@ mod hostile_peer {
         plaintext[..LEN_PREFIX].copy_from_slice(&(payload.len() as u16).to_le_bytes());
         plaintext[LEN_PREFIX..LEN_PREFIX + payload.len()].copy_from_slice(payload);
         let n = seal_verbatim(&mut client, FLAG_PADDED, &plaintext, &mut frame);
-        let opened = server.open(&mut frame[..n]).expect("a truthful padded frame must open");
+        let opened = server
+            .open(&mut frame[..n])
+            .expect("a truthful padded frame must open");
         assert_eq!(opened.len, payload.len());
         assert_eq!(&frame[HEADER_LEN..HEADER_LEN + opened.len], payload);
     }
@@ -1654,9 +1670,9 @@ mod hostile_peer {
     #[test]
     fn a_length_prefix_that_exceeds_the_plaintext_is_refused() {
         for claimed in [
-            PAD_BLOCK as u16,        // exactly the plaintext, leaving no room for the prefix
-            PAD_BLOCK as u16 - 1,    // one byte too many
-            u16::MAX,                // as far past as the field can say
+            PAD_BLOCK as u16,     // exactly the plaintext, leaving no room for the prefix
+            PAD_BLOCK as u16 - 1, // one byte too many
+            u16::MAX,             // as far past as the field can say
         ] {
             let (mut client, mut server) = connect();
             let mut plaintext = [0u8; PAD_BLOCK];
@@ -1699,7 +1715,11 @@ mod hostile_peer {
         let cases: &[(u8, usize, &str)] = &[
             (FLAG_RELIABLE, MESSAGE_ID_LEN - 1, "an identifier"),
             (FLAG_RELIABLE, 0, "an identifier"),
-            (FLAG_RELIABLE | FLAG_FRAGMENT, MESSAGE_ID_LEN, "a descriptor"),
+            (
+                FLAG_RELIABLE | FLAG_FRAGMENT,
+                MESSAGE_ID_LEN,
+                "a descriptor",
+            ),
             (
                 FLAG_RELIABLE | FLAG_FRAGMENT,
                 MESSAGE_ID_LEN + FRAGMENT_LEN - 1,
@@ -1727,7 +1747,12 @@ mod hostile_peer {
     /// the checks above, which is a different branch.
     #[test]
     fn a_padded_length_too_small_for_the_other_prefixes_is_refused() {
-        for inner in [0usize, 1, MESSAGE_ID_LEN - 1, MESSAGE_ID_LEN + FRAGMENT_LEN - 1] {
+        for inner in [
+            0usize,
+            1,
+            MESSAGE_ID_LEN - 1,
+            MESSAGE_ID_LEN + FRAGMENT_LEN - 1,
+        ] {
             let (mut client, mut server) = connect();
             let mut plaintext = [0u8; PAD_BLOCK];
             plaintext[..LEN_PREFIX].copy_from_slice(&(inner as u16).to_le_bytes());

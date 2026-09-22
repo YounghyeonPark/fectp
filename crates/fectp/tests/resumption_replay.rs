@@ -87,7 +87,10 @@ impl Tap {
     /// attacker holding a captured datagram has no reason to cooperate with
     /// that — sending it from anywhere else is easier, not harder.
     fn replay_from_elsewhere(&self) {
-        let frame = self.captured.as_ref().expect("an opening frame was captured");
+        let frame = self
+            .captured
+            .as_ref()
+            .expect("an opening frame was captured");
         let other = UdpSocket::bind("127.0.0.1:0").expect("replay bind");
         other.send_to(frame, self.server).expect("replay the frame");
     }
@@ -133,12 +136,24 @@ fn a_configured_key_accepts_a_replayed_opening_frame() {
         .connect_and_send(tap.addr(), None, b"reading 1")
         .expect("connect");
 
-    let first = collect_zero_rtt(&mut server, &mut client, &mut tap, 1, Duration::from_secs(5));
+    let first = collect_zero_rtt(
+        &mut server,
+        &mut client,
+        &mut tap,
+        1,
+        Duration::from_secs(5),
+    );
     assert_eq!(first.len(), 1, "the handshake did not complete");
     assert_eq!(first[0], b"reading 1", "the 0-RTT payload arrived");
 
     tap.replay_from_elsewhere();
-    let again = collect_zero_rtt(&mut server, &mut client, &mut tap, 1, Duration::from_secs(5));
+    let again = collect_zero_rtt(
+        &mut server,
+        &mut client,
+        &mut tap,
+        1,
+        Duration::from_secs(5),
+    );
 
     assert_eq!(
         again.len(),
@@ -172,7 +187,13 @@ fn a_replayed_opening_frame_takes_a_session_slot_each_time() {
     client
         .connect_and_send(tap.addr(), None, b"reading 1")
         .expect("connect");
-    let first = collect_zero_rtt(&mut server, &mut client, &mut tap, 1, Duration::from_secs(5));
+    let first = collect_zero_rtt(
+        &mut server,
+        &mut client,
+        &mut tap,
+        1,
+        Duration::from_secs(5),
+    );
     assert_eq!(first.len(), 1, "the handshake did not complete");
     let honest = server.peers().len();
     assert_eq!(honest, 1, "one honest peer");
@@ -219,7 +240,13 @@ fn replays_evict_each_other_and_not_a_peer_that_has_spoken() {
     let peer = client
         .connect_and_send(tap.addr(), None, b"reading 1")
         .expect("connect");
-    let first = collect_zero_rtt(&mut server, &mut client, &mut tap, 1, Duration::from_secs(5));
+    let first = collect_zero_rtt(
+        &mut server,
+        &mut client,
+        &mut tap,
+        1,
+        Duration::from_secs(5),
+    );
     assert_eq!(first.len(), 1, "the handshake did not complete");
 
     // The server is connected before the client is: `collect_zero_rtt` stops
@@ -234,7 +261,10 @@ fn replays_evict_each_other_and_not_a_peer_that_has_spoken() {
             ready = true;
         }
     }
-    assert!(ready, "the client never completed its side of the handshake");
+    assert!(
+        ready,
+        "the client never completed its side of the handshake"
+    );
 
     // The honest peer says something, which is what separates it from a
     // session that was only ever conjured.

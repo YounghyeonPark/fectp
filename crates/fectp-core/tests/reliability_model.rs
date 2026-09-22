@@ -222,8 +222,7 @@ impl Sim {
         if self.receiver.started() {
             let highest = self.receiver.to_ack().highest;
             for id in &self.registered {
-                let outstanding =
-                    !self.acknowledged.contains(id) && !self.gave_up.contains(id);
+                let outstanding = !self.acknowledged.contains(id) && !self.gave_up.contains(id);
                 if !outstanding {
                     continue;
                 }
@@ -344,10 +343,16 @@ fn an_acknowledgement_covers_exactly_what_was_accepted() {
 
     let ack: Ack = window.to_ack();
     for id in &accepted {
-        assert!(ack.covers(*id), "accepted {id} but the acknowledgement omits it");
+        assert!(
+            ack.covers(*id),
+            "accepted {id} but the acknowledgement omits it"
+        );
     }
     for id in [3u32, 4, 6, 7, 8, 10, 39, 42, 62] {
-        assert!(!ack.covers(id), "never accepted {id} but the acknowledgement claims it");
+        assert!(
+            !ack.covers(id),
+            "never accepted {id} but the acknowledgement claims it"
+        );
     }
 }
 
@@ -360,7 +365,10 @@ fn an_acknowledgement_covers_exactly_what_was_accepted() {
 #[ignore = "diagnostic: cargo test -- --ignored --nocapture"]
 fn report_how_far_the_generator_reaches() {
     use proptest::test_runner::{Config, TestRunner};
-    let mut runner = TestRunner::new(Config { cases: 96, ..Config::default() });
+    let mut runner = TestRunner::new(Config {
+        cases: 96,
+        ..Config::default()
+    });
     let furthest = std::cell::Cell::new(0u32);
     runner
         .run(&steps(), |steps| {

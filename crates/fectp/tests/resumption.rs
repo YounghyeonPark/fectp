@@ -14,8 +14,6 @@ use fectp::{Connection, Identity, PayloadType, Ticket};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-
-
 /// The resumption ticket of an encrypted connection.
 fn ticket_of(conn: &Connection) -> Ticket {
     conn.resumption_ticket()
@@ -38,14 +36,18 @@ fn a_resumed_session_carries_data() {
 
     let mut first =
         Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
-    assert_eq!(exchange(&mut first, b"over a full handshake"), b"over a full handshake");
+    assert_eq!(
+        exchange(&mut first, b"over a full handshake"),
+        b"over a full handshake"
+    );
     let ticket = first.resumption_ticket().expect("encrypted session");
     drop(first);
 
-    let mut resumed =
-        Connection::resume(addr, &ticket, &server_public).expect("resume");
-    assert_eq!(exchange(&mut resumed, b"over a resumption"), b"over a resumption");
-
+    let mut resumed = Connection::resume(addr, &ticket, &server_public).expect("resume");
+    assert_eq!(
+        exchange(&mut resumed, b"over a resumption"),
+        b"over a resumption"
+    );
 }
 
 #[test]
@@ -55,7 +57,8 @@ fn both_peers_agree_on_the_ticket() {
     let echo = Echo::start();
     let (addr, server_public) = (echo.addr(), echo.public());
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
+    let mut conn =
+        Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
     exchange(&mut conn, b"hello");
     let ticket = ticket_of(&conn);
 
@@ -77,8 +80,7 @@ fn identity_survives_resumption() {
     assert_eq!(first.peer_public_key().expect("connected"), server_public);
     drop(first);
 
-    let mut resumed =
-        Connection::resume(addr, &ticket, &server_public).expect("resume");
+    let mut resumed = Connection::resume(addr, &ticket, &server_public).expect("resume");
     exchange(&mut resumed, b"two");
     assert_eq!(
         resumed.peer_public_key().expect("connected"),
@@ -105,8 +107,7 @@ fn a_ticket_is_single_use() {
     let ticket = first.resumption_ticket().expect("encrypted session");
     drop(first);
 
-    let mut resumed =
-        Connection::resume(addr, &ticket, &server_public).expect("first resume");
+    let mut resumed = Connection::resume(addr, &ticket, &server_public).expect("first resume");
     exchange(&mut resumed, b"two");
     drop(resumed);
 
@@ -115,7 +116,6 @@ fn a_ticket_is_single_use() {
         "redeeming a ticket twice must fail, or a captured resumption request \
          could be replayed"
     );
-
 }
 
 #[test]
@@ -123,13 +123,13 @@ fn resumption_issues_a_fresh_ticket_each_time() {
     let echo = Echo::start();
     let (addr, server_public) = (echo.addr(), echo.public());
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
+    let mut conn =
+        Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
     exchange(&mut conn, b"one");
     let first_ticket = ticket_of(&conn);
     drop(conn);
 
-    let mut conn =
-        Connection::resume(addr, &first_ticket, &server_public).expect("resume");
+    let mut conn = Connection::resume(addr, &first_ticket, &server_public).expect("resume");
     exchange(&mut conn, b"two");
     let second_ticket = ticket_of(&conn);
     assert_ne!(
@@ -140,10 +140,8 @@ fn resumption_issues_a_fresh_ticket_each_time() {
     drop(conn);
 
     // And the new one works, so the chain can continue indefinitely.
-    let mut conn =
-        Connection::resume(addr, &second_ticket, &server_public).expect("resume again");
+    let mut conn = Connection::resume(addr, &second_ticket, &server_public).expect("resume again");
     assert_eq!(exchange(&mut conn, b"three"), b"three");
-
 }
 
 #[test]
@@ -166,7 +164,8 @@ fn a_restarted_server_forces_a_full_handshake() {
     let echo = Echo::start();
     let (addr, server_public) = (echo.addr(), echo.public());
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
+    let mut conn =
+        Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
     exchange(&mut conn, b"before the restart");
     let ticket = ticket_of(&conn);
     drop(conn);
@@ -184,7 +183,10 @@ fn a_restarted_server_forces_a_full_handshake() {
     // The full handshake still works, which is the fallback path.
     let mut conn =
         Connection::connect(fresh_addr, &new_public, &Identity::generate()).expect("connect");
-    assert_eq!(exchange(&mut conn, b"after the restart"), b"after the restart");
+    assert_eq!(
+        exchange(&mut conn, b"after the restart"),
+        b"after the restart"
+    );
 }
 
 #[test]
@@ -192,18 +194,14 @@ fn resumption_carries_zero_rtt_data() {
     let echo = Echo::start();
     let (addr, server_public) = (echo.addr(), echo.public());
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
+    let mut conn =
+        Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
     exchange(&mut conn, b"warm up");
     let ticket = ticket_of(&conn);
     drop(conn);
 
-    let mut resumed = Connection::resume_and_send(
-        addr,
-        &ticket,
-        &server_public,
-        b"resumed 0-RTT",
-    )
-    .expect("resume");
+    let mut resumed = Connection::resume_and_send(addr, &ticket, &server_public, b"resumed 0-RTT")
+        .expect("resume");
     exchange(&mut resumed, b"and then some");
 
     let zero_rtts = echo.connections(2, TIMEOUT).zero_rtt;
@@ -221,14 +219,13 @@ fn a_ticket_survives_a_round_trip_through_storage() {
     let echo = Echo::start();
     let (addr, server_public) = (echo.addr(), echo.public());
 
-    let mut conn = Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
+    let mut conn =
+        Connection::connect(addr, &server_public, &Identity::generate()).expect("connect");
     exchange(&mut conn, b"before reset");
     let stored: [u8; 32] = *conn.resumption_ticket().expect("encrypted session").key();
     drop(conn);
 
     let restored = Ticket::from_key(stored);
-    let mut resumed =
-        Connection::resume(addr, &restored, &server_public).expect("resume");
+    let mut resumed = Connection::resume(addr, &restored, &server_public).expect("resume");
     assert_eq!(exchange(&mut resumed, b"after reset"), b"after reset");
-
 }

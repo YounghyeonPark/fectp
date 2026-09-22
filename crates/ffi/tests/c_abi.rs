@@ -23,7 +23,10 @@ const FRAME: u16 = 1200;
 unsafe fn round_trip(initiator_payload: &[u8], responder_payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let server = fectp_identity_generate();
     let client = fectp_identity_generate();
-    assert!(!server.is_null() && !client.is_null(), "identity generation");
+    assert!(
+        !server.is_null() && !client.is_null(),
+        "identity generation"
+    );
 
     let mut server_public = [0u8; KEYLEN];
     assert_eq!(
@@ -34,7 +37,10 @@ unsafe fn round_trip(initiator_payload: &[u8], responder_payload: &[u8]) -> (Vec
     let mut initiator =
         unsafe { fectp_initiator_new(client, server_public.as_ptr(), 0x1234_5678, FRAME) };
     let responder = unsafe { fectp_responder_new(server, FRAME) };
-    assert!(!initiator.is_null() && !responder.is_null(), "handshake setup");
+    assert!(
+        !initiator.is_null() && !responder.is_null(),
+        "handshake setup"
+    );
 
     // Message 1.
     let mut init_frame = vec![0u8; 4096];
@@ -319,9 +325,7 @@ fn a_forged_frame_is_refused_rather_than_delivered() {
     } as usize;
 
     let mut scratch = vec![0u8; 4096];
-    unsafe {
-        fectp_responder_read_init(responder, frame.as_ptr(), n, scratch.as_mut_ptr(), 4096)
-    };
+    unsafe { fectp_responder_read_init(responder, frame.as_ptr(), n, scratch.as_mut_ptr(), 4096) };
     let mut responder_slot = responder;
     let mut server_session: *mut fectp_session = ptr::null_mut();
     let mut reply = vec![0u8; 4096];
@@ -362,7 +366,13 @@ fn a_forged_frame_is_refused_rather_than_delivered() {
     sealed[n - 1] ^= 0x01;
     let mut out = vec![0u8; 4096];
     let opened = unsafe {
-        fectp_session_open(server_session, sealed.as_ptr(), n, out.as_mut_ptr(), out.len())
+        fectp_session_open(
+            server_session,
+            sealed.as_ptr(),
+            n,
+            out.as_mut_ptr(),
+            out.len(),
+        )
     };
     assert_eq!(
         opened, FECTP_ERR_PROTOCOL,

@@ -82,9 +82,7 @@ impl Fragment {
             index: u16::from_le_bytes(index),
             count: u16::from_le_bytes(count),
         };
-        if fragment.count == 0
-            || fragment.count > MAX_FRAGMENTS
-            || fragment.index >= fragment.count
+        if fragment.count == 0 || fragment.count > MAX_FRAGMENTS || fragment.index >= fragment.count
         {
             return Err(Error::BadHeader);
         }

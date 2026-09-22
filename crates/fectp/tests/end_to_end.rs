@@ -25,7 +25,9 @@ fn round_trip_over_udp() {
     // The client authenticated the server by its static key.
     assert_eq!(client.peer_public_key().expect("connected"), echo.public());
 
-    client.send(b"hello over the wire", PayloadType::Opaque).expect("client send");
+    client
+        .send(b"hello over the wire", PayloadType::Opaque)
+        .expect("client send");
     let mut buf = [0u8; 2048];
     let n = client.recv(&mut buf).expect("client recv");
     assert_eq!(&buf[..n], b"hello over the wire");
@@ -83,7 +85,9 @@ fn many_messages_in_sequence() {
     let client =
         Connection::connect(echo.addr(), &echo.public(), &Identity::generate()).expect("connect");
     for i in 0..64u32 {
-        client.send(&i.to_le_bytes(), PayloadType::Opaque).expect("send");
+        client
+            .send(&i.to_le_bytes(), PayloadType::Opaque)
+            .expect("send");
     }
 
     let received = echo.messages(64, TIMEOUT);
@@ -143,9 +147,8 @@ mod coding_is_skipped_when_it_stops_paying {
     #[test]
     fn an_incompressible_stream_arrives_intact() {
         let echo = Echo::collector();
-        let client =
-            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-                .expect("connect");
+        let client = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+            .expect("connect");
 
         // Comfortably more than it takes to trip the skip, so most of these
         // are sent with coding switched off.
@@ -155,20 +158,24 @@ mod coding_is_skipped_when_it_stops_paying {
         }
 
         let received = echo.messages(sent.len(), TIMEOUT);
-        assert_eq!(received, sent, "skipping compression must not alter payloads");
+        assert_eq!(
+            received, sent,
+            "skipping compression must not alter payloads"
+        );
     }
 
     #[test]
     fn a_payload_that_only_fits_when_coded_is_still_coded() {
         let echo = Echo::collector();
-        let client =
-            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-                .expect("connect");
+        let client = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+            .expect("connect");
         let limit = client.max_payload();
 
         // Stop coding being attempted at all.
         for i in 0..32 {
-            client.send(&incompressible(512, 0x2545 + i), PayloadType::Opaque).expect("send");
+            client
+                .send(&incompressible(512, 0x2545 + i), PayloadType::Opaque)
+                .expect("send");
         }
 
         // This is larger than a frame can carry raw, and only goes out if
@@ -190,13 +197,14 @@ mod coding_is_skipped_when_it_stops_paying {
     #[test]
     fn compression_resumes_when_the_data_becomes_compressible_again() {
         let echo = Echo::collector();
-        let client =
-            Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
-                .expect("connect");
+        let client = Connection::connect(echo.addr(), &echo.public(), &Identity::generate())
+            .expect("connect");
         let limit = client.max_payload();
 
         for i in 0..32 {
-            client.send(&incompressible(512, 0x7f4a + i), PayloadType::Opaque).expect("send");
+            client
+                .send(&incompressible(512, 0x7f4a + i), PayloadType::Opaque)
+                .expect("send");
         }
 
         // A stream's content can change. Once it does, payloads too large to
@@ -204,7 +212,9 @@ mod coding_is_skipped_when_it_stops_paying {
         // is periodically retried rather than abandoned for good.
         let compressible = vec![0x5Cu8; limit * 2];
         for _ in 0..64 {
-            client.send(&compressible, PayloadType::Opaque).expect("send");
+            client
+                .send(&compressible, PayloadType::Opaque)
+                .expect("send");
         }
 
         let received = echo.messages(96, TIMEOUT);
@@ -276,7 +286,9 @@ mod compression {
             .collect();
         assert!(payload.len() > client.max_payload());
 
-        client.send(&payload, PayloadType::Opaque).expect("send compressible payload");
+        client
+            .send(&payload, PayloadType::Opaque)
+            .expect("send compressible payload");
         assert_eq!(echo.messages(1, TIMEOUT), vec![payload]);
     }
 }
@@ -354,7 +366,10 @@ mod typed {
         // transform is pure integer code in the no_std core.
         let block = sensor_block(512, 4);
         let typed = coded_size(&block, PayloadType::I16 { channels: 4 }, mcu_peer());
-        println!("towards a peer with no zstd: {} -> {typed} bytes", block.len());
+        println!(
+            "towards a peer with no zstd: {} -> {typed} bytes",
+            block.len()
+        );
         assert!(
             typed < block.len(),
             "the transform alone must still shrink the block: {typed} vs {}",
@@ -455,9 +470,7 @@ fn shapes_can_be_mixed_within_one_connection() {
     client
         .send(&samples, PayloadType::I16 { channels: 4 })
         .expect("send samples");
-    client
-        .send(&text, PayloadType::Opaque)
-        .expect("send text");
+    client.send(&text, PayloadType::Opaque).expect("send text");
 
     // Each line said what it was sending, so neither could be misread as the
     // other — which is what a remembered default made possible.
@@ -471,13 +484,9 @@ fn data_sent_with_the_handshake_reaches_the_peer() {
 
     // One packet carries the handshake and the data, so the peer has it after
     // a single flight rather than after a round trip and then a send.
-    let _conn = Connection::connect_and_send(
-        echo.addr(),
-        &echo.public(),
-        &Identity::generate(),
-        first,
-    )
-    .expect("connect_and_send");
+    let _conn =
+        Connection::connect_and_send(echo.addr(), &echo.public(), &Identity::generate(), first)
+            .expect("connect_and_send");
 
     let seen = echo.connections(1, TIMEOUT);
     assert_eq!(seen.zero_rtt, vec![first.to_vec()]);

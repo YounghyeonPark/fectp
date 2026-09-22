@@ -82,19 +82,19 @@ impl Drop for Echo {
 ///
 /// Returns the socket it lives on, which must be kept alive for the session to
 /// stay routable, and the opened session.
-fn open_with_id(server: SocketAddr, server_public: &[u8; 32], id: u32) -> Option<(UdpSocket, Session)> {
+fn open_with_id(
+    server: SocketAddr,
+    server_public: &[u8; 32],
+    id: u32,
+) -> Option<(UdpSocket, Session)> {
     let sock = UdpSocket::bind("127.0.0.1:0").ok()?;
     sock.connect(server).ok()?;
-    sock.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
 
     let caps = Capabilities::minimal(1200);
-    let mut initiator = Initiator::new(
-        Keypair::generate(&mut OsRng),
-        *server_public,
-        id,
-        caps,
-    )
-    .ok()?;
+    let mut initiator =
+        Initiator::new(Keypair::generate(&mut OsRng), *server_public, id, caps).ok()?;
 
     let mut wire = vec![0u8; 2048];
     let n = initiator.write_init(&mut OsRng, b"", &mut wire).ok()?;
@@ -165,11 +165,17 @@ fn flood(server: SocketAddr, id: u32, stop: Arc<AtomicBool>) -> thread::JoinHand
 /// Sends one sealed frame from a fresh port and reports whether the endpoint
 /// delivered it — which it can only do by finding the session through the
 /// identifier index, since the address is one it has never seen.
-fn arrives_from_a_new_address(server: SocketAddr, session: &mut Session, seen: &Arc<AtomicU64>) -> bool {
+fn arrives_from_a_new_address(
+    server: SocketAddr,
+    session: &mut Session,
+    seen: &Arc<AtomicU64>,
+) -> bool {
     let before = seen.load(Ordering::SeqCst);
     let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
     let mut wire = vec![0u8; 2048];
-    let n = session.seal(b"from somewhere else", 0, &mut wire).expect("seal");
+    let n = session
+        .seal(b"from somewhere else", 0, &mut wire)
+        .expect("seal");
     sock.send_to(&wire[..n], server).expect("send");
 
     let deadline = Instant::now() + Duration::from_secs(2);

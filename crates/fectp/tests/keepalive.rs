@@ -222,9 +222,8 @@ const ATTEMPTS: usize = 3;
 /// under `MAPPING`, which puts the real headroom at `MAPPING - KEEPALIVE`.
 /// Filtering at `MAPPING` admitted stalls between 350 and 500 ms that expire
 /// the mapping honestly, and then blamed the protocol for them.
-const HEADROOM: Duration = Duration::from_millis(
-    MAPPING.as_millis() as u64 - KEEPALIVE.as_millis() as u64,
-);
+const HEADROOM: Duration =
+    Duration::from_millis(MAPPING.as_millis() as u64 - KEEPALIVE.as_millis() as u64);
 
 /// Counts the pushes that arrive over `window`, sending nothing at all.
 fn receive_only(conn: &Connection, window: Duration) -> usize {
@@ -261,7 +260,9 @@ fn receive_only_watching(conn: &Connection, window: Duration) -> (usize, Duratio
     while Instant::now() < deadline {
         longest = longest.max(last.elapsed());
         last = Instant::now();
-        let left = deadline.saturating_duration_since(Instant::now()).min(SLICE);
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .min(SLICE);
         if conn.set_read_timeout(Some(left)).is_err() {
             break;
         }
@@ -394,7 +395,8 @@ fn an_endpoint_that_dialled_out_keeps_its_own_mapping_open() {
             }
         }
         let peer = connected.expect("the handshake must complete");
-        node.send(peer, b"hello", PayloadType::Opaque).expect("send");
+        node.send(peer, b"hello", PayloadType::Opaque)
+            .expect("send");
 
         // Now poll without sending anything. Only the keep-alive should be
         // going out, and it is the only thing that can hold the mapping open.

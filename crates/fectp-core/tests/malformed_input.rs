@@ -203,20 +203,30 @@ fn connect() -> (fectp_core::Session, fectp_core::Session) {
     let server_public = *server_kp.public();
     let caps = Capabilities::minimal(1200);
 
-    let mut initiator =
-        Initiator::new(Keypair::from_secret(CLIENT_SECRET), server_public, SESSION_ID, caps)
-            .expect("initiator");
+    let mut initiator = Initiator::new(
+        Keypair::from_secret(CLIENT_SECRET),
+        server_public,
+        SESSION_ID,
+        caps,
+    )
+    .expect("initiator");
     let mut responder = Responder::new(server_kp, caps);
 
     let mut wire = [0u8; 2048];
     let mut scratch = [0u8; 2048];
 
-    let n = initiator.write_init(&mut OsRng, b"", &mut wire).expect("init");
-    responder.read_init(&wire[..n], &mut scratch).expect("read init");
+    let n = initiator
+        .write_init(&mut OsRng, b"", &mut wire)
+        .expect("init");
+    responder
+        .read_init(&wire[..n], &mut scratch)
+        .expect("read init");
     let (server, n) = responder
         .write_response(&mut OsRng, b"", &mut wire)
         .expect("response");
-    let (client, _) = initiator.read_response(&wire[..n], &mut scratch).expect("read response");
+    let (client, _) = initiator
+        .read_response(&wire[..n], &mut scratch)
+        .expect("read response");
     (client, server)
 }
 
@@ -319,7 +329,10 @@ fn an_overlong_varint_is_refused() {
     assert_eq!(varint::decode(&[0x00]).expect("canonical zero"), (0, 1));
     assert!(varint::decode(&[0x80, 0x00]).is_err(), "overlong zero");
     assert!(varint::decode(&[0x81, 0x00]).is_err(), "overlong one");
-    assert!(varint::decode(&[0x80, 0x80, 0x00]).is_err(), "doubly overlong zero");
+    assert!(
+        varint::decode(&[0x80, 0x80, 0x00]).is_err(),
+        "doubly overlong zero"
+    );
 
     // The tightening must not refuse anything the encoder writes, at any width.
     for value in [0u32, 1, 127, 128, 16_383, 16_384, u32::MAX] {
@@ -344,10 +357,7 @@ fn undefined_flag_bits_are_refused() {
     for bit in 0..8u8 {
         frame[1] = 1 << bit;
         match Header::decode(&frame) {
-            Ok(header) => assert_eq!(
-                header.flags, 1 << bit,
-                "a known flag must survive decoding"
-            ),
+            Ok(header) => assert_eq!(header.flags, 1 << bit, "a known flag must survive decoding"),
             Err(Error::BadHeader) => {}
             Err(other) => panic!("unexpected error for flag bit {bit}: {other:?}"),
         }
@@ -364,7 +374,10 @@ fn an_unknown_transform_or_entropy_is_refused() {
             Ok(header) => {
                 let mut round = [0u8; 4];
                 header.encode(&mut round).expect("re-encode");
-                assert_eq!(round, bytes, "byte {byte:#04x} decoded to a different spelling");
+                assert_eq!(
+                    round, bytes,
+                    "byte {byte:#04x} decoded to a different spelling"
+                );
             }
             Err(Error::BadHeader | Error::UnsupportedVersion) => {}
             Err(other) => panic!("unexpected error for {byte:#04x}: {other:?}"),
@@ -372,6 +385,12 @@ fn an_unknown_transform_or_entropy_is_refused() {
     }
     // Both stages are named in one byte, so an undefined value in either
     // half must fail the whole header rather than defaulting.
-    assert!(CodecHeader::decode(&[0x0f, 0, 0, 0]).is_err(), "unknown transform");
-    assert!(CodecHeader::decode(&[0xf0, 0, 0, 0]).is_err(), "unknown entropy stage");
+    assert!(
+        CodecHeader::decode(&[0x0f, 0, 0, 0]).is_err(),
+        "unknown transform"
+    );
+    assert!(
+        CodecHeader::decode(&[0xf0, 0, 0, 0]).is_err(),
+        "unknown entropy stage"
+    );
 }

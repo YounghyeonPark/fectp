@@ -75,9 +75,7 @@ pub fn all() -> Vec<Dataset> {
         Dataset {
             name: "counter i32 x2",
             description: "2 channels of monotonic 32-bit counters",
-            bytes: (0..2048i32)
-                .flat_map(|i| (i * 7).to_le_bytes())
-                .collect(),
+            bytes: (0..2048i32).flat_map(|i| (i * 7).to_le_bytes()).collect(),
             shape: Shape::I32 { channels: 2 },
         },
         Dataset {

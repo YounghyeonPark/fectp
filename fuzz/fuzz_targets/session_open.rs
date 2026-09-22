@@ -16,7 +16,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use fectp_core::keys::Keypair;
-use fectp_core::session::{Capabilities, Initiator, Responder, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD};
+use fectp_core::session::{
+    Capabilities, Initiator, Responder, INITIATOR_OVERHEAD, RESPONDER_OVERHEAD,
+};
 use rand_core::OsRng;
 
 /// A settled pair, built once per input.

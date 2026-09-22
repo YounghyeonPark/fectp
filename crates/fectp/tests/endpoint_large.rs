@@ -36,20 +36,19 @@ fn an_endpoint_sends_a_message_larger_than_a_frame() {
     let payload = incompressible(20_000);
     let outgoing = payload.clone();
 
-    let handle = thread::spawn(move || {
-        loop {
-            match server.poll(Some(TICK)).expect("poll") {
-                Event::Connected { peer, .. } => {
-                    server.send_reliable(peer, &outgoing, PayloadType::Opaque).expect("send_reliable");
-                }
-                Event::Sent { delivered, .. } => return delivered,
-                _ => {}
+    let handle = thread::spawn(move || loop {
+        match server.poll(Some(TICK)).expect("poll") {
+            Event::Connected { peer, .. } => {
+                server
+                    .send_reliable(peer, &outgoing, PayloadType::Opaque)
+                    .expect("send_reliable");
             }
+            Event::Sent { delivered, .. } => return delivered,
+            _ => {}
         }
     });
 
-    let client =
-        Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+    let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 
     let mut buf = vec![0u8; payload.len()];
@@ -80,7 +79,9 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
                 Event::Connected { peer, .. } => {
                     if first.is_none() {
                         first = Some(peer);
-                        server.send_reliable(peer, &payload, PayloadType::Opaque).expect("send_reliable");
+                        server
+                            .send_reliable(peer, &payload, PayloadType::Opaque)
+                            .expect("send_reliable");
                         let _ = ready.send(());
                     }
                 }
@@ -99,13 +100,16 @@ fn a_large_send_does_not_stop_the_endpoint_serving_another_peer() {
     let _first = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     started.recv_timeout(TIMEOUT).expect("large send started");
 
-    let second =
-        Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+    let second = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     second.set_read_timeout(Some(TIMEOUT)).expect("timeout");
-    second.send(b"are you still there", PayloadType::Opaque).expect("send");
+    second
+        .send(b"are you still there", PayloadType::Opaque)
+        .expect("send");
 
     let mut buf = [0u8; 128];
-    let n = second.recv(&mut buf).expect("the endpoint must still answer");
+    let n = second
+        .recv(&mut buf)
+        .expect("the endpoint must still answer");
     assert_eq!(&buf[..n], b"are you still there");
 
     assert!(handle.join().expect("server thread"));
@@ -125,9 +129,13 @@ fn queueing_more_than_the_limit_is_refused() {
                 // the queue has to be bounded or one peer could make the
                 // endpoint keep any amount of memory.
                 for _ in 0..fectp::MAX_QUEUED {
-                    server.send_reliable(peer, &payload, PayloadType::Opaque).expect("within the limit");
+                    server
+                        .send_reliable(peer, &payload, PayloadType::Opaque)
+                        .expect("within the limit");
                 }
-                return server.send_reliable(peer, &payload, PayloadType::Opaque).is_err();
+                return server
+                    .send_reliable(peer, &payload, PayloadType::Opaque)
+                    .is_err();
             }
         }
     });
@@ -154,8 +162,12 @@ fn two_queued_messages_both_arrive_in_order() {
         loop {
             match server.poll(Some(TICK)).expect("poll") {
                 Event::Connected { peer, .. } => {
-                    server.send_reliable(peer, &a, PayloadType::Opaque).expect("first");
-                    server.send_reliable(peer, &b, PayloadType::Opaque).expect("second");
+                    server
+                        .send_reliable(peer, &a, PayloadType::Opaque)
+                        .expect("first");
+                    server
+                        .send_reliable(peer, &b, PayloadType::Opaque)
+                        .expect("second");
                 }
                 Event::Sent { delivered, .. } => {
                     assert!(delivered);
@@ -169,8 +181,7 @@ fn two_queued_messages_both_arrive_in_order() {
         }
     });
 
-    let client =
-        Connection::connect(addr, &public, &Identity::generate()).expect("connect");
+    let client = Connection::connect(addr, &public, &Identity::generate()).expect("connect");
     client.set_read_timeout(Some(TIMEOUT)).expect("timeout");
 
     let mut buf = vec![0u8; 9_000];

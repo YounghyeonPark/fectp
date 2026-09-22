@@ -53,12 +53,11 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
-use fectp_core::session::{
-    preshared_key, Initiator, ResumeInitiator, ResumeResponder, Responder, ResumptionTicket,
-    INITIATOR_OVERHEAD, RESPONDER_OVERHEAD,
-    Session, PATH_TOKEN_LEN,
-};
 use fectp_core::reliability::Rto;
+use fectp_core::session::{
+    preshared_key, Initiator, Responder, ResumeInitiator, ResumeResponder, ResumptionTicket,
+    Session, INITIATOR_OVERHEAD, PATH_TOKEN_LEN, RESPONDER_OVERHEAD,
+};
 use fectp_core::PublicKey;
 use rand_core::{OsRng, RngCore};
 
@@ -652,18 +651,13 @@ impl Endpoint {
         let (handshake, len) = match &self.mode {
             Mode::PublicKey(identity) => {
                 let peer = peer_public.ok_or(Error::MissingPeerKey)?;
-                let mut initiator =
-                    Initiator::new(identity.keypair(), *peer, session_id, caps)?;
+                let mut initiator = Initiator::new(identity.keypair(), *peer, session_id, caps)?;
                 let len = initiator.write_init(&mut OsRng, zero_rtt, &mut frame)?;
                 (Handshake::Full(Box::new(initiator)), len)
             }
             Mode::Psk(psk) => {
-                let mut initiator = ResumeInitiator::new(
-                    psk.clone(),
-                    fectp_core::ANONYMOUS,
-                    session_id,
-                    caps,
-                )?;
+                let mut initiator =
+                    ResumeInitiator::new(psk.clone(), fectp_core::ANONYMOUS, session_id, caps)?;
                 let len = initiator.write_init(&mut OsRng, zero_rtt, &mut frame)?;
                 (Handshake::Psk(Box::new(initiator)), len)
             }
@@ -887,10 +881,9 @@ impl Endpoint {
             // not interoperate, and this is where that is enforced: not by
             // deciding, but by having no arm that accepts it.
             (FrameType::HandshakeInit, _) => Ok(None),
-            (
-                FrameType::HandshakeResponse | FrameType::ResumeResponse,
-                _,
-            ) => self.complete_outbound(n, from, header.session_id),
+            (FrameType::HandshakeResponse | FrameType::ResumeResponse, _) => {
+                self.complete_outbound(n, from, header.session_id)
+            }
             _ => self.route(n, from, header.session_id),
         }
     }
@@ -1192,7 +1185,9 @@ impl Endpoint {
         };
 
         let reply = staging[..len].to_vec();
-        Ok(Some(self.register_as(peer_id, link, addr, reply, resumed, true)))
+        Ok(Some(
+            self.register_as(peer_id, link, addr, reply, resumed, true),
+        ))
     }
 
     fn accept_full(&mut self, n: usize, from: SocketAddr) -> Result<Event> {
@@ -1259,8 +1254,7 @@ impl Endpoint {
             .insert(link.resumption_ticket(), *link.remote_static());
 
         let session_id = link.session_id();
-        let datagram_limit =
-            (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
+        let datagram_limit = (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
 
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
@@ -1288,8 +1282,7 @@ impl Endpoint {
         self.tickets
             .insert(link.resumption_ticket(), *link.remote_static());
         let session_id = link.session_id();
-        let datagram_limit =
-            (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
+        let datagram_limit = (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
         self.file(peer_id, link, addr, session_id, datagram_limit);
 
         Event::Connected {
@@ -1513,9 +1506,7 @@ impl Endpoint {
     /// Fails with [`Error::PayloadTooLarge`](fectp_core::Error::PayloadTooLarge)
     /// if it would not fit a handshake frame.
     pub fn set_handshake_reply(&mut self, payload: &[u8]) -> Result<()> {
-        let overhead = RESPONDER_OVERHEAD
-            .max(ResumeResponder::OVERHEAD)
-;
+        let overhead = RESPONDER_OVERHEAD.max(ResumeResponder::OVERHEAD);
         if payload.len() + overhead > max_datagram() {
             return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
         }
@@ -1568,8 +1559,7 @@ impl Endpoint {
         let now = Instant::now();
         let elapsed = now.duration_since(entry.migration_refilled).as_secs_f32();
         entry.migration_refilled = now;
-        entry.migration_budget =
-            (entry.migration_budget + elapsed * rate as f32).min(rate as f32);
+        entry.migration_budget = (entry.migration_budget + elapsed * rate as f32).min(rate as f32);
 
         if entry.migration_budget < 1.0 {
             return false;
@@ -1689,14 +1679,11 @@ impl Endpoint {
             let limit = entry.datagram_limit;
             let socket = &self.socket;
             let stamp = &mut entry.last_sent;
-            let finished =
-                entry
-                    .peer
-                    .drive_queue(now, limit, &mut self.tx, |frame| {
-                        send_datagram(socket, frame, addr)?;
-                        *stamp = Instant::now();
-                        Ok(())
-                    })?;
+            let finished = entry.peer.drive_queue(now, limit, &mut self.tx, |frame| {
+                send_datagram(socket, frame, addr)?;
+                *stamp = Instant::now();
+                Ok(())
+            })?;
             if let Some(finished) = finished {
                 self.events.push_back(Event::Sent {
                     peer: id,
@@ -1885,9 +1872,7 @@ impl Endpoint {
         let now = Instant::now();
         self.peers
             .values()
-            .map(|e| {
-                (e.last_sent + every).saturating_duration_since(now)
-            })
+            .map(|e| (e.last_sent + every).saturating_duration_since(now))
             .min()
     }
 
@@ -1970,7 +1955,11 @@ impl Endpoint {
             }
             let now = self.now_ms();
             let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
-            let id = entry.peer.retransmit.register(now).map_err(Error::Protocol)?;
+            let id = entry
+                .peer
+                .retransmit
+                .register(now)
+                .map_err(Error::Protocol)?;
             let addr = entry.addr;
             let n = entry
                 .peer
