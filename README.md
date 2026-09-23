@@ -330,7 +330,7 @@ records what each one would cost to change.
 | **A stranger can still cost you a handshake** | Anyone holding the public key can complete one — four X25519 operations. The peer table and the rate of new handshakes are both bounded, so a flood degrades connection setup rather than the process, but the work is not free. A replay from a new source address is a new handshake; only a cookie exchange would tell them apart, and that costs the round trip 0-RTT exists to save. |
 | **No post-quantum option** | X25519 only. A PQC suite would be a new protocol version, not a negotiation. |
 | **Public keys are your problem** | The protocol authenticates a key you already trust. Getting it to you is out of scope. |
-| **The secret must be in process memory** | `Identity::from_secret` takes the raw 32 bytes and the handshake does its own Diffie-Hellman, so a secure element or HSM that never releases the key cannot be used without a change to `fectp-core`. |
+| **Ephemeral keys are in process memory** | The long-term key need not be: a secure element or HSM implements `StaticKey` and `Endpoint::bind_with_key` and `Connection::connect_with_key` take one, so the key performs its Diffie-Hellman without ever being read (D76, D78). Ephemerals are in memory either way, deliberately — each lasts one handshake. The C ABI does not carry the trait, so the bindings take the bytes. |
 
 ### Delivery
 
@@ -384,7 +384,7 @@ sits: in the crate description crates.io shows in search results, and as a
 warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
 the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 352 of them and they pass. Linked for
+`cargo test --workspace` runs 358 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.4 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.

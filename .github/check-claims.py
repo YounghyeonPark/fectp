@@ -253,6 +253,23 @@ def decisions_gaps() -> list[str]:
     return re.findall(r"^\| \*\*(.+?)\*\* \|", section.group(1), re.M)
 
 
+def split_name(name: str) -> set[str]:
+    """The words of an identifier, in the two conventions Rust uses.
+
+    Splitting before every capital shreds a SCREAMING_SNAKE constant into its
+    letters: CODEC_I16_DELTA became {c, o, d, e, i16, d, e, l, t, a}. That put
+    almost the whole alphabet into the set of public API words, so any claim
+    containing a one-letter word -- "does not cross the C ABI" -- was reported
+    as naming something the API provides. Split on a lowercase-to-uppercase
+    boundary instead, which is where a camelCase word actually ends, and on the
+    underscores the other convention already supplies.
+    """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", spaced)
+    # A single letter can only be noise: it matches by accident or not at all.
+    return {p.lower() for p in re.split(r"[^A-Za-z0-9]+", spaced) if len(p) > 1}
+
+
 def public_names() -> set[str]:
     """Words appearing in the crates' public item names."""
     found: set[str] = set()
@@ -265,15 +282,11 @@ def public_names() -> set[str]:
             continue
         text = source.read_text(encoding="utf-8")
         for name in pattern.findall(text):
-            for part in re.split(r"[^A-Za-z0-9]+", re.sub(r"(?<!^)(?=[A-Z])", "_", name)):
-                if part:
-                    found.add(part.lower())
+            found.update(split_name(name))
         # Enum variants of public enums, which carry the feature names.
         for block in re.findall(r"pub enum \w+ \{(.*?)\n\}", text, re.S):
             for variant in re.findall(r"^\s*(\w+)\s*[,{(]", block, re.M):
-                for part in re.split(r"_", re.sub(r"(?<!^)(?=[A-Z])", "_", variant)):
-                    if part:
-                        found.add(part.lower())
+                found.update(split_name(variant))
     return found
 
 

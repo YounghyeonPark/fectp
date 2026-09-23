@@ -128,8 +128,8 @@ if !allow_list.contains(&their_public) {
 > [`examples/keys.rs`](../crates/fectp/examples/keys.rs).
 >
 > ```bash
-> cargo run -p fectp --example keys -- serve            # prints its public key
-> cargo run -p fectp --example keys -- connect <key>    # another terminal
+> cargo run -p fectp --example keys — serve            # prints its public key
+> cargo run -p fectp --example keys — connect <key>    # another terminal
 > ```
 >
 > Two processes rather than two threads on purpose. A public key has to
@@ -175,11 +175,56 @@ let secret = *identity.secret();
 let identity = Identity::from_secret(secret);
 ```
 
-**The secret must be in your process's memory.** `Identity::from_secret` takes
-the raw 32 bytes and the handshake performs its own Diffie-Hellman, so a secure
-element or HSM that never releases the key — the whole point of one — cannot be
-used without a change to `fectp-core`. If key isolation is a requirement, that
-is a gap to know about before building on this.
+### Or keep it out of your process entirely
+
+Everything above assumes the 32 bytes pass through your memory, which is the
+ordinary case and what `Identity` is for. It is not the only one. A secure
+element or an HSM performs the Diffie-Hellman and never releases the key —
+the whole reason to have one — and both front ends take such a key directly:
+
+```rust
+use fectp::{Connection, Endpoint, PeerKey, ProtocolResult, StaticKey, DHLEN};
+use std::sync::Arc;
+
+struct Element { /* a handle to your device */ }
+
+impl StaticKey for Element {
+    fn public(&self) -> PeerKey {
+        // Read once, at startup, from the device.
+        todo!()
+    }
+
+    fn dh(&self, peer: &PeerKey) -> ProtocolResult<[u8; DHLEN]> {
+        // Ask the device. It may be busy, locked or unplugged, which is why
+        // this can fail — return `ProtocolError::KeyUnavailable` when it does.
+        todo!()
+    }
+}
+
+let element = Arc::new(Element { /* .. */ });
+let server = Endpoint::bind_with_key("0.0.0.0:4433", element.clone())?;
+// The same key opens a client connection.
+let conn = Connection::connect_with_key(addr, &peer_public, element, b"")?;
+```
+
+Nothing there names a second crate: `StaticKey`, `DHLEN`, `ProtocolResult` and
+`ProtocolError` are re-exported from `fectp` so that an element can be written
+against this crate alone. The same example, compiled, is on
+[`SharedKey`](https://docs.rs/fectp/latest/fectp/struct.SharedKey.html).
+
+The `Arc` is shared, not taken: the device stays yours, to unlock, health-check
+or rotate. A peer cannot tell the difference, which is the point.
+
+**What it costs.** Two calls per handshake in each role — `IK` uses the static
+key twice on each side — and nothing between handshakes. On a device where a
+call is a round trip over a bus, that is the number to budget for.
+
+**What it does not cover.** Ephemeral keys are still generated and held here, on
+purpose: one lasts a single handshake, so hardware would protect one session's
+forward secrecy rather than the identity, which is the thing whose loss is
+permanent. Nor does the C ABI carry the trait, so the bindings in other
+languages take the raw bytes — see
+[OTHER-LANGUAGES.md](OTHER-LANGUAGES.md#a-key-held-in-hardware-does-not-cross-either).
 
 ## The shortest working pair
 

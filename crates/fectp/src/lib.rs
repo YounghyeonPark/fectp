@@ -111,6 +111,7 @@ use fectp_core::session::{
     PATH_TOKEN_LEN,
 };
 use fectp_core::{Keypair, PublicKey, Transport};
+// `StaticKey` and `DHLEN` arrive through the `pub use` below.
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
 
@@ -155,7 +156,15 @@ pub use fectp_core::reliability::{
     INITIAL_CWND, MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES, MIN_CWND,
 };
 pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_RELIABLE, CAP_ZSTD};
-pub use fectp_core::{Capabilities, PublicKey as PeerKey};
+/// `StaticKey`, `DHLEN`, `ProtocolError` and `ProtocolResult` are here so that
+/// implementing a [`SharedKey`] needs nothing but this crate. `ProtocolError`
+/// is the error [`Error::Protocol`] already carries, named for the variant
+/// that carries it. `Keypair` is deliberately not re-exported: [`Identity`] is
+/// this crate's key type and two names for one idea is how they get confused.
+pub use fectp_core::{
+    Capabilities, Error as ProtocolError, PublicKey as PeerKey, Result as ProtocolResult,
+    StaticKey, DHLEN,
+};
 pub use udp::{
     max_datagram, set_max_datagram, UdpTransport, DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
 };
@@ -410,6 +419,119 @@ impl Identity {
     }
 }
 
+impl StaticKey for Identity {
+    fn public(&self) -> PublicKey {
+        self.public
+    }
+
+    /// Never fails: the key is in this process, which is the thing
+    /// [`SharedKey`] exists to stop being the only option.
+    fn dh(&self, peer: &PublicKey) -> fectp_core::Result<[u8; DHLEN]> {
+        Ok(self.keypair().dh(peer))
+    }
+}
+
+/// A long-term key an [`Endpoint`] or [`Connection`] authenticates with, which
+/// may not be in this process.
+///
+/// [`Identity`] is thirty-two bytes here in memory and is what almost every
+/// caller wants. The other case is a secure element or an HSM, which performs
+/// the Diffie-Hellman and never releases the key — the whole reason to have
+/// one. `fectp-core` has taken a [`StaticKey`] since D76; this is what carries
+/// that through the front ends.
+///
+/// **Shared rather than owned.** The `Arc` is the point: a device belongs to
+/// the application, outlives any one handshake, and gets asked things an
+/// endpoint knows nothing about — a health check, an unlock, a key rotation.
+/// An endpoint that took ownership would end that.
+///
+/// The public half is read once and kept. An element is a chip on a bus and
+/// asking it the same question on every frame would be paying for nothing.
+///
+/// Nothing below names another crate, which is the point of the re-exports
+/// beside [`PeerKey`]: an element is implemented against `fectp` alone.
+///
+/// ```no_run
+/// use fectp::{Connection, Endpoint, PeerKey, ProtocolResult, StaticKey, DHLEN};
+/// use std::sync::Arc;
+///
+/// struct Element;
+///
+/// impl StaticKey for Element {
+///     fn public(&self) -> PeerKey {
+///         // Read once, at startup, from the device.
+///         # unimplemented!()
+///     }
+///
+///     fn dh(&self, peer: &PeerKey) -> ProtocolResult<[u8; DHLEN]> {
+///         // Ask the device. It can be busy, locked or unplugged, which is
+///         // why this may fail: return `ProtocolError::KeyUnavailable` then.
+///         # unimplemented!()
+///     }
+/// }
+///
+/// # fn main() -> fectp::Result<()> {
+/// # let peer_public: PeerKey = unimplemented!();
+/// let element = Arc::new(Element);
+/// let server = Endpoint::bind_with_key("0.0.0.0:4433", element.clone())?;
+/// // The same key opens a client connection.
+/// let conn = Connection::connect_with_key("host:4433", &peer_public, element, b"")?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct SharedKey {
+    key: std::sync::Arc<dyn StaticKey + Send + Sync>,
+    public: PublicKey,
+}
+
+impl SharedKey {
+    /// Wraps a key that lives somewhere this process cannot read.
+    pub fn new(key: std::sync::Arc<dyn StaticKey + Send + Sync>) -> Self {
+        let public = key.public();
+        Self { key, public }
+    }
+
+    /// The public half, which peers need in order to reach this key.
+    pub fn public(&self) -> &PublicKey {
+        &self.public
+    }
+}
+
+impl From<Identity> for SharedKey {
+    fn from(identity: Identity) -> Self {
+        Self::new(std::sync::Arc::new(identity))
+    }
+}
+
+/// So an application that holds its element as `Arc<MyElement>` — which it
+/// will, because the element is shared — passes it directly. `new` is for a
+/// handle already erased to `Arc<dyn StaticKey>`, which the blanket cannot
+/// cover: it is unsized.
+impl<T: StaticKey + Send + Sync + 'static> From<std::sync::Arc<T>> for SharedKey {
+    fn from(key: std::sync::Arc<T>) -> Self {
+        Self::new(key)
+    }
+}
+
+impl StaticKey for SharedKey {
+    fn public(&self) -> PublicKey {
+        self.public
+    }
+
+    fn dh(&self, peer: &PublicKey) -> fectp_core::Result<[u8; DHLEN]> {
+        self.key.dh(peer)
+    }
+}
+
+impl std::fmt::Debug for SharedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedKey")
+            .field("public", &self.public)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Identity")
@@ -539,6 +661,29 @@ impl Core {
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let mut conn = Self::handshake(transport, peer_public, identity, zero_rtt)?;
         // The handshake's deadline is not the caller's; `recv` gets its own.
+        conn.set_read_timeout(None)?;
+        Ok(conn)
+    }
+
+    /// Connects with a long-term key that lives outside this process.
+    ///
+    /// For a secure element or an HSM, which performs the Diffie-Hellman and
+    /// never releases the key. [`connect`](Self::connect) is the same thing
+    /// with the key in memory and is what almost every caller wants; see
+    /// [`SharedKey`].
+    ///
+    /// A `Connection`'s handshake happens once, here, so the key is used and
+    /// released rather than held — two Diffie-Hellman operations for the
+    /// initiator's side of `IK`, and the device is not touched again.
+    pub fn connect_with_key(
+        addr: impl ToSocketAddrs,
+        peer_public: &PublicKey,
+        key: impl Into<SharedKey>,
+        zero_rtt: &[u8],
+    ) -> Result<Self> {
+        let mut transport = UdpTransport::connect(resolve(addr)?)?;
+        transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        let mut conn = Self::handshake(transport, peer_public, key.into(), zero_rtt)?;
         conn.set_read_timeout(None)?;
         Ok(conn)
     }
@@ -681,10 +826,10 @@ impl Core {
         }
     }
 
-    fn handshake(
+    fn handshake<S: StaticKey>(
         mut transport: UdpTransport,
         peer_public: &PublicKey,
-        identity: &Identity,
+        key: S,
         zero_rtt: &[u8],
     ) -> Result<Self> {
         let size = transport.max_datagram_size();
@@ -692,12 +837,8 @@ impl Core {
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 
-        let mut initiator = Initiator::new(
-            identity.keypair(),
-            *peer_public,
-            OsRng.next_u32(),
-            local_capabilities(),
-        )?;
+        let mut initiator =
+            Initiator::new(key, *peer_public, OsRng.next_u32(), local_capabilities())?;
 
         let n = initiator.write_init(&mut OsRng, zero_rtt, &mut tx)?;
         let n = exchange_handshake(&mut transport, &tx[..n], &mut rx)?;
@@ -942,6 +1083,28 @@ impl Connection {
             identity,
             zero_rtt,
         )?)
+    }
+
+    /// Connects with a long-term key that lives outside this process.
+    ///
+    /// For a secure element or an HSM, which performs the Diffie-Hellman and
+    /// never releases the key — the whole reason to have one.
+    /// [`connect`](Self::connect) is the same thing with the key in memory and
+    /// is what almost every caller wants; see [`SharedKey`].
+    ///
+    /// The handshake happens once, here, so the device is used and released
+    /// rather than held: two Diffie-Hellman operations for the initiator's
+    /// side of `IK`, and it is not touched again.
+    ///
+    /// `zero_rtt` carries the caveats of [`connect_and_send`](Self::connect_and_send).
+    /// Pass `&[]` for none.
+    pub fn connect_with_key(
+        addr: impl ToSocketAddrs,
+        peer_public: &PublicKey,
+        key: impl Into<SharedKey>,
+        zero_rtt: &[u8],
+    ) -> Result<Self> {
+        Self::wrap(Core::connect_with_key(addr, peer_public, key, zero_rtt)?)
     }
 
     /// Redeems a resumption ticket, sparing three of the four key agreements.

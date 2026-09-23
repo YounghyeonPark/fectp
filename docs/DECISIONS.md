@@ -579,7 +579,7 @@ These are unimplemented, not overlooked.
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
-| **Keys must be in process memory, through the std front end** | `fectp-core` takes a [`StaticKey`](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it) and a secure element implements it ([D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it)). `Endpoint` and `Connection` still require a `Keypair`. | Closed for the case that motivated it — a constrained device uses the core directly — and open for the std API, which would need the parameter threaded through the peer table and the event loop. Ephemerals are in memory either way, on purpose: they last one handshake. |
+| **Keys must be in process memory, across the C ABI** | Rust does not need them there: a secure element implements [`StaticKey`](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it) and `Endpoint::bind_with_key` and `Connection::connect_with_key` take one ([D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it), [D78](#d78--the-std-front-ends-take-an-element-too-without-breaking-the-api)). | Closed for Rust, both on the core and through the std front ends. Open across the C ABI, where a trait becomes a struct of function pointers with a lifetime the caller must honour — a second design, not the same one wearing a header. Ephemerals are in memory either way, on purpose: they last one handshake. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -3877,3 +3877,96 @@ change it silently, so: the full suite, clippy at every feature combination,
 MSRV 1.85, both bindings, the test vectors byte-identical, `interop.rs` still
 agreeing with `snow` in both roles, and the linked `thumbv7em` image at 23,982
 bytes — the same number as before.
+
+## D78 — The std front ends take an element too, without breaking the API
+
+[D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it)
+gave `fectp-core` a `StaticKey` seam and stopped there, and its own commit
+message said so: "Endpoint and Connection stay on Keypair". That served the
+case which motivated it — a constrained device linking the core directly — and
+left the commoner one unserved. A server holding its identity in an HSM is the
+ordinary reason to want key isolation, and it reaches this protocol through
+`Endpoint`.
+
+Worse than unserved: still described as impossible. README and USAGE.md both
+said a secure element "cannot be used without a change to `fectp-core`" and
+both still said it the day after that change landed. D76 edited README — two
+numbers, the test count and the flash figure — and walked past the row that
+was the reason for the work. Corrected here, along with the gaps row itself,
+which claimed the std API "would need the parameter threaded through the peer
+table and the event loop". It does not, which is most of what this record is
+about.
+
+**`SharedKey` is one type erasure at the front door.** `Initiator<S>` and
+`Responder<S>` are generic, so threading a parameter through `Endpoint` would
+make `Endpoint<S>` generic too, and then `Peer`, the handshake table, every
+signature that names one, and every caller's type annotation. That is the
+"threaded through the peer table and the event loop" the gaps row feared, and
+it is avoidable: `SharedKey` wraps an `Arc<dyn StaticKey + Send + Sync>` and
+implements `StaticKey` itself, so `Endpoint` names exactly one concrete type
+and stays exactly as generic as it was — not at all.
+
+**Nothing published broke, which was a requirement rather than a hope.** D76
+broke one thing, `Initiator::OVERHEAD`, and one is the budget for a 0.x line
+that has published twice in four days. `Endpoint::bind` still takes an
+`Identity` and converts; `public_key()` still returns `Option<&PublicKey>`,
+which is why `SharedKey` caches the public half rather than asking the trait —
+the trait returns a value and that signature returns a reference. Caching is
+also what an element wants: a chip on a bus, asked the same question on every
+frame, is a cost for nothing.
+
+**The `Arc` is shared, not taken, and that came from D76's third test.** D76
+learned the same lesson one layer down and wrote `impl StaticKey for &T`
+because a handshake that owns its key cannot be asked anything else. At this
+layer an `Endpoint` outlives many handshakes and a reference would need a
+lifetime on the type, so the sharing is an `Arc` instead. The application keeps
+its device — for a health check, an unlock, a rotation — and a test asserts the
+handle still works after the endpoint is dropped.
+
+**Both doors take the same thing, because at first they did not.** The two
+entry points were written minutes apart and one took an `Arc`, the other a
+`&SharedKey`. Both compiled. Both are for the same idea, and a caller who had
+built the wrong one of the two had to find that out. They now take
+`impl Into<SharedKey>`, which accepts an `Arc<T>` of a concrete element, a
+`SharedKey`, or an `Identity`, and a test calls each of the three on each door
+— a property that is otherwise checked by nobody, since it is about what
+compiles.
+
+**`StaticKey`, `DHLEN` and `ProtocolError` are re-exported from `fectp`.**
+Found by writing the example: the doctest would not compile, because a crate
+that depends on `fectp` alone could not name the trait it was being told to
+implement, nor the error type that trait returns. `fectp::Error::Protocol`
+already carried `fectp_core::Error` through the public API, so the type was
+reachable and unnameable. `Keypair` is deliberately left out — `Identity` is
+this crate's key type and a second name for it is how the two get confused.
+
+**Two calls per handshake, per side, and that is asserted rather than assumed.**
+`IK` uses the responder's static key for both `es` and `ss` while reading
+message 1, and the initiator's for `ss` and `se`. The test that pins this was
+written expecting one call and was wrong. On a device where a call is a round
+trip over a bus the count is the cost, so a change that added a third should
+not pass quietly.
+
+**What it costs everyone else.** One `Arc` allocation per endpoint, not per
+handshake, and a vtable call in place of a direct one for two Diffie-Hellman
+operations per handshake — beside an X25519 that is four orders of magnitude
+larger. Not measured, because the ratio is not close enough to be worth a
+benchmark; stated so the claim is not mistaken for one.
+
+**The wire did not move, measured rather than intended.** The test vectors pass
+untouched and `interop.rs` still agrees with `snow` in both roles. `fectp-core`
+is not touched by this at all, so the `no_std` footprint is unchanged and the
+fuzz targets, which bind only the core, cannot be affected.
+
+**The claims guard was wrong about what the API provides, and this is what
+found it.** Rewording the gaps row to name the C ABI made it report that the
+public API "has c in an item name". It does not. The check splits an identifier
+before every capital, which is right for `PublicKey` and shreds
+`CODEC_I16_DELTA` into its letters; almost the whole alphabet was in the set of
+words a claim must not use. Any claim containing a one-letter word had been
+unreportable-by-being-always-reported since the check was written. Splitting on
+a lowercase-to-uppercase boundary instead fixes it, and the set gained words it
+had been losing — `i16` was one. Checked both directions: no single letters
+remain, and a deliberately false entry in README's "Not built" list is still
+caught.
+

@@ -10,6 +10,29 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+**A secure element or HSM can hold an `Endpoint`'s or `Connection`'s long-term
+key.** `Endpoint::bind_with_key` and `Connection::connect_with_key` take
+anything implementing `StaticKey` — a device that performs the Diffie-Hellman
+and never releases the key — in place of an `Identity`. 0.2.0 gave that seam to
+`fectp-core` only, which served a constrained device linking the core directly
+and not a server, which is the commoner reason to want it (D78).
+
+Nothing published changed. `bind` still takes an `Identity`, `public_key()`
+still returns `Option<&PublicKey>`, and the wire is untouched — the test
+vectors are byte-identical and `interop.rs` still agrees with `snow` in both
+roles. `fectp-core` is not modified, so the `no_std` footprint does not move.
+
+New names, all in `fectp`: `SharedKey`, the two constructors above, and
+re-exports of `StaticKey`, `DHLEN` and `ProtocolError` — the last three so an
+element can be implemented against this crate alone, which it could not be
+before.
+
+**README and USAGE.md said this was impossible, and had been wrong since
+0.2.0.** Both told readers a secure element "cannot be used without a change to
+`fectp-core`"; that change shipped in 0.2.0 and neither sentence was revised.
+Corrected, along with the gaps table row that described a cost the
+implementation turned out not to have.
+
 **`StaticKey` is re-exported at the crate root**, as `Keypair`, `PublicKey`,
 `ANONYMOUS` and `DHLEN` already were. It shipped in 0.2.0 reachable only as
 `fectp_core::keys::StaticKey`, so somebody who wrote `use fectp_core::Keypair`

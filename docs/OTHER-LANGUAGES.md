@@ -148,10 +148,10 @@ function pointers the caller fills in, with a lifetime the C side has to
 honour and a failure path in both directions. `fectp_identity_from_secret` is
 what exists, and it takes the bytes.
 
-Not a gap so much as a different problem. The case D76 closes is a constrained
-device linking `fectp-core` directly, in Rust, where there is no boundary to
-cross; a C caller with an element is a second design, not the same one wearing
-a header.
+Not a gap so much as a different problem. What D76 and D78 close is Rust
+calling this directly — a constrained device on `fectp-core`, a server on
+`Endpoint` — where there is no boundary to cross; a C caller with an element
+is a second design, not the same one wearing a header.
 
 ### Key material escapes `zeroize`
 

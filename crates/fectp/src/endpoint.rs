@@ -64,7 +64,7 @@ use rand_core::{OsRng, RngCore};
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
-    PayloadType, Result, MAX_RETRIES,
+    PayloadType, Result, SharedKey, MAX_RETRIES,
 };
 
 /// A stable handle to one connected peer.
@@ -323,7 +323,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A handshake this endpoint started, waiting for its reply.
 enum Handshake {
-    Full(Box<Initiator>),
+    Full(Box<Initiator<SharedKey>>),
     Psk(Box<ResumeInitiator>),
 }
 
@@ -348,7 +348,12 @@ struct Outbound {
 /// modes at once would let an attacker pick the weakest.
 enum Mode {
     /// Public-key: peers must know this server's public key.
-    PublicKey(Identity),
+    ///
+    /// A [`SharedKey`] rather than an [`Identity`] so the key may live in a
+    /// secure element. An `Identity` converts into one, which is what
+    /// [`Endpoint::bind`] does, and costs an `Arc` per endpoint rather than
+    /// per handshake.
+    PublicKey(SharedKey),
     /// Pre-shared key: peers must hold the same secret. Encrypted, but with
     /// nothing to distribute except that secret.
     Psk(ResumptionTicket),
@@ -521,7 +526,25 @@ impl Endpoint {
     ///
     /// Peers must know [`public_key`](Self::public_key) in advance.
     pub fn bind(addr: impl ToSocketAddrs, identity: Identity) -> Result<Self> {
-        Self::with_mode(addr, Mode::PublicKey(identity))
+        Self::with_mode(addr, Mode::PublicKey(identity.into()))
+    }
+
+    /// Binds an endpoint whose long-term key lives outside this process.
+    ///
+    /// For a secure element or an HSM: the device performs the Diffie-Hellman
+    /// and never releases the key, which is the whole reason to have one.
+    /// [`bind`](Self::bind) is the same thing with the key in memory, and is
+    /// what almost every caller wants.
+    ///
+    /// The `Arc` is shared rather than taken. A device belongs to the
+    /// application and gets asked things an endpoint knows nothing about, so
+    /// keep your handle: this only borrows it.
+    ///
+    /// Its public half is read once here. Everything else about the endpoint
+    /// is unchanged, including that a peer cannot tell the difference — which
+    /// is the point.
+    pub fn bind_with_key(addr: impl ToSocketAddrs, key: impl Into<SharedKey>) -> Result<Self> {
+        Self::with_mode(addr, Mode::PublicKey(key.into()))
     }
 
     /// Binds in pre-shared-key mode.
@@ -583,7 +606,7 @@ impl Endpoint {
     /// secret they already share and so presents no identity of its own.
     pub fn public_key(&self) -> Option<&PublicKey> {
         match &self.mode {
-            Mode::PublicKey(identity) => Some(identity.public()),
+            Mode::PublicKey(key) => Some(key.public()),
             Mode::Psk(_) => None,
         }
     }
@@ -649,9 +672,9 @@ impl Endpoint {
         let mut frame = vec![0u8; max_datagram() + INITIATOR_OVERHEAD];
 
         let (handshake, len) = match &self.mode {
-            Mode::PublicKey(identity) => {
+            Mode::PublicKey(key) => {
                 let peer = peer_public.ok_or(Error::MissingPeerKey)?;
-                let mut initiator = Initiator::new(identity.keypair(), *peer, session_id, caps)?;
+                let mut initiator = Initiator::new(key.clone(), *peer, session_id, caps)?;
                 let len = initiator.write_init(&mut OsRng, zero_rtt, &mut frame)?;
                 (Handshake::Full(Box::new(initiator)), len)
             }
@@ -1191,10 +1214,10 @@ impl Endpoint {
     }
 
     fn accept_full(&mut self, n: usize, from: SocketAddr) -> Result<Event> {
-        let Mode::PublicKey(identity) = &self.mode else {
+        let Mode::PublicKey(key) = &self.mode else {
             return Err(Error::Handshake);
         };
-        let mut responder = Responder::new(identity.keypair(), local_capabilities());
+        let mut responder = Responder::new(key.clone(), local_capabilities());
         let mut staging = vec![0u8; self.rx.len()];
         let len = responder.read_init(&self.rx[..n], &mut staging)?;
         let zero_rtt = staging[..len].to_vec();
