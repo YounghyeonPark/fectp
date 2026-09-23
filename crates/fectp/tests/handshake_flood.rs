@@ -374,6 +374,9 @@ fn echoes(conn: &Connection, message: &[u8], buf: &mut [u8]) -> bool {
 /// a reply lost on the way back means the responder sees message 1 twice.
 #[test]
 fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
+    /// Enough that losing every one of them is not a thing that happens.
+    const REPLAYS: usize = 10;
+
     let echo = Echo::start();
 
     // A relay that keeps the first datagram it forwards — the opening frame —
@@ -433,23 +436,47 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
         "the session must work before the replay, or what is asserted after it          has nothing to stand against"
     );
 
-    // Send the captured opening frame again, from the same address.
-    replay_now.store(true, Ordering::Relaxed);
-    let waited = Instant::now();
-    while replayed.load(Ordering::Relaxed) == 0 && waited.elapsed() < Duration::from_secs(2) {
-        thread::sleep(Duration::from_millis(10));
+    // Send the captured opening frame again, from the same address, ten times.
+    //
+    // Once is what an attacker needs and is not what a test can rely on. The
+    // client has spoken by now, so the responder holds no reply for this pair
+    // and answers a replay with silence — correctly, and that leaves the
+    // stimulus unobservable: a replay lost on loopback looks exactly like one
+    // that arrived and was ignored, and the assertions below then hold for the
+    // wrong reason. Measured: with the protection removed, a single replay
+    // left this test passing two runs in six. Ten makes every one of those
+    // runs fail.
+    for _ in 0..REPLAYS {
+        replay_now.store(true, Ordering::Relaxed);
+        let waited = Instant::now();
+        while replay_now.load(Ordering::Relaxed) && waited.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(
         replayed.load(Ordering::Relaxed),
-        1,
-        "the replay must have gone out"
+        REPLAYS,
+        "every replay must have gone out"
     );
     thread::sleep(Duration::from_millis(200));
 
-    // The session the frame named must still be the one that works.
+    // The property, asked of the server rather than of the network: answering
+    // a replay afresh would establish a second session, which is a `Connected`
+    // the server records. One means the replays were seen and refused.
+    let sessions = echo.observed().peers.len();
+    assert_eq!(
+        sessions, 1,
+        "a replayed opening frame established a second session, displacing the one it named"
+    );
+
+    // And end to end, which is the consequence of the above rather than the
+    // evidence for it. Kept separate because a datagram lost on loopback fails
+    // this and proves nothing about replays — so it says that, and the
+    // assertion above has already settled the question this test is named for.
     assert!(
         echoes(&conn, b"after the replay", &mut buf),
-        "a replayed opening frame cut off the session it named"
+        "the session stopped answering, with the server still holding exactly          one — so this is lost traffic, not a displaced session"
     );
 
     stop.store(true, Ordering::Relaxed);
