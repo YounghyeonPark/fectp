@@ -14,7 +14,7 @@
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -191,6 +191,11 @@ fn connect_timed(
 }
 
 /// Connects, insisting it succeeds.
+///
+/// For the places where a handshake failing is the test failing. Where it is
+/// the host being busy — a warm-up sample, a trial — [`connect_timed`] is used
+/// directly and the attempt discarded, because a handshake that spent its
+/// whole budget and gave up measures the machine, not the schedule.
 fn connect_ok(client: &mut Endpoint, addr: SocketAddr, key: &PeerKey) -> (Duration, PeerId) {
     let (took, peer) = connect_timed(client, addr, key);
     (took, peer.expect("the handshake must complete"))
@@ -215,42 +220,90 @@ const WARM_UP: usize = 4;
 /// of any wall-clock claim here.
 const COLD_WAIT: Duration = Duration::from_millis(250);
 
-/// How many times a trial is repeated when the network interferes with it.
-const TRIALS: usize = 8;
+/// How many attempts a trial may take, counting those the network spoils.
+const ATTEMPTS: usize = 8;
+
+/// How many countable trials the assertion is taken over.
+///
+/// One was enough until it was not. A trial measures the wait before a resend
+/// plus whatever the host added, and a host adds in one direction only: the
+/// resend is scheduled inside `poll`, so a thread that does not run makes the
+/// wait look longer and never shorter. Measured with four copies of this file
+/// running at once — the load that first broke the single-trial version — one
+/// trial ranged from 63 ms to 298 ms while the best of four stayed inside 64
+/// to 78 ms on every run of twelve. The floor is what the schedule chose;
+/// everything above it is the machine.
+const COUNTABLE: usize = 4;
 
 /// Runs enough undisturbed handshakes for the estimate to settle, releasing
 /// each session as it goes, and returns what the last one took.
 fn warm_up(client: &mut Endpoint, addr: SocketAddr, key: &PeerKey) -> Duration {
     let mut last = Duration::ZERO;
-    for _ in 0..WARM_UP {
-        let (took, peer) = connect_ok(client, addr, key);
+    let mut samples = 0;
+    for _ in 0..ATTEMPTS {
+        if samples == WARM_UP {
+            break;
+        }
+        // A handshake that gave up is not a sample. Under load this happens:
+        // four copies of this file at once cost one handshake in about a
+        // hundred its whole ten-second budget. Insisting here made that a
+        // failure of whichever test was warming up, reported as though the
+        // schedule were wrong.
+        let (took, Some(peer)) = connect_timed(client, addr, key) else {
+            continue;
+        };
         client.disconnect(peer);
         last = took;
+        samples += 1;
     }
+    assert_eq!(
+        samples, WARM_UP,
+        "only {samples} of {WARM_UP} warm-up handshakes completed in {ATTEMPTS}          attempts, so there is no estimate to test against"
+    );
     last
 }
 
-/// Loses one opening frame on purpose and returns how long recovery took.
+/// Loses one opening frame on purpose and returns the shortest recovery seen.
 ///
-/// Repeated until the only frame missing is the one asked for. A relay is a
-/// network and loopback drops datagrams of its own, which `handshake_loss.rs`
-/// says and this file measured: a trial where something else went missing is
-/// measuring the loss rather than the schedule. Exactly two opening frames —
-/// the one taken and the resend that got through — is what makes a trial
-/// countable. The property asserted afterwards is the same either way; only
-/// interference is retried.
-fn recovery_from_one_lost_frame(client: &mut Endpoint, relay: &Relay, key: &PeerKey) -> Duration {
-    for _ in 0..TRIALS {
+/// Two kinds of noise are filtered here, and they need different treatment.
+///
+/// A trial where something *other* than the armed frame went missing is not a
+/// trial at all — it measures loopback's own loss, which `handshake_loss.rs`
+/// says happens and this file has seen. Exactly two opening frames, the one
+/// taken and the resend that got through, is what makes a trial countable;
+/// anything else is discarded and attempted again.
+///
+/// A trial that was countable but slow is a different thing: the frames went
+/// as intended and the host was busy. That cannot be seen in the frame count,
+/// and it cannot be averaged away either, because it is one-sided. So the best
+/// of [`COUNTABLE`] trials is what comes back.
+fn recovery_from_one_lost_frame(
+    client: &mut Endpoint,
+    relay: &Relay,
+    key: &PeerKey,
+) -> (Duration, usize) {
+    let mut countable = Vec::new();
+    for _ in 0..ATTEMPTS {
+        if countable.len() == COUNTABLE {
+            break;
+        }
         let before = relay.opening_frames();
         relay.arm();
-        let (took, peer) = connect_ok(client, relay.addr, key);
+        // Same reason as the warm-up: a handshake that gave up is the host,
+        // and the frame count cannot tell that apart from a spoiled drop.
+        let (took, Some(peer)) = connect_timed(client, relay.addr, key) else {
+            continue;
+        };
         client.disconnect(peer);
         let sent = relay.opening_frames() - before;
         if !relay.still_armed() && sent == 2 {
-            return took;
+            countable.push(took);
         }
     }
-    panic!("no trial in {TRIALS} lost exactly the frame it was asked to lose");
+    let best = countable.iter().min().copied().unwrap_or_else(|| {
+        panic!("no trial in {ATTEMPTS} lost exactly the frame it was asked to lose")
+    });
+    (best, countable.len())
 }
 
 /// A lost opening frame must not cost a fixed quarter of a second on a path
@@ -270,23 +323,40 @@ fn a_lost_opening_frame_costs_the_path_and_not_a_fixed_quarter_second() {
     let mut client = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("client bind");
     let measured = warm_up(&mut client, relay.addr, &key);
 
-    let recovered = recovery_from_one_lost_frame(&mut client, &relay, &key);
+    let (recovered, trials) = recovery_from_one_lost_frame(&mut client, &relay, &key);
     assert!(
         recovered < COLD_WAIT,
-        "recovering from one lost opening frame took {recovered:?} on a path \
-         measured at {measured:?}; the fixed schedule waits {COLD_WAIT:?} \
-         before resending whatever the path is, so nothing has adapted"
+        "the quickest of {trials} recoveries from one lost opening frame took \
+         {recovered:?} on a path measured at {measured:?}; the fixed schedule \
+         waits {COLD_WAIT:?} before resending whatever the path is, so nothing \
+         has adapted. A busy host lengthens a trial and cannot shorten one, so \
+         this is the schedule and not the machine"
     );
 }
 
 /// What one path measures must not be applied to another.
 ///
 /// An endpoint that has learned loopback is fast must not carry that to a peer
-/// it has never reached: an estimate belongs to the path it came from. Here the
-/// second address answers nothing, and the endpoint must still spend its whole
-/// budget before reporting failure rather than giving up at loopback speed.
+/// it has never reached: an estimate belongs to the path it came from.
+///
+/// Asserted on when the attempts went out, not on when the endpoint gave up.
+/// Giving up is governed by the budget floor, which spends the cold schedule's
+/// wall clock whatever the estimate says — so an endpoint that pooled its
+/// measurements would still take the whole budget, and this test used to say
+/// so and pass. Measured: with the estimates pooled it gave up after 3.1 s
+/// against 2.5 s correct, comfortably past the 1.4 s that was asserted. The
+/// floor was answering for the property, and the property had no test.
+///
+/// The frames themselves cannot be argued with. On an address never reached,
+/// the cold schedule puts them 250, 500 and 750 ms apart; pooled with
+/// loopback, the same run spaced them 51 to 65 ms. A busy host only ever
+/// widens a gap, so the narrowest one is the schedule's own.
 #[test]
 fn a_fast_path_does_not_shorten_the_budget_for_an_unrelated_one() {
+    /// Between [`COLD_WAIT`] and what a loopback estimate would give, with
+    /// about four times the room on either side.
+    const NARROWEST: Duration = Duration::from_millis(200);
+
     let identity = Identity::generate();
     let key = *identity.public();
     let server = Server::start(identity);
@@ -294,18 +364,63 @@ fn a_fast_path_does_not_shorten_the_budget_for_an_unrelated_one() {
     let mut client = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("client bind");
     connect_ok(&mut client, server.addr, &key);
 
-    // A bound socket nothing ever reads: datagrams arrive and no answer comes,
-    // which is an unreachable peer at an address that is otherwise valid.
+    // A bound socket that answers nothing: an unreachable peer at an address
+    // that is otherwise valid. Read here only to time the arrivals, which the
+    // sender cannot observe.
     let hole = UdpSocket::bind("127.0.0.1:0").expect("hole bind");
     let hole_addr = hole.local_addr().expect("addr");
+    hole.set_read_timeout(Some(Duration::from_millis(25)))
+        .expect("timeout");
+
+    let arrivals = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&arrivals);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let watcher = thread::spawn(move || {
+        let mut buf = vec![0u8; 4096];
+        while !flag.load(Ordering::Relaxed) {
+            if let Ok((n, _)) = hole.recv_from(&mut buf) {
+                if n > 0 && buf[0] == HANDSHAKE_INIT {
+                    record.lock().expect("lock").push(Instant::now());
+                }
+            }
+        }
+    });
 
     let (elapsed, peer) = connect_timed(&mut client, hole_addr, &key);
+    stop.store(true, Ordering::Relaxed);
+    watcher.join().expect("the watching thread");
+
     assert!(peer.is_none(), "a black hole must not produce a session");
+
+    let at = arrivals.lock().expect("lock").clone();
+    assert!(
+        at.len() >= 2,
+        "only {} opening frames reached the black hole, so there is no \
+         spacing to judge",
+        at.len()
+    );
+    let narrowest = at
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .min()
+        .expect("at least one gap");
+    assert!(
+        narrowest >= NARROWEST,
+        "the closest two of {} attempts on a path never reached were \
+         {narrowest:?} apart; the cold schedule leaves {COLD_WAIT:?}, so an \
+         estimate from another path has been applied to this one. A busy host \
+         widens a gap and cannot narrow one, so this is the schedule",
+        at.len()
+    );
+
+    // And the budget floor, which is the other half of the name. Held here as
+    // well as in `a_measured_path_that_goes_silent_still_gets_the_whole_budget`
+    // because this is the path that was never measured at all.
     assert!(
         elapsed >= Duration::from_millis(1_400),
         "gave up on an unanswered peer after {elapsed:?}; four attempts at 250, \
-         500 and 750 ms is the budget, so a measurement from another path has \
-         shortened it"
+         500 and 750 ms is the budget"
     );
 }
 
@@ -330,12 +445,12 @@ fn what_a_path_measured_outlives_the_session() {
     let measured = warm_up(&mut client, relay.addr, &key);
     assert_eq!(client.connecting(), 0, "no handshake is still outstanding");
 
-    let recovered = recovery_from_one_lost_frame(&mut client, &relay, &key);
+    let (recovered, trials) = recovery_from_one_lost_frame(&mut client, &relay, &key);
     assert!(
         recovered < COLD_WAIT,
-        "the reconnect took {recovered:?} after one dropped opening frame on a \
-         path measured at {measured:?}, so what those handshakes measured did \
-         not outlive the sessions they produced"
+        "the quickest of {trials} reconnects took {recovered:?} after one \
+         dropped opening frame on a path measured at {measured:?}, so what \
+         those handshakes measured did not outlive the sessions they produced"
     );
 }
 

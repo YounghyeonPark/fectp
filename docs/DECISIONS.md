@@ -3433,10 +3433,29 @@ of fewer.
 
 That test is the one that mattered. The first version of it passed with the
 floor removed, because its black-hole address had never been measured and so
-took the cold schedule anyway — it was checking that estimates are not pooled,
-which is worth checking and is not what its name claimed. Breaking the floor is
-what exposed it; with a path that was measured and *then* went silent, removing
-the floor gives up in 576 ms against 2.55 s.
+took the cold schedule anyway. Breaking the floor is what exposed it; with a
+path that was measured and *then* went silent, removing the floor gives up in
+576 ms against 2.55 s.
+
+**The consolation written here was also wrong, and took five days to notice.**
+The sentence above used to end "— it was checking that estimates are not
+pooled, which is worth checking and is not what its name claimed." It was not
+checking that either. Pooling the estimates, so that loopback's measurement
+governs an address never reached, leaves that test passing every time: the
+floor spends the cold schedule's wall clock whatever the estimate says, so a
+pooled endpoint gives up *later* rather than sooner — 3.1 s against 2.5 s
+correct, both past the 1.4 s asserted. The floor was answering for a property
+that had no test, and the record said the opposite because breaking the floor
+was the only thing anyone had tried.
+
+**What tests it now is when the attempts went out, not when the endpoint gave
+up.** The black hole is read, purely to timestamp arrivals — the sender cannot
+observe that — and the narrowest gap between two opening frames is the
+assertion. Cold, they are 250, 500 and 750 ms apart, measured at 251 to 261 ms
+for the first gap across seven runs including four under load. Pooled with
+loopback, the same run spaces them 51 to 65 ms. The threshold is 200 ms, about
+four times clear on either side, and it is a floor on a quantity a busy host
+can only raise. Caught five times in five, against zero in five before.
 
 **Karn's algorithm, and the limit it sets.** Only handshakes that completed
 without a resend are sampled. Once an opening frame has been resent there is
