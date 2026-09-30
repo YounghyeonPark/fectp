@@ -3463,6 +3463,17 @@ nothing to say which attempt the reply answers — the frame goes out byte for
 byte identical — and a sample from the wrong one skews the estimate. The data
 path's queue already refuses ambiguous samples for the same reason.
 
+This was written down here and tested nowhere, which a sweep that breaks each
+mechanism of D71 separately found: removing the rule left the whole workspace
+suite green. It compounds, which is why it earns a test rather than a note —
+with the rule removed, the first round of dropped opening frames still recovers
+in 74 ms, the second in 527 ms and the third in 5.04 s, because each bad sample
+is taken from a wait the previous bad sample caused. With it, the same three
+rounds are 70, 76 and 76 ms.
+`a_lost_opening_frame_does_not_poison_what_the_path_measured` asserts the
+second round, since the first is where the bad sample would be taken rather
+than spent. Caught five times in five.
+
 The consequence is worth stating because it is the residue of D66 rather than
 its resolution: **a path slower than the cold schedule can never be measured.**
 Its handshakes always resend, so they never yield a clean sample, so the

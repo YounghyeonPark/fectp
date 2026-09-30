@@ -334,6 +334,45 @@ fn a_lost_opening_frame_costs_the_path_and_not_a_fixed_quarter_second() {
     );
 }
 
+/// A lost opening frame must not poison what the path measured.
+///
+/// Karn's algorithm, and the only thing in this file that tests it. Once an
+/// opening frame has been resent there is nothing in the reply to say which
+/// attempt it answers — the frame goes out byte for byte identical — so the
+/// round trip measured from the first send includes the wait before the
+/// resend. Folding that in tells the endpoint the path is an order of
+/// magnitude slower than it is.
+///
+/// It compounds, which is what makes it worth its own test rather than a note.
+/// Measured with the rule removed: the first round of dropped frames still
+/// recovers in 74 ms, the second in 527 ms, the third in 5.04 s. With the rule
+/// in place the same three rounds are 70, 76 and 76 ms. So the assertion is on
+/// the second round — the first is where the bad sample would be taken, not
+/// where it would be spent.
+#[test]
+fn a_lost_opening_frame_does_not_poison_what_the_path_measured() {
+    let identity = Identity::generate();
+    let key = *identity.public();
+    let server = Server::start(identity);
+    let relay = Relay::start(server.addr);
+
+    let mut client = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("client bind");
+    let measured = warm_up(&mut client, relay.addr, &key);
+
+    // Every trial in here resends, so every one of them is a sample Karn
+    // refuses. Nothing is asserted about this round; it is the poison.
+    let (first, _) = recovery_from_one_lost_frame(&mut client, &relay, &key);
+
+    let (second, trials) = recovery_from_one_lost_frame(&mut client, &relay, &key);
+    assert!(
+        second < COLD_WAIT,
+        "the quickest of {trials} recoveries was {first:?} before a round of \
+         dropped opening frames and {second:?} after, on a path measured at \
+         {measured:?}; a resent handshake has been folded into the estimate, \
+         which makes every later loss more expensive than the one before"
+    );
+}
+
 /// What one path measures must not be applied to another.
 ///
 /// An endpoint that has learned loopback is fast must not carry that to a peer
