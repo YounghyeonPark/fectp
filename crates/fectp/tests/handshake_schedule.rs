@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use fectp::{Endpoint, Event, Identity, PeerId, PeerKey};
 
+mod common;
+
 /// First byte of a `HandshakeInit` frame: version 1, frame type 1.
 ///
 /// From the header layout in SPEC 3, and pinned by `docs/test-vectors.txt` —
@@ -470,8 +472,6 @@ fn a_fast_path_does_not_shorten_the_budget_for_an_unrelated_one() {
     // sender cannot observe.
     let hole = UdpSocket::bind("127.0.0.1:0").expect("hole bind");
     let hole_addr = hole.local_addr().expect("addr");
-    hole.set_read_timeout(Some(Duration::from_millis(25)))
-        .expect("timeout");
 
     let arrivals = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&arrivals);
@@ -479,8 +479,14 @@ fn a_fast_path_does_not_shorten_the_budget_for_an_unrelated_one() {
     let flag = Arc::clone(&stop);
     let watcher = thread::spawn(move || {
         let mut buf = vec![0u8; 4096];
-        while !flag.load(Ordering::Relaxed) {
-            if let Ok((n, _)) = hole.recv_from(&mut buf) {
+        // No read timeout: a timestamp missed because the wait swallowed the
+        // frame would merge two gaps into one wider one (see `common::wake`).
+        loop {
+            let got = hole.recv_from(&mut buf);
+            if flag.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok((n, _)) = got {
                 if n > 0 && buf[0] == HANDSHAKE_INIT {
                     record.lock().expect("lock").push(Instant::now());
                 }
@@ -490,6 +496,7 @@ fn a_fast_path_does_not_shorten_the_budget_for_an_unrelated_one() {
 
     let (elapsed, peer) = connect_timed(&mut client, hole_addr, &key);
     stop.store(true, Ordering::Relaxed);
+    common::wake(hole_addr);
     watcher.join().expect("the watching thread");
 
     assert!(peer.is_none(), "a black hole must not produce a session");

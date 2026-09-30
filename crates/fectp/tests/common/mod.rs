@@ -7,7 +7,8 @@
 
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
+use std::io;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -169,3 +170,54 @@ impl Drop for Echo {
 
 /// Unused by some test binaries; silences the resulting warning.
 pub fn _use_peer_id(_: PeerId) {}
+
+// ------------------------------------------------------------ relays ---
+//
+// Every relay and NAT in these tests reads the socket it shows the client with
+// no timeout. On Windows a read that times out on an unconnected socket can
+// take the datagram arriving with it (D80), and a relay that loses datagrams is
+// a network that loses them — which is not what any test using one meant to
+// model, and which surfaces as a failure of whatever that test was asserting.
+// `keepalive.rs` failed 4 runs in 51 that way. So: block, and wake on drop.
+
+/// Wakes a thread blocked reading `addr`, so it can see it has been stopped.
+///
+/// A read with no timeout returns only when something arrives, so stopping one
+/// means sending it something. The thread must check its stop flag *before*
+/// acting on what it read, or the waker becomes a client. Three datagrams,
+/// because loopback is a network too.
+pub fn wake(addr: SocketAddr) {
+    let local = if addr.is_ipv4() {
+        "127.0.0.1:0"
+    } else {
+        "[::1]:0"
+    };
+    if let Ok(waker) = UdpSocket::bind(local) {
+        for _ in 0..3 {
+            let _ = waker.send_to(&[0], addr);
+        }
+    }
+}
+
+/// Waits up to `timeout` for a datagram on an unconnected socket, then reads it.
+///
+/// For a test asking whether anything arrives in that long, where a datagram
+/// the wait swallowed would make the answer "no" for the wrong reason. Waits by
+/// peeking, which takes nothing; any error the peek reports other than a
+/// timeout is left for the read to consume, as `udp::recv_from` does.
+pub fn recv_from_within(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> io::Result<(usize, SocketAddr)> {
+    socket.set_read_timeout(Some(timeout))?;
+    if let Err(e) = socket.peek_from(buf) {
+        if matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) {
+            return Err(e);
+        }
+    }
+    socket.recv_from(buf)
+}

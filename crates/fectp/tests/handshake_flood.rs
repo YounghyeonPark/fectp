@@ -12,7 +12,7 @@ mod common;
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -381,36 +381,30 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     let echo = Echo::start();
 
     // A relay that keeps the first datagram it forwards — the opening frame —
-    // and can send it again from the same address it originally came from,
-    // which is what makes the responder file it against the same pair.
+    // so the test can send it again from the same address it originally came
+    // from, which is what makes the responder file it against the same pair.
+    // It reads with no timeout (see `common::wake`), and the replays are sent
+    // by the test itself on a clone of the relay's socket.
     let relay = UdpSocket::bind("127.0.0.1:0").expect("relay bind");
-    relay
-        .set_read_timeout(Some(Duration::from_millis(25)))
-        .expect("timeout");
     let relay_addr = relay.local_addr().expect("addr");
+    let replayer = relay.try_clone().expect("clone");
     let server = echo.addr();
 
-    let replay_now = Arc::new(AtomicBool::new(false));
-    let replayed = Arc::new(AtomicUsize::new(0));
+    let opening: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let trigger = Arc::clone(&replay_now);
-    let count = Arc::clone(&replayed);
+    let captured = Arc::clone(&opening);
     let flag = Arc::clone(&stop);
     let pump = thread::spawn(move || {
         let mut buf = vec![0u8; 4096];
         let mut client: Option<SocketAddr> = None;
-        let mut opening: Option<Vec<u8>> = None;
-        while !flag.load(Ordering::Relaxed) {
-            if trigger.swap(false, Ordering::Relaxed) {
-                if let Some(frame) = &opening {
-                    let _ = relay.send_to(frame, server);
-                    count.fetch_add(1, Ordering::Relaxed);
-                }
+        loop {
+            let got = relay.recv_from(&mut buf);
+            if flag.load(Ordering::Relaxed) {
+                break;
             }
-            let (n, from) = match relay.recv_from(&mut buf) {
-                Ok(v) => v,
-                Err(_) => continue,
+            let Ok((n, from)) = got else {
+                continue;
             };
             if from == server {
                 if let Some(client) = client {
@@ -418,9 +412,11 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
                 }
             } else {
                 client = Some(from);
-                if opening.is_none() {
-                    opening = Some(buf[..n].to_vec());
+                let mut first = captured.lock().expect("lock");
+                if first.is_none() {
+                    *first = Some(buf[..n].to_vec());
                 }
+                drop(first);
                 let _ = relay.send_to(&buf[..n], server);
             }
         }
@@ -443,24 +439,26 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     // Once is what an attacker needs and is not what a test can rely on. The
     // client has spoken by now, so the responder holds no reply for this pair
     // and answers a replay with silence — correctly, and that leaves the
-    // stimulus unobservable: a replay lost on loopback looks exactly like one
+    // stimulus unobservable: a replay lost on the way looks exactly like one
     // that arrived and was ignored, and the assertions below then hold for the
-    // wrong reason. Measured: with the protection removed, a single replay
-    // left this test passing two runs in six. Ten makes every one of those
-    // runs fail.
+    // wrong reason. Ten, so that losing all of them is not a thing that
+    // happens.
+    //
+    // The loss that made this matter was mostly the harness's own. With the
+    // protection removed, a single replay left this test passing two runs in
+    // six — measured through a relay that read in a loop of 25 ms timeouts,
+    // which on Windows swallows datagrams. Through the relay above, which
+    // blocks, a single replay was caught twelve times in twelve. The point
+    // stands; the frequency was the relay's.
+    let frame = opening
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("the opening frame passed through the relay");
     for _ in 0..REPLAYS {
-        replay_now.store(true, Ordering::Relaxed);
-        let waited = Instant::now();
-        while replay_now.load(Ordering::Relaxed) && waited.elapsed() < Duration::from_secs(2) {
-            thread::sleep(Duration::from_millis(2));
-        }
+        replayer.send_to(&frame, server).expect("replay");
         thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(
-        replayed.load(Ordering::Relaxed),
-        REPLAYS,
-        "every replay must have gone out"
-    );
     thread::sleep(Duration::from_millis(200));
 
     // The property, asked of the server rather than of the network: answering
@@ -483,6 +481,7 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     );
 
     stop.store(true, Ordering::Relaxed);
+    common::wake(relay_addr);
     let _ = pump.join();
 }
 

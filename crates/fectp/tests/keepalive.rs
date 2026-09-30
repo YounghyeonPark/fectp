@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
+mod common;
+
 /// How long the modelled NAT keeps a mapping after the last outbound datagram.
 const MAPPING: Duration = Duration::from_millis(500);
 
@@ -86,17 +88,15 @@ impl ExpiringNat {
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
                 loop {
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
-                        if flag.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        continue;
-                    };
-                    // `Drop` wakes this read by sending to it; that datagram is
-                    // not the client's and must not become the mapping.
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here,
+                    // and that datagram must not become the mapping.
                     if flag.load(Ordering::Relaxed) {
                         break;
                     }
+                    let Ok((n, from)) = got else {
+                        continue;
+                    };
                     *learn.lock().expect("lock") = Some(from);
                     *touch.lock().expect("lock") = Instant::now();
                     let _ = back.send(&buf[..n]);
@@ -152,13 +152,7 @@ impl ExpiringNat {
 impl Drop for ExpiringNat {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // The client-side read has no timeout, so it has to be given something
-        // to return with. Loopback loses datagrams too, so more than one.
-        if let Ok(waker) = UdpSocket::bind("127.0.0.1:0") {
-            for _ in 0..3 {
-                let _ = waker.send_to(&[0], self.addr);
-            }
-        }
+        common::wake(self.addr);
     }
 }
 

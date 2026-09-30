@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
+mod common;
+
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 // --------------------------------------------------------------- harness ---
@@ -96,9 +98,6 @@ impl Rebinding {
     /// second one.
     fn spawn(server: SocketAddr, after: u64) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -128,8 +127,13 @@ impl Rebinding {
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
+                loop {
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok((n, from)) = got else {
                         continue;
                     };
                     *learn.lock().expect("lock") = Some(from);
@@ -198,6 +202,7 @@ impl Rebinding {
 impl Drop for Rebinding {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
     }
 }
 
@@ -220,9 +225,6 @@ struct Tap {
 impl Tap {
     fn spawn(server: SocketAddr) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let main = UdpSocket::bind("127.0.0.1:0").expect("bind main");
@@ -253,8 +255,13 @@ impl Tap {
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
+                loop {
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok((n, from)) = got else {
                         continue;
                     };
                     *learn.lock().expect("lock") = Some(from);
@@ -336,6 +343,7 @@ impl Tap {
 impl Drop for Tap {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
     }
 }
 
@@ -350,9 +358,6 @@ struct Recording {
 impl Recording {
     fn spawn(server: SocketAddr) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
@@ -372,8 +377,13 @@ impl Recording {
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
+                loop {
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok((n, from)) = got else {
                         continue;
                     };
                     *learn.lock().expect("lock") = Some(from);
@@ -411,6 +421,7 @@ impl Recording {
 impl Drop for Recording {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
     }
 }
 
@@ -595,15 +606,15 @@ fn a_replayed_frame_cannot_move_a_session() {
 
     // A socket the session has never heard of, sending a frame it did seal.
     let attacker = UdpSocket::bind("127.0.0.1:0").expect("bind attacker");
-    attacker
-        .set_read_timeout(Some(Duration::from_millis(300)))
-        .expect("timeout");
     for _ in 0..4 {
         attacker.send_to(&captured, echo.addr).expect("replay");
     }
 
     let mut buf = [0u8; 65535];
-    let answered = attacker.recv_from(&mut buf).is_ok();
+    // Waiting by peeking, so a reply that did come cannot be swallowed by the
+    // wait and read as the silence this asserts.
+    let answered =
+        common::recv_from_within(&attacker, &mut buf, Duration::from_millis(300)).is_ok();
     assert!(
         !answered,
         "a replayed frame must not draw a reply to the address that sent it"

@@ -61,9 +61,6 @@ struct Relay {
 impl Relay {
     fn start(server: SocketAddr, mut drop_to_server: usize, mut drop_to_client: usize) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("relay bind");
-        socket
-            .set_read_timeout(Some(Duration::from_millis(25)))
-            .expect("timeout");
         let addr = socket.local_addr().expect("addr");
 
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -74,10 +71,14 @@ impl Relay {
         let handle = thread::spawn(move || {
             let mut buf = vec![0u8; 4096];
             let mut client: Option<SocketAddr> = None;
-            while !flag.load(Ordering::Relaxed) {
-                let (n, from) = match socket.recv_from(&mut buf) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+            loop {
+                let got = socket.recv_from(&mut buf);
+                // Checked before acting on it: `common::wake` sends here.
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok((n, from)) = got else {
+                    continue;
                 };
                 if from == server {
                     if drop_to_client > 0 {
@@ -120,6 +121,7 @@ impl Relay {
 impl Drop for Relay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }

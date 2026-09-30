@@ -4157,3 +4157,55 @@ emulator waits by reading in a loop of short timeouts on an unconnected
 socket, which is the same mechanism in the harness rather than in the crate.
 *Fixed afterwards the same way the relay was: its client side now reads with
 no timeout. Four failures in 51 runs before, none in 60 after.*
+
+## D81 — No test relay waits by reading
+
+**Problem.** [D80](#d80--on-windows-nothing-waits-by-reading) found that on
+Windows a read that times out on an unconnected UDP socket can take the
+datagram arriving with it, and fixed the crate. The tests had the same shape
+eleven times over: nearly every relay, NAT and tap that stands between a client
+and a server here read the client-facing socket in a loop of 2 to 25 ms
+timeouts. A relay that loses datagrams is a network that loses them, which none
+of these tests set out to model, and it surfaced as failures of whatever each
+test was asserting — `keepalive.rs` reported a keep-alive failing in 4 runs of
+51 when it was the NAT losing the keep-alives.
+
+**Every one of them now blocks, and is woken to stop.** `common::wake` sends a
+relay's socket a datagram so a read with no timeout can return and see its stop
+flag, which each loop checks *before* acting on what it read so the waker never
+becomes a client. Two relays used the timeout to do work on each pass —
+`forged_frames.rs` injected noise, `handshake_flood.rs` sent replays — and those
+now send from the calling thread, or from a thread with its own schedule. One,
+`resumption_replay.rs`'s tap, is driven by the test and used the timeout to mean
+"nothing waiting"; it is non-blocking instead, which has no expiry to race. A
+one-shot "does anything arrive" read in `migration.rs` waits with
+`common::recv_from_within`, which peeks, so a reply the wait swallowed cannot
+pass for the silence it asserts. The black hole in `handshake_schedule.rs`,
+read only to timestamp arrivals, blocks too: a frame its wait swallowed would
+have merged two gaps into one wider one.
+
+**What was left alone, and why.** The server-facing sockets are connected, and
+a connected socket measured no loss from a timed read (D80), so they keep their
+timeouts. So do the hand-driven sessions in `liveness.rs` and
+`identifier_collision.rs`, and every `Connection`.
+
+**Verified by running, not by reasoning.** Each converted file ran eight times
+without a failure or a hang. The one test whose history depended on loss was
+re-measured: `a_replayed_opening_frame_does_not_displace_the_session_it_names`
+had recorded that a single replay missed a removed protection two runs in six.
+Through its relay rebuilt to block, a single replay caught it twelve in twelve.
+The point that test makes — a stimulus whose loss is unobservable is a test
+that sometimes runs no experiment — still holds; the frequency was the relay's.
+
+**What this means for what was measured before.** Several records and comments
+say loopback loses datagrams: "one warm-up handshake in fifteen lost its
+opening frame", in D71 among others. Those were measured on Windows through
+relays of the old shape, so how much was loopback and how much the relay is not
+known. They are left as written, with this note, rather than re-measured one by
+one.
+
+**Not done: the benchmarks.** `crates/bench/src/transports.rs` has relays of the
+same shape, with timeouts from 2 to 20 ms, including the ones that emulate a
+lossy or slow link. Figures in BENCHMARKS.md measured through them on Windows
+include whatever those relays lost. That is a change to published numbers
+rather than to tests, so it is its own decision.

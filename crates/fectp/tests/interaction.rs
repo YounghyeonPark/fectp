@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType, PeerId};
 
+mod common;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Short enough that several pass during the quiet period.
@@ -47,9 +49,6 @@ struct RebindingNat {
 impl RebindingNat {
     fn spawn(server: SocketAddr) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(10)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let mut ports = Vec::new();
@@ -80,8 +79,13 @@ impl RebindingNat {
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
+                loop {
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok((n, from)) = got else {
                         continue;
                     };
                     *learn.lock().expect("lock") = Some(from);
@@ -154,6 +158,7 @@ impl RebindingNat {
 impl Drop for RebindingNat {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
     }
 }
 

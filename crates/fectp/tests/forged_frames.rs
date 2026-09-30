@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
+mod common;
+
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A forwarding relay that can also inject bytes from the same source port the
@@ -31,19 +33,22 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 struct Injector {
     addr: SocketAddr,
     last: Arc<Mutex<Option<Vec<u8>>>>,
-    inject: Arc<Mutex<Option<Vec<u8>>>>,
-    /// Sent on every pass rather than once, for testing what a stream of noise
-    /// can hold open.
+    /// The server-facing socket, for sending as though from the peer.
+    out: UdpSocket,
+    /// Sent every [`NOISE_INTERVAL`] while set, for testing what a stream of
+    /// noise can hold open.
     repeat: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
 }
 
+/// How often repeated noise goes out. It used to be once per pass of the
+/// relay's read loop, which a 20 ms read timeout made about this; the loop no
+/// longer times out (see `common::wake`), so the pace is set here instead.
+const NOISE_INTERVAL: Duration = Duration::from_millis(20);
+
 impl Injector {
     fn spawn(server: SocketAddr) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
@@ -53,28 +58,25 @@ impl Injector {
 
         let stop = Arc::new(AtomicBool::new(false));
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-        let inject: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let repeat: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
+        // Client to server.
         {
             let front = front.try_clone().expect("clone");
             let back = back.try_clone().expect("clone");
             let flag = Arc::clone(&stop);
             let seen = Arc::clone(&last);
-            let pending = Arc::clone(&inject);
-            let over_and_over = Arc::clone(&repeat);
             let learn = Arc::clone(&client);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
-                    if let Some(bytes) = pending.lock().expect("lock").take() {
-                        let _ = back.send(&bytes);
+                loop {
+                    let got = front.recv_from(&mut buf);
+                    // Checked before acting on it: `common::wake` sends here.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
                     }
-                    if let Some(bytes) = over_and_over.lock().expect("lock").as_ref() {
-                        let _ = back.send(bytes);
-                    }
-                    let Ok((n, from)) = front.recv_from(&mut buf) else {
+                    let Ok((n, from)) = got else {
                         continue;
                     };
                     *learn.lock().expect("lock") = Some(from);
@@ -84,6 +86,25 @@ impl Injector {
             });
         }
 
+        // Noise, on its own schedule.
+        {
+            let back = back.try_clone().expect("clone");
+            let flag = Arc::clone(&stop);
+            let over_and_over = Arc::clone(&repeat);
+            thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let noise = over_and_over.lock().expect("lock").clone();
+                    if let Some(bytes) = noise {
+                        let _ = back.send(&bytes);
+                    }
+                    thread::sleep(NOISE_INTERVAL);
+                }
+            });
+        }
+
+        // Server to client. That socket is connected, which measured no loss
+        // from a timed read, so it keeps its timeout.
+        let out = back.try_clone().expect("clone");
         {
             let flag = Arc::clone(&stop);
             let learn = Arc::clone(&client);
@@ -104,7 +125,7 @@ impl Injector {
         Self {
             addr,
             last,
-            inject,
+            out,
             repeat,
             stop,
         }
@@ -115,7 +136,7 @@ impl Injector {
     }
 
     fn send_from_the_peers_address(&self, bytes: Vec<u8>) {
-        *self.inject.lock().expect("lock") = Some(bytes);
+        let _ = self.out.send(&bytes);
     }
 
     fn keep_sending_from_the_peers_address(&self, bytes: Vec<u8>) {
@@ -126,6 +147,7 @@ impl Injector {
 impl Drop for Injector {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        common::wake(self.addr);
     }
 }
 

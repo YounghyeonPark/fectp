@@ -43,9 +43,11 @@ struct Tap {
 impl Tap {
     fn new(server: SocketAddr) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("tap bind");
-        socket
-            .set_read_timeout(Some(Duration::from_millis(2)))
-            .expect("timeout");
+        // Non-blocking rather than a short read timeout, so `pump` stops when
+        // nothing is waiting without a wait that expires. On Windows a timed
+        // read on an unconnected socket can take the datagram arriving with
+        // it (see `common::wake`); a non-blocking one has no expiry to race.
+        socket.set_nonblocking(true).expect("non-blocking");
         Self {
             socket,
             server,
