@@ -53,7 +53,7 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 use fectp_core::frame::{FrameType, Header, HEADER_LEN};
-use fectp_core::reliability::Rto;
+use fectp_core::reliability::{Rto, MAX_RTO_MS};
 use fectp_core::session::{
     preshared_key, Initiator, Responder, ResumeInitiator, ResumeResponder, ResumptionTicket,
     Session, INITIATOR_OVERHEAD, PATH_TOKEN_LEN, RESPONDER_OVERHEAD,
@@ -338,6 +338,27 @@ struct Outbound {
     /// When the first attempt left, for the round-trip measurement and for the
     /// budget that decides when to stop.
     first_sent: Instant,
+    /// When the latest attempt left, which bounds the round trip from below
+    /// when a resent handshake is answered.
+    last_sent: Instant,
+}
+
+/// What an endpoint has learned about reaching one address.
+#[derive(Clone, Copy)]
+struct Path {
+    /// The estimate, once a handshake has completed without a resend.
+    rto: Option<Rto>,
+    /// A floor on the first wait, left by a handshake that had to resend.
+    ///
+    /// Karn's rule keeps a resent handshake out of the estimate, and on a path
+    /// slower than the cold schedule every handshake resends — so on its own
+    /// the rule means that path is never measured. Karn's answer is the other
+    /// half of his algorithm: keep the backed-off timer until a clean sample
+    /// arrives. This is that timer. It is set from the one thing a resent
+    /// reply does say unambiguously, that the round trip was no longer than
+    /// the time since the first attempt, and doubled so the next first attempt
+    /// has room to be answered. The clean sample that follows clears it.
+    floor: Option<Duration>,
 }
 
 /// How a server authenticates the peers that connect to it.
@@ -426,7 +447,7 @@ pub struct Endpoint {
     /// A `Vec` rather than a map: it holds [`MAX_MEASURED_PATHS`] at most and
     /// is walked once per handshake, so the scan is cheaper than the hashing
     /// would be, and the order is what makes the eviction obvious.
-    paths: Vec<(SocketAddr, Rto)>,
+    paths: Vec<(SocketAddr, Path)>,
     /// Attempts before a reliable message is abandoned, applied to every peer.
     max_retries: u8,
     /// How long a peer may go unheard from before its session is released.
@@ -702,6 +723,7 @@ impl Endpoint {
                 next_attempt,
                 attempts: 1,
                 first_sent: sent_at,
+                last_sent: sent_at,
             },
         );
         self.wake_at(next_attempt);
@@ -720,12 +742,24 @@ impl Endpoint {
     /// Pooling would let a fast path shorten a slow one's schedule, and the
     /// endpoint would abandon the slow peer before its first reply could
     /// arrive.
+    ///
+    /// A floor left by an earlier resent handshake applies to the first wait
+    /// only. Its job is to give the first attempt time to be answered, so the
+    /// exchange yields a clean sample; once that wait has passed without a
+    /// reply the attempt is lost rather than slow, and the ordinary schedule
+    /// takes over. Stretching every interval would instead multiply the time
+    /// to give up on a path that has since died.
     fn handshake_delay(&self, addr: SocketAddr, attempts: u8) -> Duration {
-        match self.paths.iter().find(|(a, _)| *a == addr) {
-            Some((_, rto)) => {
+        let path = self.paths.iter().find(|(a, _)| *a == addr).map(|(_, p)| p);
+        let ordinary = match path.and_then(|p| p.rto) {
+            Some(rto) => {
                 Duration::from_millis(u64::from(rto.with_backoff(attempts.saturating_sub(1))))
             }
             None => Duration::from_millis(HANDSHAKE_RETRY_MS * u64::from(attempts)),
+        };
+        match path.and_then(|p| p.floor) {
+            Some(floor) if attempts <= 1 => ordinary.max(floor),
+            _ => ordinary,
         }
     }
 
@@ -752,18 +786,59 @@ impl Endpoint {
     /// data.
     fn measure_path(&mut self, addr: SocketAddr, rtt: Duration) {
         let ms = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
-        if let Some((_, rto)) = self.paths.iter_mut().find(|(a, _)| *a == addr) {
-            rto.sample(ms);
-            return;
+        let path = self.path_mut(addr);
+        path.rto.get_or_insert_with(Rto::new).sample(ms);
+        // A clean sample is what the floor was waiting for.
+        path.floor = None;
+    }
+
+    /// Learns what it can from a handshake that completed only after a resend.
+    ///
+    /// Not a sample: the reply may answer any of the attempts. Two bounds are
+    /// certain all the same. The round trip was no longer than the time since
+    /// the first attempt, and no shorter than the time since the last.
+    ///
+    /// If the path has an estimate and the reply came inside one timeout of
+    /// the latest attempt, the estimate explains everything seen — an attempt
+    /// was lost on a path as fast as measured — and nothing is recorded. That
+    /// is the ordinary loss, and treating it as slowness would lengthen every
+    /// later handshake on a lossy fast path. Otherwise the path is slower than
+    /// anything known about it, and the first wait of the next handshake is
+    /// raised to twice the upper bound, so that handshake can be measured.
+    fn learn_from_resent(&mut self, addr: SocketAddr, since_first: Duration, since_last: Duration) {
+        let path = self.path_mut(addr);
+        if let Some(rto) = path.rto {
+            if since_last <= Duration::from_millis(u64::from(rto.current())) {
+                path.floor = None;
+                return;
+            }
         }
-        if self.paths.len() >= MAX_MEASURED_PATHS {
-            // The oldest goes. A caller that cycles through more addresses than
-            // this pays the cold schedule, which is what it paid before.
-            self.paths.remove(0);
-        }
-        let mut rto = Rto::new();
-        rto.sample(ms);
-        self.paths.push((addr, rto));
+        let doubled = since_first.saturating_mul(2);
+        path.floor = Some(doubled.min(Duration::from_millis(u64::from(MAX_RTO_MS))));
+    }
+
+    /// This address's entry in the path table, created if it has none.
+    fn path_mut(&mut self, addr: SocketAddr) -> &mut Path {
+        let index = match self.paths.iter().position(|(a, _)| *a == addr) {
+            Some(index) => index,
+            None => {
+                if self.paths.len() >= MAX_MEASURED_PATHS {
+                    // The oldest goes. A caller that cycles through more
+                    // addresses than this pays the cold schedule, which is what
+                    // it paid before.
+                    self.paths.remove(0);
+                }
+                self.paths.push((
+                    addr,
+                    Path {
+                        rto: None,
+                        floor: None,
+                    },
+                ));
+                self.paths.len() - 1
+            }
+        };
+        &mut self.paths[index].1
     }
 
     /// Handshakes this endpoint started that are still awaiting a reply.
@@ -1184,6 +1259,12 @@ impl Endpoint {
         let addr = outbound.addr;
         if outbound.attempts == 1 {
             self.measure_path(addr, outbound.first_sent.elapsed());
+        } else {
+            self.learn_from_resent(
+                addr,
+                outbound.first_sent.elapsed(),
+                outbound.last_sent.elapsed(),
+            );
         }
 
         let mut staging = vec![0u8; self.rx.len()];
@@ -1755,6 +1836,7 @@ impl Endpoint {
             if let Some(outbound) = self.outbound.get_mut(&id) {
                 outbound.attempts = attempts;
                 outbound.next_attempt = next;
+                outbound.last_sent = now;
             }
             send_datagram(&self.socket, &frame, addr)?;
         }

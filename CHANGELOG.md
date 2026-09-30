@@ -10,6 +10,14 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+**A handshake path slower than the cold schedule is now learned.** Such a path
+resent its opening frame on every handshake and was never measured, because a
+resent handshake cannot be sampled. An `Endpoint` now keeps a floor on the next
+handshake's first wait for that address, taken from what a resent reply can
+bound, so the next handshake is answered first time and measured. Paths slower
+than the whole handshake budget still need `set_handshake_attempts`. No wire
+change (D79).
+
 **A secure element or HSM can hold an `Endpoint`'s or `Connection`'s long-term
 key.** `Endpoint::bind_with_key` and `Connection::connect_with_key` take
 anything implementing `StaticKey` — a device that performs the Diffie-Hellman

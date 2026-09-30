@@ -13,8 +13,8 @@
 //! chosen datagram can be thrown away, and they measure what the wait costs.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,7 @@ use fectp::{Endpoint, Event, Identity, PeerId, PeerKey};
 const HANDSHAKE_INIT: u8 = 0x11;
 
 /// Forwards datagrams between one client and one server, able to throw away
-/// one opening frame on request.
+/// one opening frame on request, go silent, or hold replies back.
 ///
 /// Armed rather than counted. Naming the *n*th opening frame looked simpler and
 /// was wrong: loopback loses datagrams of its own — one warm-up handshake in
@@ -35,6 +35,19 @@ const HANDSHAKE_INIT: u8 = 0x11;
 /// occasionally resends one early, so the index drifts and the drop lands on a
 /// handshake the test was not measuring. Arming it makes the next opening frame
 /// the one that goes, whatever came before.
+///
+/// **Blocking, with no read timeout, and that is load-bearing.** This relay
+/// used to read its socket in a loop of short timeouts, and on Windows it lost
+/// what it was sent: with nothing behind it but an echo, it received 81 to 98
+/// per cent, and 47 to 98 per cent once replies were held back, across read
+/// timeouts from 1 to 25 ms. What in that loop lost them was not pinned down —
+/// two plain sockets with the same timeouts lost well under one per cent —
+/// but blocking reads lost none in 1,800 and this relay, rebuilt to block,
+/// none in 720. So it blocks, held replies go out from a second thread that
+/// sleeps until each is due, and dropping it wakes the read with a datagram.
+///
+/// Everything this file used to call loopback losing datagrams went through
+/// the old relay. How much of that was loopback is now an open question.
 struct Relay {
     addr: SocketAddr,
     /// Opening frames the relay has seen arrive from the client.
@@ -44,38 +57,65 @@ struct Relay {
     /// Set to stop forwarding anything, turning a working path into a silent
     /// one without changing its address.
     swallow: Arc<AtomicBool>,
+    /// Milliseconds added to every reply, turning loopback into a slow path.
+    delay: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    releaser: Option<thread::JoinHandle<()>>,
 }
 
 impl Relay {
     fn start(server: SocketAddr) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("relay bind");
-        socket
-            .set_read_timeout(Some(Duration::from_millis(1)))
-            .expect("timeout");
         let addr = socket.local_addr().expect("addr");
+        let out = socket.try_clone().expect("relay clone");
 
         let opens = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let swallow = Arc::new(AtomicBool::new(false));
         let armed = Arc::new(AtomicBool::new(false));
+        let delay = Arc::new(AtomicU64::new(0));
         let seen = Arc::clone(&opens);
         let halt = Arc::clone(&stop);
         let eat = Arc::clone(&swallow);
         let trap = Arc::clone(&armed);
+        let late = Arc::clone(&delay);
+
+        // Every reply is held for the same time, so they fall due in the order
+        // they were queued and sleeping until each in turn is exact.
+        let (hold, held) = mpsc::channel::<(Instant, Vec<u8>, SocketAddr)>();
+        let releaser = thread::spawn(move || {
+            while let Ok((due, bytes, to)) = held.recv() {
+                let now = Instant::now();
+                if due > now {
+                    thread::sleep(due - now);
+                }
+                let _ = out.send_to(&bytes, to);
+            }
+        });
 
         let handle = thread::spawn(move || {
             let mut buf = vec![0u8; 2048];
             let mut client: Option<SocketAddr> = None;
 
-            while !halt.load(Ordering::Relaxed) {
+            loop {
                 let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                    if halt.load(Ordering::Relaxed) {
+                        break;
+                    }
                     continue;
                 };
+                if halt.load(Ordering::Relaxed) {
+                    break;
+                }
                 if from == server {
                     if let Some(back) = client {
-                        let _ = socket.send_to(&buf[..n], back);
+                        let wait = Duration::from_millis(late.load(Ordering::Relaxed));
+                        if wait.is_zero() {
+                            let _ = socket.send_to(&buf[..n], back);
+                        } else {
+                            let _ = hold.send((Instant::now() + wait, buf[..n].to_vec(), back));
+                        }
                     }
                     continue;
                 }
@@ -92,6 +132,7 @@ impl Relay {
                 }
                 let _ = socket.send_to(&buf[..n], server);
             }
+            // Dropping `hold` here ends the releaser.
         });
 
         Self {
@@ -99,8 +140,10 @@ impl Relay {
             opens,
             armed,
             swallow,
+            delay,
             stop,
             handle: Some(handle),
+            releaser: Some(releaser),
         }
     }
 
@@ -122,13 +165,31 @@ impl Relay {
     fn go_silent(&self) {
         self.swallow.store(true, Ordering::Relaxed);
     }
+
+    /// Holds every reply back by this much, so the path is that much slower.
+    fn slow_by(&self, extra: Duration) {
+        self.delay.store(
+            u64::try_from(extra.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 impl Drop for Relay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The read has no timeout, so something has to arrive for it to see
+        // the flag. Sent more than once because this is loopback too.
+        if let Ok(waker) = UdpSocket::bind("127.0.0.1:0") {
+            for _ in 0..3 {
+                let _ = waker.send_to(&[0], self.addr);
+            }
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+        if let Some(releaser) = self.releaser.take() {
+            let _ = releaser.join();
         }
     }
 }
@@ -258,7 +319,8 @@ fn warm_up(client: &mut Endpoint, addr: SocketAddr, key: &PeerKey) -> Duration {
     }
     assert_eq!(
         samples, WARM_UP,
-        "only {samples} of {WARM_UP} warm-up handshakes completed in {ATTEMPTS}          attempts, so there is no estimate to test against"
+        "only {samples} of {WARM_UP} warm-up handshakes completed in {ATTEMPTS} \
+         attempts, so there is no estimate to test against"
     );
     last
 }
@@ -523,6 +585,58 @@ fn a_measured_path_that_goes_silent_still_gets_the_whole_budget() {
     assert!(peer.is_none(), "a silent path must not produce a session");
     assert!(
         elapsed >= Duration::from_millis(1_400),
-        "gave up on a measured path that went silent after {elapsed:?}; the          cold schedule would have spent about 2.5 s, and nothing may give up          sooner than it did before the estimate existed"
+        "gave up on a measured path that went silent after {elapsed:?}; the \
+         cold schedule would have spent about 2.5 s, and nothing may give up \
+         sooner than it did before the estimate existed"
+    );
+}
+
+/// A path slower than the cold schedule must be learned, not resent to forever.
+///
+/// D71's residue, stated there as a limit: such a path's handshakes always
+/// resend, a resent handshake is never sampled, so the estimate never learns
+/// the path is slow and every handshake to it sends its opening frame twice.
+/// Measured before the fix, on a path 400 ms slower than loopback: every
+/// handshake of seven sent exactly two, in each of six runs.
+///
+/// Judged by opening frames per handshake rather than by the clock, because a
+/// frame is resent or it is not and a busy host cannot change which. Most
+/// rather than all of them after learning: a settled estimate occasionally
+/// resends a little early, which D71 accepts as the price of a tight one, and
+/// that costs one frame without meaning the path went unmeasured. Before the
+/// fix the count of single-frame handshakes here was zero.
+#[test]
+fn a_path_slower_than_the_cold_schedule_is_learned() {
+    /// Well past the cold schedule's first wait, well inside its budget.
+    const SLOW: Duration = Duration::from_millis(400);
+    /// Handshakes allowed to resend before the path must have been learned.
+    const LEARNING: usize = 3;
+    /// Handshakes after that, of which most must send one opening frame.
+    const LEARNED: usize = 4;
+
+    let identity = Identity::generate();
+    let key = *identity.public();
+    let server = Server::start(identity);
+    let relay = Relay::start(server.addr);
+    relay.slow_by(SLOW);
+
+    let mut client = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("client bind");
+    let mut frames = Vec::new();
+    for _ in 0..LEARNING + LEARNED {
+        let before = relay.opening_frames();
+        let (_, peer) = connect_timed(&mut client, relay.addr, &key);
+        if let Some(peer) = peer {
+            client.disconnect(peer);
+        }
+        frames.push(relay.opening_frames() - before);
+    }
+
+    let single = frames[LEARNING..].iter().filter(|&&n| n == 1).count();
+    assert!(
+        single * 4 >= LEARNED * 3,
+        "opening frames per handshake on a path {SLOW:?} slower than loopback \
+         were {frames:?}; after {LEARNING} handshakes at least three in four \
+         should need only one, and a path that keeps resending is a path that \
+         was never measured"
     );
 }

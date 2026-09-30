@@ -3483,6 +3483,14 @@ slow path still needs `set_handshake_attempts`, and fixing it properly needs
 something in the opening frame to tell one attempt from another — which is a
 wire format change and is not this.
 
+*Superseded in part by [D79](#d79--karns-other-half-a-slow-path-is-learned-without-touching-the-wire).*
+The last sentence was wrong about what "properly" requires. Telling attempts
+apart is one fix and does need the wire; the other half of Karn's own
+algorithm — keep the backed-off timer until a clean sample arrives — does
+not, and closes the residue for every path that completes inside the budget.
+A path slower than the whole budget still fails, and still needs
+`set_handshake_attempts`.
+
 **`Connection` is untouched.** One blocking call with nothing before or after
 it: there is nowhere to keep what a path measured and no second handshake to
 spend it on. The asymmetry D66 made legible stays legible.
@@ -4000,3 +4008,75 @@ had been losing — `i16` was one. Checked both directions: no single letters
 remain, and a deliberately false entry in README's "Not built" list is still
 caught.
 
+## D79 — Karn's other half: a slow path is learned without touching the wire
+
+**Problem.** [D71](#d71--the-handshake-schedule-learns-the-path-and-cannot-use-it-to-give-up-sooner)
+left a residue it named itself: on a path slower than the cold schedule's first
+wait, every handshake resends, a resent handshake is never sampled, and so the
+path is never measured. Measured on a path 400 ms slower than loopback: every
+handshake of seven sent its opening frame exactly twice, in each of six runs.
+D71 said fixing it needed the wire. That was half right.
+
+**Karn's algorithm has two halves, and this implemented one.** The first is the
+rule D71 applies — a reply that may answer any of several attempts is not a
+sample. The second is what makes the first survivable: keep the backed-off
+timer until a clean sample arrives, so the next exchange waits long enough to
+produce one. Without it, a path that is slow enough to always retransmit is a
+path that is never learned, which is exactly the residue. Telling attempts
+apart on the wire is a different fix, and it would need a new wire version —
+the message-1 header is the Noise prologue byte for byte, sequence field
+included, so marking a resend breaks the transcript with every version-1 peer.
+
+**What a resent reply does say.** Not which attempt it answers, but two bounds
+that hold whichever it was: the round trip was no longer than the time since
+the first attempt, and no shorter than the time since the last. The first
+bound, doubled, becomes a floor on the next handshake's *first* wait for that
+address. The next handshake is then answered before it resends, yields a clean
+sample, and the sample clears the floor. Measured on the same 400 ms path:
+single-frame handshakes from the second one on, and the test asserts at least
+three in four after the third.
+
+**The floor applies to the first wait only.** Its job is to give the first
+attempt time to be answered. Once that wait passes without a reply the attempt
+is lost rather than slow, and stretching every later interval would multiply
+the time to give up on a path that has since died.
+
+**An ordinary loss must not look like slowness.** On a measured fast path a
+lost opening frame also produces a resent handshake, and recording a floor for
+it would lengthen every later handshake on any lossy path — the compounding
+D71's Karn test exists to stop, arriving by a different door. So if the path
+has an estimate and the reply came within one timeout of the latest attempt,
+the estimate explains everything seen and nothing is recorded. That branch is
+load-bearing: removing it fails
+`a_lost_opening_frame_does_not_poison_what_the_path_measured` five times in
+five. Removing the floor altogether fails
+`a_path_slower_than_the_cold_schedule_is_learned` five in five, with every
+handshake at two frames.
+
+**The wire did not move.** The vectors pass untouched and `interop.rs` still
+agrees with `snow` in both roles. `fectp-core` is unchanged; this is the path
+table in `Endpoint`, which now holds an optional estimate and an optional floor
+per address instead of an estimate alone.
+
+**The test harness was losing datagrams, and that was most of what this file
+had called loopback losing them.** The first version of the new test failed
+intermittently with whole handshakes lost, and did so on the old code as well.
+Counting at every hop found the relay: it read its socket in a loop of short
+timeouts, and with nothing behind it but an echo it received 81 to 98 per cent
+of what it was sent, 47 to 98 once replies were held back. Two plain sockets
+with the same timeouts lost well under one per cent, and blocking reads lost
+none in 1,800, so it is the combination and not the timeout alone — what in the
+combination was not pinned down. Rebuilt to block, the relay lost none in 720.
+
+**Two things this found and did not fix.**
+
+- *An `Endpoint` polled with short timeouts loses some datagrams on Windows.*
+  Two endpoints on loopback, no relay, 300 unreliable messages each: with the
+  receiver polling at 2 ms, 0, 2 and 10 were lost in three runs; at 25 ms, 1
+  and 0; at 100 ms, none. `poll` waits by setting a read timeout and reading,
+  every iteration. Measured on one machine only, and not yet on Linux or macOS;
+  whether it is Windows, this machine, or the endpoint is the next question,
+  and the answer decides whether it belongs in the gaps table.
+- *`keepalive.rs` fails about one run in twelve, before this change as well as
+  after.* Its NAT emulator reads in a loop of 10 ms timeouts, which is the
+  shape the old relay had.
