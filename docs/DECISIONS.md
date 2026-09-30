@@ -4155,3 +4155,5 @@ reasoning and the plain-socket measurements, not by a test.
 **Not this:** `keepalive.rs` still fails about one run in twenty. Its NAT
 emulator waits by reading in a loop of short timeouts on an unconnected
 socket, which is the same mechanism in the harness rather than in the crate.
+*Fixed afterwards the same way the relay was: its client side now reads with
+no timeout. Four failures in 51 runs before, none in 60 after.*

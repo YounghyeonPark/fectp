@@ -42,6 +42,17 @@ const KEEPALIVE: Duration = Duration::from_millis(150);
 /// mapping. Datagrams from the server are forwarded only while the mapping is
 /// live, and counted when they are not — which is what a real NAT does with a
 /// packet it has no translation for.
+///
+/// **The client side reads with no timeout, and that is load-bearing.** It used
+/// to read in a loop of 10 ms timeouts, and on Windows a timed-out read on an
+/// unconnected socket can take the datagram arriving with it (D80). Here the
+/// datagrams are keep-alives on a fixed period, so the losses lined up: in 4
+/// runs of 51, enough of them vanished in a row for the mapping to expire, and
+/// `a_keepalive_holds_an_idle_mapping_open` failed reporting the NAT had
+/// dropped one push in thirty — a failure of the model, reported as one of the
+/// keep-alive. Reading without a timeout: none in 60. The server side keeps its
+/// timeout: that socket is connected, and a connected socket measured no such
+/// loss.
 struct ExpiringNat {
     addr: SocketAddr,
     dropped: Arc<AtomicU64>,
@@ -52,9 +63,6 @@ struct ExpiringNat {
 impl ExpiringNat {
     fn spawn(server: SocketAddr, mapping: Duration) -> Self {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
-        front
-            .set_read_timeout(Some(Duration::from_millis(10)))
-            .expect("timeout");
         let addr = front.local_addr().expect("addr");
 
         let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
@@ -77,10 +85,18 @@ impl ExpiringNat {
             let touch = Arc::clone(&refreshed);
             thread::spawn(move || {
                 let mut buf = [0u8; 65535];
-                while !flag.load(Ordering::Relaxed) {
+                loop {
                     let Ok((n, from)) = front.recv_from(&mut buf) else {
+                        if flag.load(Ordering::Relaxed) {
+                            break;
+                        }
                         continue;
                     };
+                    // `Drop` wakes this read by sending to it; that datagram is
+                    // not the client's and must not become the mapping.
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     *learn.lock().expect("lock") = Some(from);
                     *touch.lock().expect("lock") = Instant::now();
                     let _ = back.send(&buf[..n]);
@@ -136,6 +152,13 @@ impl ExpiringNat {
 impl Drop for ExpiringNat {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The client-side read has no timeout, so it has to be given something
+        // to return with. Loopback loses datagrams too, so more than one.
+        if let Ok(waker) = UdpSocket::bind("127.0.0.1:0") {
+            for _ in 0..3 {
+                let _ = waker.send_to(&[0], self.addr);
+            }
+        }
     }
 }
 
