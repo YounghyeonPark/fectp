@@ -239,7 +239,8 @@ mod coding_is_skipped_when_it_stops_paying {
         let big: Vec<_> = received.iter().filter(|m| m.len() > limit).collect();
         assert!(
             big.len() >= 60,
-            "only {} oversized payloads arrived of 64 sent, so coding did not              resume after being abandoned",
+            "only {} oversized payloads arrived of 64 sent, so coding did not \
+             resume after being abandoned",
             big.len()
         );
         assert!(

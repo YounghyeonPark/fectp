@@ -203,7 +203,8 @@ fn identifiers_stay_within_the_acknowledgement_window() {
 
     assert!(
         issued <= ACK_WINDOW,
-        "issued {issued} identifiers past an unacknowledged one, but an          acknowledgement can only reach back {ACK_WINDOW}"
+        "issued {issued} identifiers past an unacknowledged one, but an \
+         acknowledgement can only reach back {ACK_WINDOW}"
     );
 }
 

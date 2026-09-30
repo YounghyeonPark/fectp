@@ -373,7 +373,8 @@ fn a_longer_retry_budget_is_actually_spent() {
     // about eleven, so anything near that means the setting was ignored.
     assert!(
         took < Duration::from_secs(5),
-        "a budget of one attempt must be spent in about a second, not {took:?}          — the default of five takes eleven"
+        "a budget of one attempt must be spent in about a second, not {took:?} \
+         — the default of five takes eleven"
     );
 }
 

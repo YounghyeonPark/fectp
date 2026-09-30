@@ -207,7 +207,8 @@ proptest! {
 
         prop_assert!(
             !accepted || only_ignored_bytes_differ(&frame, &broken),
-            "a mutated reply was accepted, and the change was not confined to              the flag and sequence bytes an initiator ignores: {mutation:?}"
+            "a mutated reply was accepted, and the change was not confined to \
+             the flag and sequence bytes an initiator ignores: {mutation:?}"
         );
     }
 
@@ -307,6 +308,7 @@ fn a_reply_does_not_authenticate_its_sequence_or_its_known_flag_bits() {
     assert_eq!(
         flags_accepted.len(),
         usize::from(known) + 1,
-        "every known flag combination should be accepted on a reply, since          nothing on the handshake path reads them; accepted: {flags_accepted:?}"
+        "every known flag combination should be accepted on a reply, since \
+         nothing on the handshake path reads them; accepted: {flags_accepted:?}"
     );
 }

@@ -586,6 +586,7 @@ fn the_retry_budget_reaches_a_peer_that_was_already_open() {
     let took = time_to_give_up(None, Some(1));
     assert!(
         took < Duration::from_secs(5),
-        "setting the budget must apply to peers already open, but this took          {took:?} — the default of five attempts takes about eleven seconds"
+        "setting the budget must apply to peers already open, but this took \
+         {took:?} — the default of five attempts takes about eleven seconds"
     );
 }

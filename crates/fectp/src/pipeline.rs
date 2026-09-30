@@ -1210,7 +1210,8 @@ mod reassembly_tests {
         assert_eq!(
             again.as_deref(),
             Some(&b"whole"[..]),
-            "nothing here remembers the message just delivered; the dedup              window is what stops this arriving"
+            "nothing here remembers the message just delivered; the dedup \
+             window is what stops this arriving"
         );
     }
 

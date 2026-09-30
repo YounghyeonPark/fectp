@@ -229,7 +229,8 @@ fn the_handshake_attempt_budget_is_settable_and_refuses_zero() {
     assert_eq!(
         node.handshake_attempts(),
         fectp::HANDSHAKE_ATTEMPTS,
-        "the default must be the constant, so an endpoint that says nothing          behaves as the documentation describes"
+        "the default must be the constant, so an endpoint that says nothing \
+         behaves as the documentation describes"
     );
 
     node.set_handshake_attempts(9);
@@ -243,6 +244,7 @@ fn the_handshake_attempt_budget_is_settable_and_refuses_zero() {
     assert_eq!(
         node.handshake_attempts(),
         1,
-        "zero attempts must be raised to one: a handshake nobody sends cannot          fail for any reason worth reporting"
+        "zero attempts must be raised to one: a handshake nobody sends cannot \
+         fail for any reason worth reporting"
     );
 }

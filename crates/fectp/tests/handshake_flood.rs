@@ -277,7 +277,8 @@ fn the_peer_table_is_bounded_and_evicts_the_silent_first() {
 
     assert!(
         attempted > LIMIT,
-        "only {attempted} handshakes got through against a limit of {LIMIT};          the bound was never actually exceeded and nothing was tested"
+        "only {attempted} handshakes got through against a limit of {LIMIT}; \
+         the bound was never actually exceeded and nothing was tested"
     );
     assert!(
         highest <= LIMIT,
@@ -433,7 +434,8 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     let mut buf = vec![0u8; 1024];
     assert!(
         echoes(&conn, b"before the replay", &mut buf),
-        "the session must work before the replay, or what is asserted after it          has nothing to stand against"
+        "the session must work before the replay, or what is asserted after it \
+         has nothing to stand against"
     );
 
     // Send the captured opening frame again, from the same address, ten times.
@@ -476,7 +478,8 @@ fn a_replayed_opening_frame_does_not_displace_the_session_it_names() {
     // assertion above has already settled the question this test is named for.
     assert!(
         echoes(&conn, b"after the replay", &mut buf),
-        "the session stopped answering, with the server still holding exactly          one — so this is lost traffic, not a displaced session"
+        "the session stopped answering, with the server still holding exactly \
+         one — so this is lost traffic, not a displaced session"
     );
 
     stop.store(true, Ordering::Relaxed);
