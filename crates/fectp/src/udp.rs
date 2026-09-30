@@ -174,7 +174,7 @@ impl Transport for UdpTransport {
         match self.peer {
             None => self.socket.recv(buf),
             Some(peer) => loop {
-                let (n, from) = self.socket.recv_from(buf)?;
+                let (n, from) = recv_from_peeking(&self.socket, buf)?;
                 if from == peer {
                     return Ok(n);
                 }
@@ -186,4 +186,112 @@ impl Transport for UdpTransport {
     fn max_datagram_size(&self) -> usize {
         self.max_datagram
     }
+}
+
+/// Reads one datagram from an unconnected socket, waiting at most `timeout`.
+///
+/// **On Windows a read that times out can take a datagram with it.** One that
+/// arrives as the timeout expires is neither returned nor left queued; the
+/// socket documentation says that after a timed-out receive "the socket state
+/// is indeterminate". Measured on loopback against a sender every 13 ms: plain
+/// sockets waiting by reading, with timeouts of 1 to 12 ms, lost 62 datagrams
+/// of 4,800; an `Endpoint` polled every 10 ms lost 169 and 204 of 1,000. A
+/// *connected* socket did not lose them — none in 1,200 where an unconnected
+/// one lost nine — so `UdpTransport` in its connected mode, which is what
+/// `Connection::connect` builds, reads directly.
+///
+/// **So on Windows nothing waits by reading.** The socket is non-blocking
+/// ([`prepare`]), a read is tried first, and only if nothing is queued does
+/// this wait, by peeking: a peek that times out took nothing with it. Peeking
+/// before every read would do too, and costs: 1.9 µs a datagram against 0.45
+/// for a read, measured with the data already queued, because the peek itself
+/// is the slow call. Trying the read first costs nothing while datagrams keep
+/// coming, and the wait is only ever paid for when there was nothing to read.
+///
+/// Every error a peek reports other than a timeout is left for the read after
+/// it to consume. Windows queues a datagram too large for `buf` and a
+/// port-unreachable report ahead of the data, and a peek leaves each of them
+/// there and reports it again, so one oversized datagram from anyone would
+/// otherwise stop every later wait. The read takes it off and returns the error
+/// it always did.
+///
+/// Elsewhere this sets the timeout and reads, as it always has. `timeout` is a
+/// closure so a caller whose timeout lives on the socket pays nothing for it
+/// there.
+pub(crate) fn recv_from(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    timeout: impl FnOnce() -> io::Result<Option<std::time::Duration>>,
+) -> io::Result<(usize, SocketAddr)> {
+    #[cfg(windows)]
+    {
+        match socket.recv_from(buf) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            read => return read,
+        }
+        socket.set_nonblocking(false)?;
+        let waited = timeout()
+            .and_then(|t| socket.set_read_timeout(t))
+            .and_then(|()| socket.peek_from(buf).map(drop));
+        socket.set_nonblocking(true)?;
+        if let Err(e) = waited {
+            if crate::is_timeout(&e) {
+                return Err(e);
+            }
+        }
+        socket.recv_from(buf)
+    }
+    #[cfg(not(windows))]
+    {
+        socket.set_read_timeout(timeout()?)?;
+        socket.recv_from(buf)
+    }
+}
+
+/// Puts a socket into the mode [`recv_from`] and [`send_to`] expect.
+///
+/// Non-blocking on Windows, for the reason `recv_from` gives; untouched
+/// elsewhere.
+pub(crate) fn prepare(socket: &UdpSocket) -> io::Result<()> {
+    #[cfg(windows)]
+    socket.set_nonblocking(true)?;
+    #[cfg(not(windows))]
+    let _ = socket;
+    Ok(())
+}
+
+/// Sends on a socket [`prepare`] may have made non-blocking.
+///
+/// Measured, a non-blocking UDP send on Windows did not once report that it
+/// would block — 900,000 sends flat out, at 200 and 1,400 bytes. Should one
+/// ever do so, it is sent again blocking, so a caller sees what a blocking
+/// socket would have given it rather than a new error.
+pub(crate) fn send_to(socket: &UdpSocket, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+    match socket.send_to(buf, addr) {
+        #[cfg(windows)]
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            socket.set_nonblocking(false)?;
+            let sent = socket.send_to(buf, addr);
+            socket.set_nonblocking(true)?;
+            sent
+        }
+        sent => sent,
+    }
+}
+
+/// Reads one datagram, waiting as the socket's own read timeout says, for a
+/// socket this crate did not make non-blocking.
+///
+/// `UdpTransport::with_peer` takes a socket and cannot report failing to change
+/// its mode without changing its signature, so it waits the slower way: a peek
+/// before every read on Windows, which loses nothing and costs the 1.4 µs that
+/// [`recv_from`] avoids. Nothing in this repository builds one.
+fn recv_from_peeking(socket: &UdpSocket, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    #[cfg(windows)]
+    if let Err(e) = socket.peek_from(buf) {
+        if crate::is_timeout(&e) {
+            return Err(e);
+        }
+    }
+    socket.recv_from(buf)
 }

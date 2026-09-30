@@ -4077,6 +4077,81 @@ combination was not pinned down. Rebuilt to block, the relay lost none in 720.
   every iteration. Measured on one machine only, and not yet on Linux or macOS;
   whether it is Windows, this machine, or the endpoint is the next question,
   and the answer decides whether it belongs in the gaps table.
+  *Answered in [D80](#d80--on-windows-nothing-waits-by-reading): Windows, and
+  fixed.*
 - *`keepalive.rs` fails about one run in twelve, before this change as well as
   after.* Its NAT emulator reads in a loop of 10 ms timeouts, which is the
   shape the old relay had.
+
+## D80 — On Windows, nothing waits by reading
+
+**Problem.** [D79](#d79--karns-other-half-a-slow-path-is-learned-without-touching-the-wire)
+found an `Endpoint` losing datagrams on loopback when polled with short
+timeouts. Taken further, it was worse than it looked there: polled every 10 ms
+against a peer sending every 13 ms, an endpoint delivered 831 and 796 of 1,000.
+Nothing was on the path. The socket and the protocol agreed on every count —
+nothing arrived and was then dropped — so it was the read.
+
+**The cause is the timed read itself, on Windows, on an unconnected socket.**
+`poll` waits by setting a read timeout and reading. A datagram that arrives as
+that timeout expires is neither returned nor left queued; the Winsock
+documentation warns that after a timed-out receive "the socket state is
+indeterminate". Isolated with plain sockets and none of this crate: waiting by
+reading, with timeouts of 1 to 12 ms against a sender every 13 ms, lost 62 of
+4,800, and blocking reads with no timeout lost none of 1,800. A *connected*
+socket did not do it — none in 1,200 where an unconnected one lost nine under
+the same conditions — which is why `Connection`, whose client socket is
+connected, showed no loss in 4,200 datagrams across fourteen combinations of
+timeout and send rate, and is not changed here.
+
+**Waiting by peeking loses nothing, because a peek takes nothing.** The same
+plain-socket runs, peeking with the timeout and reading only once something is
+there: none of 4,800 lost. Every other error a peek reports is passed to the
+read to consume — Windows queues an oversized datagram and a port-unreachable
+report ahead of the data, and a peek leaves each there and reports it again, so
+peeking alone would let one oversized datagram from anyone stop every later
+wait. Both were measured before the rule was written.
+
+**But a peek is slow, so the read goes first.** With data already queued, a
+read cost 0.45 µs and a peek then a read 1.9 µs; the peek itself is the slow
+call, not the copy. Peeking before every read would have quadrupled the receive
+syscall cost on the path this protocol exists to make fast. So on Windows the
+endpoint's socket is non-blocking: a read is tried first and returns at once
+with whatever is queued, and only when nothing is does the socket go blocking
+for a peek with the timeout, and back. The wait is paid for only when there was
+nothing to read. Measured end to end, a single sender at its ceiling of about
+95,000 messages a second was fully received both before and after, with no
+difference outside the noise — so the claim is that this costs nothing
+measurable, not that it saves anything.
+
+**Sends on a non-blocking socket.** A non-blocking UDP send on Windows did not
+once report that it would block, in 900,000 sends flat out at 200 and 1,400
+bytes. Should one ever do so it is sent again blocking, so a caller sees what a
+blocking socket would have given it.
+
+**Only on Windows.** Elsewhere the endpoint sets the timeout and reads, as it
+always has; the non-Windows branch is linted for Linux but its behaviour is
+unchanged by construction. `UdpTransport::with_peer`, the one other unconnected
+reader, takes a socket and cannot report failing to change its mode without a
+signature change, so it peeks before every read — correct, and the slower way.
+Nothing in this repository builds one.
+
+**The test.** `short_poll.rs` polls every 5 ms against a sender every 17 ms,
+chosen from a grid of fourteen combinations with the fix removed, every one of
+which lost something. Sends are unreliable on purpose: reliable delivery would
+have retransmitted what the socket lost and hidden it, which is how this went
+unnoticed. With the old waiting restored in full it failed six runs in six;
+with the fix, ten in ten passed. The first attempt at restoring the old waiting
+left the socket non-blocking, and the test passed — a non-blocking socket never
+times out, so it cannot lose this way either. That was the break being wrong,
+not the test; it is recorded because it would have read as a test that cannot
+fail.
+
+**A test of `with_peer` was written and removed.** With the fix removed it lost
+at most one datagram in 300, so it failed one run in three or four at best —
+not a guard. It shares its waiting with nothing else, so it is covered by
+reasoning and the plain-socket measurements, not by a test.
+
+**Not this:** `keepalive.rs` still fails about one run in twenty. Its NAT
+emulator waits by reading in a loop of short timeouts on an unconnected
+socket, which is the same mechanism in the harness rather than in the crate.

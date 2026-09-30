@@ -467,7 +467,7 @@ pub struct Endpoint {
 /// here, because every one of those sends can be the one that draws the
 /// report, and only the peer it was aimed at is affected.
 fn send_datagram(socket: &UdpSocket, buf: &[u8], addr: SocketAddr) -> Result<()> {
-    match socket.send_to(buf, addr) {
+    match crate::udp::send_to(socket, buf, addr) {
         Ok(_) => Ok(()),
         Err(e) if is_stale_unreachable(&e) => Ok(()),
         Err(e) => Err(Error::Io(e)),
@@ -584,6 +584,7 @@ impl Endpoint {
 
     fn with_mode(addr: impl ToSocketAddrs, mode: Mode) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
+        crate::udp::prepare(&socket)?;
         let size = max_datagram() + INITIATOR_OVERHEAD;
         Ok(Self {
             socket,
@@ -904,10 +905,9 @@ impl Endpoint {
             let wait = [until_deadline, until_work].into_iter().flatten().min();
             // A zero timeout means "block forever" to the socket layer, which
             // is the opposite of what is meant here.
-            self.socket
-                .set_read_timeout(wait.map(|w| w.max(Duration::from_millis(1))))?;
+            let wait = wait.map(|w| w.max(Duration::from_millis(1)));
 
-            match self.socket.recv_from(&mut self.rx) {
+            match crate::udp::recv_from(&self.socket, &mut self.rx, || Ok(wait)) {
                 Ok((n, from)) => {
                     if let Some(event) = self.dispatch(n, from)? {
                         return Ok(event);

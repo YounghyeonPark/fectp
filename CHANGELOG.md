@@ -10,6 +10,16 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+**On Windows, an `Endpoint` no longer loses datagrams while it waits.** Polling
+with a timeout shorter than the gap between arrivals lost a share of what
+arrived — polled every 10 ms against a peer sending every 13 ms, as much as a
+fifth, on loopback. A timed-out read on an unconnected Windows socket can take
+a datagram with it. The endpoint's socket is now non-blocking on Windows and
+waits by peeking, which takes nothing; while datagrams keep arriving it reads
+them exactly as before. Reliable messages were retransmitted, so what this cost
+was latency on those and loss on unreliable ones. Linux, macOS and
+`Connection` are unaffected (D80).
+
 **A handshake path slower than the cold schedule is now learned.** Such a path
 resent its opening frame on every handshake and was never measured, because a
 resent handshake cannot be sampled. An `Endpoint` now keeps a floor on the next
