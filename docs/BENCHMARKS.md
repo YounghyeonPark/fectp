@@ -52,6 +52,21 @@ delay injector that applied its socket's timeout instead of its delay, and a
 control that added N times the latency of the row it was controlling. A benchmark that only ever confirms what its author
 expected is not measuring anything.
 
+**Every relay here now reads without a timeout, and no table moved because of
+it.** On Windows a timed-out read on an unconnected UDP socket can take the
+datagram arriving with it (D80), and every relay and echo in this harness read
+that way, the delay injectors using the timeout as their scheduler. The test
+relays of the same shape lost a lot — up to half of what they were sent, with
+only an echo behind them — so these figures were suspect. They were re-measured: the affected
+sections (2, 5, 9, 10 and 11) run twice with the old relays and twice with the
+new, interleaved, on the same machine. Every difference fell inside the spread
+the two old-relay runs showed against each other, and the 0% loss rows stayed
+near 3 ms throughout, where one swallowed datagram would have cost a 20 ms
+retransmission timer. Dense traffic rarely lets a read time out, which is the
+moment the loss needs. So the figures below stand, and the change is a
+precaution rather than a correction. It is recorded here because a reader who
+finds D80 should not have to wonder.
+
 ---
 
 ## 1. Opening a connection

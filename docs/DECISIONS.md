@@ -4209,3 +4209,13 @@ same shape, with timeouts from 2 to 20 ms, including the ones that emulate a
 lossy or slow link. Figures in BENCHMARKS.md measured through them on Windows
 include whatever those relays lost. That is a change to published numbers
 rather than to tests, so it is its own decision.
+
+*Done afterwards, and the numbers did not move.* Every benchmark relay and echo
+now reads with no timeout; the three that used the timeout as a scheduler —
+reordering, jitter and the bottleneck — release or drain from a thread of their
+own that waits on a condition variable. Sections 2, 5, 9, 10 and 11 were run
+twice with the old relays and twice with the new, interleaved: every difference
+fell inside the spread of the two old-relay runs against each other, and the 0%
+loss rows held near 3 ms, where one swallowed datagram would have shown as a
+20 ms timer. Dense traffic rarely lets a read time out, which is when the loss
+happens. The published figures stand; BENCHMARKS.md says so.

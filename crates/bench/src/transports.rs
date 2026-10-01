@@ -6,10 +6,12 @@
 //! trips a protocol *needs* are counted separately, because those are what
 //! dominate once a real path is involved.
 
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -114,16 +116,18 @@ impl UdpEcho {
 
     fn build(echo: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
-        socket
-            .set_read_timeout(Some(Duration::from_millis(5)))
-            .expect("timeout");
         let addr = socket.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        // No read timeout: see `wake`.
         let handle = thread::spawn(move || {
             let mut buf = vec![0u8; 65535];
-            while !flag.load(Ordering::Relaxed) {
-                if let Ok((n, from)) = socket.recv_from(&mut buf) {
+            loop {
+                let got = socket.recv_from(&mut buf);
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok((n, from)) = got {
                     if echo {
                         let _ = socket.send_to(&buf[..n], from);
                     }
@@ -141,6 +145,7 @@ impl UdpEcho {
 impl Drop for UdpEcho {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        wake(self.addr);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -368,9 +373,6 @@ impl LossyRelay {
         let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
         let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
         back.connect(server).expect("connect back");
-        front
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .expect("timeout");
         back.set_read_timeout(Some(Duration::from_millis(20)))
             .expect("timeout");
         let addr = front.local_addr().expect("addr");
@@ -385,22 +387,15 @@ impl LossyRelay {
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
         let counted = Arc::clone(&dropped);
-        thread::spawn(move || {
-            let mut rng = seed;
-            let mut buf = [0u8; 65535];
-            let mut seen = 0u64;
-            while !flag.load(Ordering::Relaxed) {
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                seen += 1;
-                if seen > 1 && drops(&mut rng, per_mille) {
-                    counted.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let _ = back_tx.send(&buf[..n]);
+        let mut rng = seed;
+        let mut seen = 0u64;
+        read_front(front_rx, flag, learn, move |frame| {
+            seen += 1;
+            if seen > 1 && drops(&mut rng, per_mille) {
+                counted.fetch_add(1, Ordering::Relaxed);
+                return;
             }
+            let _ = back_tx.send(frame);
         });
 
         let flag = Arc::clone(&stop);
@@ -443,6 +438,7 @@ impl LossyRelay {
 impl Drop for LossyRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        wake(self.addr);
     }
 }
 
@@ -474,6 +470,7 @@ fn drops(state: &mut u64, per_mille: u32) -> bool {
 pub struct ReorderingRelay {
     pub addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    release: Release,
 }
 
 impl ReorderingRelay {
@@ -481,64 +478,39 @@ impl ReorderingRelay {
         let (front, back, addr, stop, client) = relay_sockets(server);
 
         let front_rx = front.try_clone().expect("clone");
+        let release = Release::spawn(back.try_clone().expect("clone"));
         let back_tx = back.try_clone().expect("clone");
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
-        thread::spawn(move || {
-            // What to wait for when nothing is being held. Long enough not to
-            // spin, short enough to notice the stop flag.
-            const IDLE: Duration = Duration::from_millis(2);
-            let mut buf = [0u8; 65535];
-            let mut seen = 0u64;
-            let mut held: std::collections::VecDeque<(Vec<u8>, Instant)> =
-                std::collections::VecDeque::new();
-            while !flag.load(Ordering::Relaxed) {
-                // Checked on every pass, including the ones where the socket
-                // timed out, so a held frame is released whether or not the
-                // sender has anything else to say.
-                while let Some((frame, since)) = held.front() {
-                    if since.elapsed() < delay {
-                        break;
-                    }
-                    let _ = back_tx.send(frame);
-                    held.pop_front();
-                }
-
-                // Wait only until the next held frame falls due. Blocking for
-                // a fixed timeout instead made this relay apply the socket's
-                // timeout rather than the delay it was asked for, which is not
-                // a small difference: it rounded every delay up to the next
-                // 2 ms tick, and the row that delayed every datagram by 5 ms
-                // took thirty seconds to pass 200 messages.
-                let wait = held.front().map_or(IDLE, |(_, since)| {
-                    delay
-                        .saturating_sub(since.elapsed())
-                        .max(Duration::from_micros(100))
-                });
-                let _ = front_rx.set_read_timeout(Some(wait));
-
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                seen += 1;
-
-                if seen > 1 && seen.is_multiple_of(every) {
-                    held.push_back((buf[..n].to_vec(), Instant::now()));
-                    continue;
-                }
-                let _ = back_tx.send(&buf[..n]);
+        let held = release.clone();
+        let mut seen = 0u64;
+        // Held frames used to be released at the top of the read loop, which
+        // waited on a socket timeout set to the next one's due time. They now
+        // go out from their own thread (see `Release`), so the read never
+        // waits on a timer.
+        read_front(front_rx, flag, learn, move |frame| {
+            seen += 1;
+            if seen > 1 && seen.is_multiple_of(every) {
+                held.at(Instant::now() + delay, frame.to_vec());
+                return;
             }
+            let _ = back_tx.send(frame);
         });
 
         spawn_return_path(back, front, client, flag_clone(&stop));
-        Self { addr, stop }
+        Self {
+            addr,
+            stop,
+            release,
+        }
     }
 }
 
 impl Drop for ReorderingRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.release.stop();
+        wake(self.addr);
     }
 }
 
@@ -554,6 +526,15 @@ pub struct BottleneckRelay {
     /// Datagrams that arrived at the bottleneck.
     pub offered: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    link: Arc<(Mutex<LinkQueue>, Condvar)>,
+}
+
+/// What is waiting for the bottleneck's link.
+#[derive(Default)]
+struct LinkQueue {
+    frames: VecDeque<Vec<u8>>,
+    bytes: usize,
+    stopped: bool,
 }
 
 impl BottleneckRelay {
@@ -569,17 +550,41 @@ impl BottleneckRelay {
         let flag = Arc::clone(&stop);
         let over = Arc::clone(&overflowed);
         let off = Arc::clone(&offered);
+
+        // The queue, shared between the read and the link. They used to be one
+        // thread, which drained the link at the top of each pass and then
+        // waited on a socket timeout set to when the head could next afford to
+        // go; the link now runs on its own thread and waits on a condition
+        // variable, so the read never waits on a timer (see `read_front`).
+        let link = Arc::new((Mutex::new(LinkQueue::default()), Condvar::new()));
+
+        let feed = Arc::clone(&link);
+        read_front(front_rx, flag, learn, move |frame| {
+            off.fetch_add(1, Ordering::Relaxed);
+            let (queue, ready) = &*feed;
+            let mut queue = queue.lock().expect("lock");
+            if queue.bytes + frame.len() > queue_bytes {
+                over.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            queue.bytes += frame.len();
+            queue.frames.push_back(frame.to_vec());
+            ready.notify_one();
+        });
+
+        let drain = Arc::clone(&link);
         thread::spawn(move || {
-            // What to wait for when the queue is empty: long enough not to
-            // spin, short enough to notice the stop flag.
-            const IDLE: Duration = Duration::from_millis(2);
-            let mut buf = [0u8; 65535];
-            let mut queue: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
-            let mut queued_bytes = 0usize;
+            let (queue, ready) = &*drain;
             let mut credit = 0f64;
             let mut last = Instant::now();
-
-            while !flag.load(Ordering::Relaxed) {
+            let mut state = queue.lock().expect("lock");
+            loop {
+                while state.frames.is_empty() && !state.stopped {
+                    state = ready.wait(state).expect("lock");
+                }
+                if state.stopped {
+                    break;
+                }
                 // Refill the link's budget for however long has passed.
                 let now = Instant::now();
                 credit += now.duration_since(last).as_secs_f64() * bytes_per_sec as f64;
@@ -591,48 +596,32 @@ impl BottleneckRelay {
                 // came to read 21 ms and 11.65 MiB/s, which is 97 Mbit/s: the
                 // link was not limiting anything.
                 //
-                // Not smaller than one datagram, or the loop's 2 ms wake would
-                // throttle the link below its own rate rather than to it.
+                // Not smaller than one datagram, or the link could never afford
+                // a full-sized one.
                 credit = credit.min((bytes_per_sec as f64 * 0.004).max(2048.0));
 
-                while let Some(frame) = queue.front() {
+                let mut going = Vec::new();
+                while let Some(frame) = state.frames.front() {
                     if credit < frame.len() as f64 {
                         break;
                     }
                     credit -= frame.len() as f64;
-                    queued_bytes -= frame.len();
-                    let _ = back_tx.send(frame);
-                    queue.pop_front();
+                    state.bytes -= frame.len();
+                    going.extend(state.frames.pop_front());
                 }
-
-                // Wait only until the head of the queue can afford to go. A
-                // fixed timeout here made the relay drain at its own wake
-                // granularity rather than at the link rate: with 226 frames to
-                // pass and a 2 ms tick, that is its own bottleneck on top of
-                // the one being modelled.
-                let wait = queue.front().map_or(IDLE, |frame| {
-                    let owed = frame.len() as f64 - credit;
-                    if owed <= 0.0 {
-                        Duration::from_micros(100)
-                    } else {
-                        Duration::from_secs_f64(owed / bytes_per_sec as f64)
-                            .clamp(Duration::from_micros(100), IDLE)
-                    }
-                });
-                let _ = front_rx.set_read_timeout(Some(wait));
-
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                off.fetch_add(1, Ordering::Relaxed);
-
-                if queued_bytes + n > queue_bytes {
-                    over.fetch_add(1, Ordering::Relaxed);
+                if going.is_empty() {
+                    // Wait only until the head can afford to go.
+                    let owed = state.frames.front().map_or(0.0, |f| f.len() as f64) - credit;
+                    let wait = Duration::from_secs_f64(owed.max(0.0) / bytes_per_sec as f64)
+                        .max(Duration::from_micros(100));
+                    state = ready.wait_timeout(state, wait).expect("lock").0;
                     continue;
                 }
-                queued_bytes += n;
-                queue.push_back(buf[..n].to_vec());
+                drop(state);
+                for frame in going {
+                    let _ = back_tx.send(&frame);
+                }
+                state = queue.lock().expect("lock");
             }
         });
 
@@ -642,6 +631,7 @@ impl BottleneckRelay {
             overflowed,
             offered,
             stop,
+            link,
         }
     }
 }
@@ -649,6 +639,10 @@ impl BottleneckRelay {
 impl Drop for BottleneckRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        let (queue, ready) = &*self.link;
+        queue.lock().expect("lock").stopped = true;
+        ready.notify_all();
+        wake(self.addr);
     }
 }
 
@@ -666,9 +660,9 @@ fn relay_sockets(
     let front = UdpSocket::bind("127.0.0.1:0").expect("bind front");
     let back = UdpSocket::bind("127.0.0.1:0").expect("bind back");
     back.connect(server).expect("connect back");
-    front
-        .set_read_timeout(Some(Duration::from_millis(2)))
-        .expect("timeout");
+    // The server-facing socket is connected, and a connected socket measured
+    // no loss from a timed read, so it keeps one. The client-facing one does
+    // not (see `read_front`).
     back.set_read_timeout(Some(Duration::from_millis(2)))
         .expect("timeout");
     let addr = front.local_addr().expect("addr");
@@ -747,22 +741,15 @@ impl RebindingRelay {
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
         let moved = Arc::clone(&rebound);
-        thread::spawn(move || {
-            let mut buf = [0u8; 65535];
-            let mut seen = 0u64;
-            while !flag.load(Ordering::Relaxed) {
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                seen += 1;
-                let _ = if seen > rebind_after {
-                    moved.store(true, Ordering::SeqCst);
-                    second_tx.send(&buf[..n])
-                } else {
-                    first_tx.send(&buf[..n])
-                };
-            }
+        let mut seen = 0u64;
+        read_front(front_rx, flag, learn, move |frame| {
+            seen += 1;
+            let _ = if seen > rebind_after {
+                moved.store(true, Ordering::SeqCst);
+                second_tx.send(frame)
+            } else {
+                first_tx.send(frame)
+            };
         });
 
         // The old mapping stops carrying anything once it has been replaced.
@@ -789,6 +776,7 @@ impl RebindingRelay {
 impl Drop for RebindingRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        wake(self.addr);
     }
 }
 
@@ -804,6 +792,7 @@ pub struct JitterRelay {
     /// Datagrams forwarded towards the server.
     pub forwarded: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    release: Release,
 }
 
 impl JitterRelay {
@@ -812,56 +801,26 @@ impl JitterRelay {
         let forwarded = Arc::new(AtomicU64::new(0));
 
         let front_rx = front.try_clone().expect("clone");
+        let release = Release::spawn(back.try_clone().expect("clone"));
         let back_tx = back.try_clone().expect("clone");
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
         let counted = Arc::clone(&forwarded);
-        thread::spawn(move || {
-            // What to wait for when nothing is held.
-            const IDLE: Duration = Duration::from_millis(2);
-            let mut rng = seed | 1;
-            let mut buf = [0u8; 65535];
-            let mut held: Vec<(Vec<u8>, Instant)> = Vec::new();
-            while !flag.load(Ordering::Relaxed) {
-                // Released by time, and not necessarily in the order received:
-                // that reordering is part of what jitter is.
-                let now = Instant::now();
-                held.retain(|(frame, due)| {
-                    if *due <= now {
-                        let _ = back_tx.send(frame);
-                        false
-                    } else {
-                        true
-                    }
-                });
-
-                // Wait only until the earliest held frame is due. Blocking for
-                // the socket's fixed timeout instead rounded every delay up to
-                // the next 2 ms tick, which for the 0-2 ms row is the whole
-                // quantity being measured — the same fault the reordering
-                // relay had, where it turned a 5 ms delay into thirty seconds.
-                let wait = held.iter().map(|(_, due)| *due).min().map_or(IDLE, |due| {
-                    due.saturating_duration_since(Instant::now())
-                        .clamp(Duration::from_micros(100), IDLE)
-                });
-                let _ = front_rx.set_read_timeout(Some(wait));
-
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                counted.fetch_add(1, Ordering::Relaxed);
-
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                let share = (rng >> 40) as f64 / (1u64 << 24) as f64;
-                let wait = spread.mul_f64(share);
-                if wait.is_zero() {
-                    let _ = back_tx.send(&buf[..n]);
-                } else {
-                    held.push((buf[..n].to_vec(), Instant::now() + wait));
-                }
+        let held = release.clone();
+        let mut rng = seed | 1;
+        // Held frames go out from their own thread at their own times (see
+        // `Release`); the read never waits on a timer.
+        read_front(front_rx, flag, learn, move |frame| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let share = (rng >> 40) as f64 / (1u64 << 24) as f64;
+            let wait = spread.mul_f64(share);
+            if wait.is_zero() {
+                let _ = back_tx.send(frame);
+            } else {
+                held.at(Instant::now() + wait, frame.to_vec());
             }
         });
 
@@ -870,6 +829,7 @@ impl JitterRelay {
             addr,
             forwarded,
             stop,
+            release,
         }
     }
 }
@@ -877,6 +837,8 @@ impl JitterRelay {
 impl Drop for JitterRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.release.stop();
+        wake(self.addr);
     }
 }
 
@@ -902,21 +864,14 @@ impl AsymmetricRelay {
         let back_tx = back.try_clone().expect("clone");
         let learn = Arc::clone(&client);
         let flag = Arc::clone(&stop);
-        thread::spawn(move || {
-            let mut rng = seed | 1;
-            let mut buf = [0u8; 65535];
-            let mut seen = 0u64;
-            while !flag.load(Ordering::Relaxed) {
-                let Ok((n, from)) = front_rx.recv_from(&mut buf) else {
-                    continue;
-                };
-                *learn.lock().expect("lock") = Some(from);
-                seen += 1;
-                if seen > 1 && drops(&mut rng, forward_per_mille) {
-                    continue;
-                }
-                let _ = back_tx.send(&buf[..n]);
+        let mut rng = seed | 1;
+        let mut seen = 0u64;
+        read_front(front_rx, flag, learn, move |frame| {
+            seen += 1;
+            if seen > 1 && drops(&mut rng, forward_per_mille) {
+                return;
             }
+            let _ = back_tx.send(frame);
         });
 
         let flag = flag_clone(&stop);
@@ -947,5 +902,118 @@ impl AsymmetricRelay {
 impl Drop for AsymmetricRelay {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        wake(self.addr);
+    }
+}
+
+// ─────────────────────────────────────────────── reading without a timer ──
+
+/// Reads a relay's client-facing socket until stopped, learning the client's
+/// address and handing each datagram to `each`.
+///
+/// **With no read timeout, and that is the point.** On Windows a read that
+/// times out on an unconnected UDP socket can take the datagram arriving with
+/// it (D80). Every relay here used to read this socket in a loop of 2 to 20 ms
+/// timeouts — the jitter, reordering and bottleneck relays used the timeout as
+/// their scheduler — so on the machine these figures were taken on, the
+/// relays could lose datagrams of their own on top of whatever they were asked
+/// to do. A relay that loses datagrams is a lossy path, and only one table
+/// here set out to measure one. So the read blocks, anything timed runs on
+/// another thread, and dropping a relay wakes the read with [`wake`].
+fn read_front(
+    front: UdpSocket,
+    stop: Arc<AtomicBool>,
+    learn: Arc<Mutex<Option<SocketAddr>>>,
+    mut each: impl FnMut(&[u8]) + Send + 'static,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 65535];
+        loop {
+            let got = front.recv_from(&mut buf);
+            // Checked before acting on it: `wake` sends here.
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Ok((n, from)) = got else {
+                continue;
+            };
+            *learn.lock().expect("lock") = Some(from);
+            each(&buf[..n]);
+        }
+    });
+}
+
+/// Wakes a thread blocked reading `addr` with no timeout, so it sees its stop
+/// flag. Three datagrams, because loopback is a network too.
+fn wake(addr: SocketAddr) {
+    if let Ok(waker) = UdpSocket::bind("127.0.0.1:0") {
+        for _ in 0..3 {
+            let _ = waker.send_to(&[0], addr);
+        }
+    }
+}
+
+/// Sends frames to a socket at the times they were given, from its own thread.
+///
+/// Waits on a condition variable rather than a socket, so a frame being held
+/// costs the read nothing. Frames due at the same instant go in the order they
+/// were given.
+#[derive(Clone)]
+struct Release {
+    inner: Arc<(Mutex<Held>, Condvar)>,
+}
+
+#[derive(Default)]
+struct Held {
+    due: BinaryHeap<Reverse<(Instant, u64, Vec<u8>)>>,
+    next: u64,
+    stopped: bool,
+}
+
+impl Release {
+    fn spawn(out: UdpSocket) -> Self {
+        let inner = Arc::new((Mutex::new(Held::default()), Condvar::new()));
+        let shared = Arc::clone(&inner);
+        thread::spawn(move || {
+            let (held, changed) = &*shared;
+            let mut state = held.lock().expect("lock");
+            loop {
+                if state.stopped {
+                    break;
+                }
+                let Some(Reverse((at, _, _))) = state.due.peek() else {
+                    state = changed.wait(state).expect("lock");
+                    continue;
+                };
+                let now = Instant::now();
+                if *at > now {
+                    let wait = *at - now;
+                    state = changed.wait_timeout(state, wait).expect("lock").0;
+                    continue;
+                }
+                let Some(Reverse((_, _, frame))) = state.due.pop() else {
+                    continue;
+                };
+                drop(state);
+                let _ = out.send(&frame);
+                state = held.lock().expect("lock");
+            }
+        });
+        Self { inner }
+    }
+
+    fn at(&self, due: Instant, frame: Vec<u8>) {
+        let (held, changed) = &*self.inner;
+        let mut state = held.lock().expect("lock");
+        let order = state.next;
+        state.next += 1;
+        state.due.push(Reverse((due, order, frame)));
+        changed.notify_one();
+    }
+
+    fn stop(&self) {
+        let (held, changed) = &*self.inner;
+        held.lock().expect("lock").stopped = true;
+        changed.notify_all();
     }
 }
