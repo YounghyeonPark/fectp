@@ -46,19 +46,28 @@ version, whatever crate versions they were built from — and a peer built from
 `fectp` 0.1.0 will talk to one built from 0.9.0 as long as the wire version has
 not moved.
 
-**The crate version is `0.1.0`**, and under Cargo's rules a `0.x` crate may
+**The crate version is `0.x`**, and under Cargo's rules a `0.x` crate may
 break its Rust API in any release that changes the minor number. That is what
-`0.x` is for. Nothing has used it yet: `0.1.0` is the first release, so D75
-removing `Copy` from `ResumptionTicket` — which the type should never have had,
-since it duplicates key material silently — broke nobody. The next such change
-will.
+`0.x` is for, and it has been used once: 0.2.0 broke `Initiator::OVERHEAD`
+when the long-term key became a trait (D76). A release that only adds public
+items and fixes behaviour changes the patch number — 0.2.1 was that — and the
+way to know which it is, is to compare the public items against the previous
+release's tag rather than to remember.
 
 The two move independently, in one direction only:
 
 - **A Rust API change does not change the wire.** Most releases will be this.
-- **A wire change forces a new wire version**, because §1.1 leaves no room for
-  anything else — there is no negotiation and no capability bit for it. It also
-  forces a crate release, but the crate number is the smaller news.
+- **A wire change that a version-1 peer would reject or misread forces a new
+  wire version.** The header, both handshake patterns and the cipher suite
+  have no room in them (§1.1): D79 found that marking a resent opening frame
+  would change the bytes the Noise prologue covers, and so needs version 2. It
+  also forces a crate release, but the crate number is the smaller news.
+- **An addition a version-1 peer can ignore does not.** The capability block
+  has flags and reserved fields a receiver must ignore when it does not know
+  them (§4.3), and a codec bit may be used only once the peer has advertised
+  it (§6). That is what the `RELIABLE` and `ZSTD` flags are. This list used to
+  say there was "no negotiation and no capability bit" at all, which the
+  capability block contradicts.
 - **A wire version bump is not backwards compatible by construction.** Peers on
   version 1 and version 2 do not interoperate at all; they reject each other's
   frames. Anything shipping that would need both implemented side by side, and

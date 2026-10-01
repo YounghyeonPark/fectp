@@ -10,6 +10,20 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.1 — 2026-10-02
+
+Wire version 1, unchanged: the test vectors are byte-identical to 0.2.0's and
+`interop.rs` still agrees with `snow` in both roles, so peers built from 0.1.0,
+0.2.0 and this talk to each other. A patch release under the policy in
+RELEASING.md — public items were added and none removed or changed, checked
+against the `v0.2.0` tag.
+
+**If you run an `Endpoint` on Windows, take this one.** The first entry below
+was losing a share of received datagrams on that platform in every earlier
+release.
+
 **On Windows, an `Endpoint` no longer loses datagrams while it waits.** Polling
 with a timeout shorter than the gap between arrivals lost a share of what
 arrived — polled every 10 ms against a peer sending every 13 ms, as much as a
