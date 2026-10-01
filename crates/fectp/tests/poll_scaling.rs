@@ -88,10 +88,11 @@ fn burst_of_rubbish(server: SocketAddr) {
 
 /// Every round trip measured behind a burst of rubbish, in order.
 ///
-/// All of them rather than only the best, because the best alone cannot tell
-/// two very different failures apart. One slow sample means the burst had not
-/// drained when the clock started, which is this harness racing itself; five
-/// slow samples mean the datagram genuinely costs more. A failure on a machine
+/// All of them rather than only one, because one alone cannot tell two very
+/// different things apart. The measurement is a round trip queued *behind* the
+/// burst; a sample far faster than the rest means the burst had already
+/// drained when the clock started, which is this harness racing itself, while
+/// five slow samples mean the datagram genuinely costs more. A failure on a machine
 /// that cannot be reproduced locally is readable only if the message carries
 /// them, and the first one was on a macOS runner.
 fn round_trips_behind_a_burst(conn: &Connection, server: SocketAddr) -> Vec<Duration> {
@@ -112,13 +113,22 @@ fn round_trips_behind_a_burst(conn: &Connection, server: SocketAddr) -> Vec<Dura
     samples
 }
 
-/// The most favourable reading of those samples.
+/// The middle of those samples.
 ///
-/// What is asserted is that cost must *not* grow, so the kindest number for
-/// the code under test is the one to hold it to: if even the best round trip
-/// is several times worse with a full table, no amount of load explains it.
-fn best(samples: &[Duration]) -> Duration {
-    samples.iter().copied().min().expect("not empty")
+/// It was the minimum, on the reasoning that the kindest number for the code
+/// under test is the one to hold it to. That is kind on one side of the
+/// comparison only: the empty table's minimum is the *harshest* baseline, and a
+/// sample where the burst had already drained — the race described above —
+/// is exactly a minimum. A macOS runner produced one, [2.04, 6.14, 3.18, 0.39,
+/// 3.51] ms against a crowded [5.28, 5.03, 5.29, 7.00, 2.60], and failed at
+/// 6.6x on a baseline that had measured no burst at all. Medians put the same
+/// run at 1.7x. They lose nothing that matters: measured with the time-driven
+/// work put back on every pass, which is the bug this file was written for,
+/// both statistics read 390 to 600x against 0.8 to 1.1x correct.
+fn median(samples: &[Duration]) -> Duration {
+    let mut sorted = samples.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2]
 }
 
 #[test]
@@ -150,9 +160,9 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
     let crowded = round_trips_behind_a_burst(&conn, echo.addr);
 
     assert!(
-        best(&crowded) < best(&alone) * 4,
-        "a burst of {BURST} rejected datagrams took a round trip from {:?} \
-         with an almost empty table to {:?} with {} sessions on it. What a \
+        median(&crowded) < median(&alone) * 4,
+        "a burst of {BURST} rejected datagrams took a median round trip of \
+         {:?} with an almost empty table and {:?} with {} sessions on it. What a \
          datagram costs must not grow with the number of peers, because the \
          table is reachable by anyone holding the endpoint's public key.\n\
          Every sample, so one slow reading can be told from a slow set: an \
@@ -160,8 +170,8 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
          is this harness racing itself, while a slow set is the cost itself.\n\
          empty table {alone:?}\n\
          {} sessions {crowded:?}",
-        best(&alone),
-        best(&crowded),
+        median(&alone),
+        median(&crowded),
         held.len(),
         held.len()
     );
