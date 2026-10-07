@@ -222,9 +222,9 @@ call is a round trip over a bus, that is the number to budget for.
 **What it does not cover.** Ephemeral keys are still generated and held here, on
 purpose: one lasts a single handshake, so hardware would protect one session's
 forward secrecy rather than the identity, which is the thing whose loss is
-permanent. Nor does the C ABI carry the trait, so the bindings in other
-languages take the raw bytes — see
-[OTHER-LANGUAGES.md](OTHER-LANGUAGES.md#a-key-held-in-hardware-does-not-cross-either).
+permanent. From other languages the same key is a function the host supplies
+through the C ABI — see
+[OTHER-LANGUAGES.md](OTHER-LANGUAGES.md#a-key-held-in-hardware-crosses-as-a-function).
 
 ## The shortest working pair
 

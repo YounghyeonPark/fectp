@@ -10,7 +10,14 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
-Nothing yet.
+**A secure element or HSM can hold the key from C, Python and TypeScript.**
+`fectp_identity_from_key` takes a public key and a function that performs the
+Diffie-Hellman; the private key never reaches the library. Python's
+`Identity.from_key` and TypeScript's `Identity.fromKey` wrap it around an
+ordinary function, and a failure there — a locked device, a thrown exception —
+ends the handshake with `KeyUnavailable` carrying the original as its cause.
+New C error code `FECTP_ERR_KEY`. The crates published on crates.io are
+unchanged by this; it is the C ABI and the bindings (D82).
 
 ## 0.2.1 — 2026-10-02
 

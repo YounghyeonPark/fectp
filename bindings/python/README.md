@@ -59,6 +59,24 @@ copy when the identity is dropped; nothing it does survives the crossing.
 copy it makes. What you passed in is yours — use a `bytearray` and overwrite it
 afterwards, because a `bytes` cannot be.
 
+### Or never have it here
+
+`Identity.from_key` takes a key held by a secure element, an HSM or a TPM, and
+FECTP never sees it:
+
+```python
+def dh(peer_public: bytes) -> bytes:
+    # Ask the device for X25519 with its private key; 32 bytes back.
+    return device.derive(peer_public)
+
+identity = fectp.Identity.from_key(device.public_key, dh)
+```
+
+`dh` runs synchronously, twice per handshake on each side. If it raises, the
+handshake ends with `KeyUnavailable` and your exception as its `__cause__`;
+the identity can be used again. Return a `bytearray` and the wrapper wipes it
+after copying.
+
 ## What this does not do
 
 The session layer only. **Retransmission, congestion control, fragmentation and

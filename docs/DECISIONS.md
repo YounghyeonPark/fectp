@@ -579,7 +579,6 @@ These are unimplemented, not overlooked.
 | **Bit-packed deltas** | Delta coding only pays when deltas fit in 7 bits (see D11). | Measured, and it is not the improvement it looks like: with Zstandard it makes two of three datasets *larger* on the wire ([D45](#d45--bit-packed-deltas-were-measured-and-not-built)). Without Zstandard it is worth a third, which is the case left open. |
 | **Cross-message prediction** | No temporal/residual codec. | Needs the reliability layer plus keyframes first; see D11. |
 | **A stranger's handshake from a new address** | A replayed opening frame from a different source address is a different pair, so it is a new handshake and costs four X25519 operations ([D33](#d33--a-repeated-opening-frame-is-answered-from-what-was-kept)). | Bounded only by the rate limit of [D32](#d32--a-strangers-handshake-is-bounded-in-memory-and-in-work). Telling it apart needs a cookie exchange, which costs the round trip that carrying data in the first packet exists to save. |
-| **Keys must be in process memory, across the C ABI** | Rust does not need them there: a secure element implements [`StaticKey`](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it) and `Endpoint::bind_with_key` and `Connection::connect_with_key` take one ([D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it), [D78](#d78--the-std-front-ends-take-an-element-too-without-breaking-the-api)). | Closed for Rust, both on the core and through the std front ends. Open across the C ABI, where a trait becomes a struct of function pointers with a lifetime the caller must honour — a second design, not the same one wearing a header. Ephemerals are in memory either way, on purpose: they last one handshake. |
 | **Post-quantum** | X25519 only. | The original document's versioning plan still holds: the suite name is fixed per version, so a PQC suite becomes a new version rather than a negotiation. |
 
 ## D17 — The compression level was raised after measuring it
@@ -4219,3 +4218,70 @@ fell inside the spread of the two old-relay runs against each other, and the 0%
 loss rows held near 3 ms, where one swallowed datagram would have shown as a
 20 ms timer. Dense traffic rarely lets a read time out, which is when the loss
 happens. The published figures stand; BENCHMARKS.md says so.
+
+## D82 — A key held in hardware crosses the C ABI as a function
+
+**Problem.** [D76](#d76--the-long-term-key-became-a-trait-so-a-secure-element-can-hold-it)
+let a secure element hold the long-term key in Rust, and
+[D78](#d78--the-std-front-ends-take-an-element-too-without-breaking-the-api)
+carried it to `Endpoint` and `Connection`. The C ABI, and so Python and
+TypeScript, still took the 32 bytes. This project aims at the same
+implementation in every language, and the one place the key could be kept out
+of the process was the one place other languages could not reach. The gaps
+table called it "a second design, not the same one wearing a header", and
+named why: a lifetime the C side must honour, and failure in both directions.
+
+**The key is a function.** `fectp_identity_from_key(public_key, dh, context,
+release)`: the public half read once, and a function the host supplies that is
+given the peer's public key and writes the shared secret. The private key never
+reaches this library. A non-zero return is the device saying no — busy, locked,
+absent — and is the new `FECTP_ERR_KEY`. The trait's `public()` is not a
+callback: it is read once at creation, as `SharedKey` caches it (D78), because
+an element is a chip on a bus.
+
+**The lifetime is a reference count.** An initiator uses its key in message 1
+and again reading message 2, and nothing stops a host freeing the identity
+handle in between — with secret bytes that was harmless, because each handshake
+built its own `Keypair`. With a host's key it would call a context the host had
+let go. So the identity holds an `Arc`, each handshake begun from it takes a
+clone, and the host's `release` runs in the last one's `Drop`: exactly once,
+when nothing here can call `dh` again. Tested both ways — freeing the identity
+mid-handshake keeps the key, and releasing early is caught by three tests.
+
+**Threads are the host's.** The context is the host's, so `Send` and `Sync` are
+asserted with `unsafe impl` and the contract says what that means: `dh` runs
+synchronously, on whichever thread drives the handshake, and a host driving
+several at once from one identity must serve concurrent calls or lock. `Rc`
+would have avoided the assertion and made two threads starting handshakes from
+one identity — legal before this — a data race on the count.
+
+**Failure from the host's side cannot cross C.** A Python exception or a
+JavaScript throw unwinding into Rust is undefined behaviour. Each binding
+therefore calls through two fixed trampolines, made once for the life of the
+module, which catch everything, return non-zero, and keep what was raised; the
+call that triggered it raises `KeyUnavailable` with that as its cause. The same
+trampolines answer the third problem: a callback object collected while C holds
+its address is a crash at some later call, so none is made per key. The key
+function is a number in a table, passed to C as the context, and leaves the
+table when `release` says so.
+
+**What the host's function returns passes through the host.** The shared secret
+the device produces comes back through Python or JavaScript memory before this
+library mixes it, which is inherent: the core does `MixKey` in software. Each
+wrapper wipes the result it was given when it can — a `bytearray`, a
+`Uint8Array` — and says so; a `bytes` it cannot.
+
+**Verified, at each layer.** The C ABI: six tests through raw pointers, with
+`extern "C"` functions standing in for a device, under Miri as well — which is
+now asked to run `hardware_key` beside `c_abi` in CI, since calling the host's
+function is a fourth shape of `unsafe` here. Each binding: five tests, with an
+X25519 that shares no code with FECTP's playing the device — RFC 7748 in pure
+Python, Node's own `crypto` in TypeScript — and the first test in each checks
+the stand-in agrees with FECTP about public keys before anything trusts it.
+Breaking each property found a test that noticed: releasing on identity free,
+reporting a refusal as a protocol error, ignoring the host's failure code, a
+release that keeps the function, and a lost exception cause.
+
+**Two calls per handshake per side**, the same count D78 pinned in Rust, and
+asserted again in every layer, because on a device where a call is a round trip
+over a bus it is the cost.

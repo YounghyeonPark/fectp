@@ -18,7 +18,7 @@
 //! cannot: raw pointers, lengths chosen by the caller and lifetimes the
 //! compiler cannot see are what a C ABI *is*. So the safety argument stops
 //! being "the compiler proved it" and starts being "this file is short, every
-//! `unsafe` block is one of three shapes, each says what it assumes, and Miri
+//! `unsafe` block is one of four shapes, each says what it assumes, and Miri
 //! runs the tests in CI".
 //!
 //! That last part is not decoration. The tests here cannot see a fault that
@@ -31,6 +31,12 @@
 //! to those bytes. A `bytes` object in Python or a `byte[]` in Java is immortal
 //! and copied by its runtime, and D67 is what happens when a secret outlives
 //! the thing that was supposed to wipe it.
+//!
+//! **Or never exists here at all.** [`fectp_identity_from_key`] takes a key
+//! that lives somewhere this library cannot read — a secure element, an HSM, a
+//! TPM — as a public key and a function that performs the Diffie-Hellman. The
+//! host's function is called with the peer's public key and writes the shared
+//! secret; the private key stays wherever the host keeps it.
 //!
 //! **No panic escapes.** Unwinding out of an `extern "C"` function aborts the
 //! process, which for a host language means the interpreter dies rather than
@@ -55,19 +61,21 @@
 
 // This is the one crate in the workspace that cannot forbid `unsafe`, so it
 // keeps the surface small enough to read instead. Every block below is one of
-// three shapes — borrow an input, borrow an output, take or give a handle —
-// and each states what it assumes of the caller.
+// four shapes — borrow an input, borrow an output, take or give a handle, call
+// the host's key — and each states what it assumes of the caller.
 #![deny(missing_docs)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 // The names are what a C caller types. Rust's conventions do not apply to an
 // ABI that another language reads from a header.
 #![allow(non_camel_case_types)]
 
+use core::ffi::c_void;
 use core::panic::AssertUnwindSafe;
 use core::slice;
+use std::sync::Arc;
 
 use fectp_core::frame::HEADER_LEN;
-use fectp_core::keys::{Keypair, PublicKey, DHLEN};
+use fectp_core::keys::{Keypair, PublicKey, StaticKey, DHLEN};
 use fectp_core::session::{Capabilities, Initiator, Responder, Session};
 use rand_core::OsRng;
 use zeroize::Zeroize;
@@ -87,39 +95,137 @@ pub const FECTP_ERR_PANIC: isize = -4;
 /// A length did not fit this platform's `isize` and so could not be reported.
 /// Nothing was read or written.
 pub const FECTP_ERR_TOO_LARGE: isize = -5;
+/// The host's key function reported a failure — the device was busy, locked or
+/// absent. The handshake it happened in is over, as with any other error.
+pub const FECTP_ERR_KEY: isize = -6;
 
 /// A long-term identity.
 ///
 /// Opaque, and with no call that reads the private key back out — absent
-/// rather than discouraged. The bytes are kept here because the core's
-/// `Keypair` is consumed by a handshake and cannot be cloned, so one is built
-/// per handshake from these; they are wiped when the handle is freed.
+/// rather than discouraged. Either it holds the secret, or it holds a way to
+/// reach a key held elsewhere ([`fectp_identity_from_key`]).
 pub struct fectp_identity {
-    secret: [u8; DHLEN],
+    key: Held,
     public: PublicKey,
 }
 
+/// What an identity holds.
+enum Held {
+    /// The secret itself. Kept because the core's `Keypair` is consumed by a
+    /// handshake and cannot be cloned, so one is built per handshake from
+    /// these; they are wiped when the handle is freed.
+    Secret([u8; DHLEN]),
+    /// A key held by the host. Shared, not copied: each handshake begun from
+    /// this identity holds a reference, so the host's context outlives the
+    /// handle when a handshake is still using it.
+    Element(Arc<Element>),
+}
+
 impl fectp_identity {
-    /// A keypair for one handshake. The copy it makes wipes itself on drop.
-    fn keypair(&self) -> Keypair {
-        Keypair::from_secret(self.secret)
+    /// The key one handshake will use.
+    fn key(&self) -> IdentityKey {
+        match &self.key {
+            // The copy `from_secret` makes wipes itself on drop.
+            Held::Secret(secret) => IdentityKey::Secret(Keypair::from_secret(*secret)),
+            Held::Element(element) => IdentityKey::Element(Arc::clone(element)),
+        }
     }
 }
 
 impl Drop for fectp_identity {
     fn drop(&mut self) {
-        self.secret.zeroize();
+        if let Held::Secret(secret) = &mut self.key {
+            secret.zeroize();
+        }
+    }
+}
+
+/// Performs X25519 with a key this library never sees.
+///
+/// Called with the `context` the host registered, the peer's 32-byte public
+/// key, and 32 writable bytes for the shared secret. Returns 0 on success;
+/// anything else is reported as [`FECTP_ERR_KEY`] and ends the handshake.
+pub type fectp_dh_fn =
+    unsafe extern "C" fn(context: *mut c_void, peer_public: *const u8, shared: *mut u8) -> i32;
+
+/// Tells the host its key is no longer referenced.
+pub type fectp_release_fn = unsafe extern "C" fn(context: *mut c_void);
+
+/// A key held by the host, reached through its function.
+struct Element {
+    dh: fectp_dh_fn,
+    context: *mut c_void,
+    release: Option<fectp_release_fn>,
+    public: PublicKey,
+}
+
+// SAFETY: `context` is the host's, and what crossing threads means for it is
+// the host's to say. The contract on `fectp_identity_from_key` states it: the
+// function may be called on whatever thread drives a handshake begun from the
+// identity, so a host that drives several at once on several threads must be
+// able to serve them, or lock. Nothing in this library touches `context`
+// except to pass it back.
+unsafe impl Send for Element {}
+// SAFETY: as above; `Element` has no interior mutability of its own.
+unsafe impl Sync for Element {}
+
+impl Element {
+    fn dh(&self, peer: &PublicKey) -> fectp_core::Result<[u8; DHLEN]> {
+        let mut shared = [0u8; DHLEN];
+        // SAFETY: the host's function, under the contract it registered with:
+        // `peer` is 32 readable bytes and `shared` 32 writable ones, both
+        // live for the call, and `context` is exactly what it handed over.
+        let status = unsafe { (self.dh)(self.context, peer.as_ptr(), shared.as_mut_ptr()) };
+        if status != 0 {
+            shared.zeroize();
+            return Err(fectp_core::Error::KeyUnavailable);
+        }
+        Ok(shared)
+    }
+}
+
+impl Drop for Element {
+    /// The last reference has gone — the identity and every handshake begun
+    /// from it — so the host may let its key go.
+    fn drop(&mut self) {
+        if let Some(release) = self.release {
+            // SAFETY: the host's function, called once, with its own context,
+            // after which nothing here can reach that context again.
+            unsafe { release(self.context) };
+        }
+    }
+}
+
+/// The key one handshake holds.
+enum IdentityKey {
+    Secret(Keypair),
+    Element(Arc<Element>),
+}
+
+impl StaticKey for IdentityKey {
+    fn public(&self) -> PublicKey {
+        match self {
+            IdentityKey::Secret(keypair) => *keypair.public(),
+            IdentityKey::Element(element) => element.public,
+        }
+    }
+
+    fn dh(&self, peer: &PublicKey) -> fectp_core::Result<[u8; DHLEN]> {
+        match self {
+            IdentityKey::Secret(keypair) => Ok(keypair.dh(peer)),
+            IdentityKey::Element(element) => element.dh(peer),
+        }
     }
 }
 
 /// A handshake in progress, from the side that started it.
 pub struct fectp_initiator {
-    inner: Initiator,
+    inner: Initiator<IdentityKey>,
 }
 
 /// A handshake in progress, from the side that answered.
 pub struct fectp_responder {
-    inner: Responder,
+    inner: Responder<IdentityKey>,
 }
 
 /// An established session: payloads in, frames out, and back again.
@@ -161,6 +267,7 @@ fn length(n: usize) -> isize {
 fn code(e: &fectp_core::Error) -> isize {
     match e {
         fectp_core::Error::BufferTooSmall => FECTP_ERR_BUFFER,
+        fectp_core::Error::KeyUnavailable => FECTP_ERR_KEY,
         _ => FECTP_ERR_PROTOCOL,
     }
 }
@@ -213,7 +320,12 @@ pub extern "C" fn fectp_identity_generate() -> *mut fectp_identity {
         let mut secret = [0u8; DHLEN];
         rand_core::RngCore::fill_bytes(&mut OsRng, &mut secret);
         let public = *Keypair::from_secret(secret).public();
-        Box::into_raw(Box::new(fectp_identity { secret, public }))
+        let handle = Box::into_raw(Box::new(fectp_identity {
+            key: Held::Secret(secret),
+            public,
+        }));
+        secret.zeroize();
+        handle
     })
 }
 
@@ -242,11 +354,73 @@ pub unsafe extern "C" fn fectp_identity_from_secret(secret: *const u8) -> *mut f
         fixed.copy_from_slice(bytes);
         let public = *Keypair::from_secret(fixed).public();
         let handle = Box::into_raw(Box::new(fectp_identity {
-            secret: fixed,
+            key: Held::Secret(fixed),
             public,
         }));
         fixed.zeroize();
         handle
+    })
+}
+
+/// An identity whose private key is held by the host and never seen here.
+///
+/// For a secure element, an HSM or a TPM: `public_key` is the key's 32-byte
+/// public half, read once now, and `dh` performs X25519 with the private half
+/// whenever a handshake needs it — twice per handshake on each side. `context`
+/// is passed back to `dh` and `release` unchanged; this library never reads
+/// it.
+///
+/// `release`, which may be null, is called exactly once, when nothing here can
+/// call `dh` again: after this identity is freed *and* every initiator and
+/// responder begun from it has been consumed or freed. A handshake may outlive
+/// the identity handle it began from, and its key goes with it.
+///
+/// Returns null if `public_key` or `dh` is null, in which case `release` is
+/// not called and `context` remains the host's.
+///
+/// # Contract on `dh`
+///
+/// - It is called synchronously, from inside [`fectp_initiator_write_init`],
+///   [`fectp_initiator_read_response`] and [`fectp_responder_read_init`], on
+///   the thread that called them. A host driving several handshakes from this
+///   identity on several threads at once must serve concurrent calls or lock.
+/// - It must write all 32 bytes and return 0, or return non-zero. A non-zero
+///   return is [`FECTP_ERR_KEY`] from the call that made it.
+/// - It must not unwind: no C++ exception, no `longjmp` across this library.
+///   A host language's exception must be caught in the host's wrapper and
+///   turned into a non-zero return.
+///
+/// # Safety
+///
+/// `public_key` must be valid for reads of 32 bytes. `dh` and `release` must
+/// remain callable with `context` until `release` has been called.
+#[no_mangle]
+pub unsafe extern "C" fn fectp_identity_from_key(
+    public_key: *const u8,
+    dh: Option<fectp_dh_fn>,
+    context: *mut c_void,
+    release: Option<fectp_release_fn>,
+) -> *mut fectp_identity {
+    guard_ptr(|| {
+        let Some(dh) = dh else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: the caller guarantees 32 readable bytes at `public_key`.
+        let Some(bytes) = (unsafe { input(public_key, DHLEN) }) else {
+            return core::ptr::null_mut();
+        };
+        let mut public = [0u8; DHLEN];
+        public.copy_from_slice(bytes);
+        let element = Arc::new(Element {
+            dh,
+            context,
+            release,
+            public,
+        });
+        Box::into_raw(Box::new(fectp_identity {
+            key: Held::Element(element),
+            public,
+        }))
     })
 }
 
@@ -324,7 +498,7 @@ pub unsafe extern "C" fn fectp_initiator_new(
         let mut remote = [0u8; DHLEN];
         remote.copy_from_slice(peer);
         match Initiator::new(
-            identity.keypair(),
+            identity.key(),
             remote,
             session_id,
             Capabilities::minimal(max_frame),
@@ -462,7 +636,7 @@ pub unsafe extern "C" fn fectp_responder_new(
         // SAFETY: the caller guarantees a live handle.
         let identity = unsafe { &*identity };
         Box::into_raw(Box::new(fectp_responder {
-            inner: Responder::new(identity.keypair(), Capabilities::minimal(max_frame)),
+            inner: Responder::new(identity.key(), Capabilities::minimal(max_frame)),
         }))
     })
 }

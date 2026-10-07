@@ -14,12 +14,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createPrivateKey, createPublicKey, diffieHellman, type KeyObject } from "node:crypto";
+
 import {
+  _heldKeyCount,
   BufferTooSmall,
   FectpError,
   Identity,
   Initiator,
   KEY_LEN,
+  KeyUnavailable,
   ProtocolError,
   Responder,
   Session,
@@ -173,4 +177,129 @@ test("many sessions can be open at once", () => {
     client.close();
     server.close();
   }
+});
+
+// ------------------------------------------------------- a key held elsewhere
+
+/**
+ * A device: Node's own X25519 standing in for a secure element. It does the
+ * Diffie-Hellman, counts its calls, and can be locked. An implementation that
+ * shares no code with FECTP's, so the first test checks they agree.
+ */
+class SoftElement {
+  readonly publicKey: Uint8Array;
+  calls = 0;
+  locked = false;
+  readonly #key: KeyObject;
+
+  constructor(fill: number) {
+    const raw = Buffer.alloc(KEY_LEN, fill);
+    // PKCS#8 and SPKI headers for X25519: how Node takes a raw key.
+    this.#key = createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b656e04220420", "hex"), raw]),
+      format: "der",
+      type: "pkcs8",
+    });
+    const spki = createPublicKey(this.#key).export({ format: "der", type: "spki" });
+    this.publicKey = new Uint8Array(spki.subarray(spki.length - KEY_LEN));
+  }
+
+  dh = (peerPublic: Uint8Array): Uint8Array => {
+    this.calls += 1;
+    if (this.locked) throw new Error("the device is locked");
+    const peer = createPublicKey({
+      key: Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(peerPublic)]),
+      format: "der",
+      type: "spki",
+    });
+    return new Uint8Array(diffieHellman({ privateKey: this.#key, publicKey: peer }));
+  };
+}
+
+/** A whole handshake between two identities, then one message each way. */
+function handshakeBetween(client: Identity, server: Identity): void {
+  const initiator = new Initiator(client, server.publicKey, 0xe1e);
+  const responder = new Responder(server);
+  responder.readInit(initiator.writeInit());
+  const { session: serverSession, frame } = responder.writeResponse();
+  const { session: clientSession } = initiator.readResponse(frame);
+  assert.equal(text(serverSession.open(clientSession.seal(bytes("up")))), "up");
+  assert.equal(text(clientSession.open(serverSession.seal(bytes("down")))), "down");
+  clientSession.close();
+  serverSession.close();
+}
+
+test("the stand-in agrees with FECTP about X25519", () => {
+  // Otherwise every test below would be testing the stand-in.
+  const element = new SoftElement(0x41);
+  const same = Identity.fromSecret(new Uint8Array(KEY_LEN).fill(0x41));
+  assert.deepEqual(same.publicKey, element.publicKey);
+  same.close();
+});
+
+test("a key held elsewhere works on either side", () => {
+  const element = new SoftElement(0x42);
+  const held = Identity.fromKey(element.publicKey, element.dh);
+  const ordinary = Identity.generate();
+  assert.deepEqual(held.publicKey, element.publicKey);
+  handshakeBetween(held, ordinary);
+  assert.equal(element.calls, 2, "an initiator uses its key twice");
+  handshakeBetween(ordinary, held);
+  assert.equal(element.calls, 4, "and a responder twice");
+  held.close();
+  ordinary.close();
+});
+
+test("a failing key throws with what it threw as the cause", () => {
+  const element = new SoftElement(0x43);
+  const held = Identity.fromKey(element.publicKey, element.dh);
+  const ordinary = Identity.generate();
+  element.locked = true;
+  const initiator = new Initiator(held, ordinary.publicKey, 1);
+  assert.throws(
+    () => initiator.writeInit(),
+    (error: unknown) =>
+      error instanceof KeyUnavailable &&
+      error.cause instanceof Error &&
+      error.cause.message.includes("locked"),
+  );
+  initiator.close();
+
+  // A refusal ends the handshake, not the identity.
+  element.locked = false;
+  handshakeBetween(held, ordinary);
+  held.close();
+  ordinary.close();
+});
+
+test("a wrong length is a key failure", () => {
+  const held = Identity.fromKey(new SoftElement(0x44).publicKey, () => new Uint8Array(31));
+  const ordinary = Identity.generate();
+  const initiator = new Initiator(held, ordinary.publicKey, 2);
+  assert.throws(
+    () => initiator.writeInit(),
+    (error: unknown) => error instanceof KeyUnavailable && error.cause instanceof RangeError,
+  );
+  initiator.close();
+  held.close();
+  ordinary.close();
+});
+
+test("the key function is held until FECTP lets it go", () => {
+  // A handshake can outlive the identity it began from, and its key goes with
+  // it; the function has to stay reachable until FECTP says so.
+  const element = new SoftElement(0x45);
+  const before = _heldKeyCount();
+  const held = Identity.fromKey(element.publicKey, element.dh);
+  assert.equal(_heldKeyCount(), before + 1);
+
+  const ordinary = Identity.generate();
+  const initiator = new Initiator(held, ordinary.publicKey, 3);
+  held.close();
+  assert.equal(_heldKeyCount(), before + 1, "still referenced by the handshake");
+  initiator.writeInit();
+  assert.equal(element.calls, 1);
+  initiator.close();
+  assert.equal(_heldKeyCount(), before, "released once nothing can call it");
+  ordinary.close();
 });

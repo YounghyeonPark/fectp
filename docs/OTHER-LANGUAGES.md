@@ -120,7 +120,7 @@ reintroduces exactly what the core excludes, and the memory-safety argument
 covers the protocol but not the doorway.
 
 Unavoidable. What narrows it is that `crates/ffi` is the only place in this
-workspace where that happens, it is 673 lines with 34 `unsafe` blocks, and CI runs its tests under Miri
+workspace where that happens, it is 847 lines with 37 `unsafe` blocks, and CI runs its tests under Miri
 — which sees undefined behaviour the tests cannot, because a fault that changes
 no answer passes every one of them (D72). A hand-written binding in another
 language has none of that, which is the argument for going through this crate
@@ -139,19 +139,34 @@ died". Wrapping every entry point in `catch_unwind` and converting to an error
 code is mandatory, not tidiness — which is what `crates/ffi` does, at every
 entry including the ones that cannot fail.
 
-### A key held in hardware does not cross either
+### A key held in hardware crosses as a function
 
 `fectp-core` takes a `StaticKey` so that a secure element can perform the
-Diffie-Hellman without releasing the key (D76). **The C ABI does not expose
-that**, and neither do the bindings on it: a trait crosses as a struct of
-function pointers the caller fills in, with a lifetime the C side has to
-honour and a failure path in both directions. `fectp_identity_from_secret` is
-what exists, and it takes the bytes.
+Diffie-Hellman without releasing the key (D76). Across the C ABI that trait is
+`fectp_identity_from_key`: a public key and a function `dh(context, peer,
+shared)` the host supplies, called whenever a handshake needs the private half
+(D82). Python's `Identity.from_key` and TypeScript's `Identity.fromKey` wrap it
+around an ordinary function, so a key behind PKCS#11, a TPM or a cloud HSM is
+reached through whatever library already talks to it.
 
-Not a gap so much as a different problem. What D76 and D78 close is Rust
-calling this directly — a constrained device on `fectp-core`, a server on
-`Endpoint` — where there is no boundary to cross; a C caller with an element
-is a second design, not the same one wearing a header.
+It was written down here as "a second design, not the same one wearing a
+header", and the three things that made it one were each answered rather than
+avoided:
+
+- **Lifetime.** An initiator uses its key in message 1 and again reading
+  message 2, and a host may free the identity in between. So the key is
+  reference-counted, and the host's `release` is called exactly once, when the
+  identity *and* every handshake begun from it have gone.
+- **Failure both ways.** The host's function returns non-zero for a busy,
+  locked or absent device, which is `FECTP_ERR_KEY`. The other direction —
+  an exception in the host — cannot cross C at all, so each binding catches it
+  in a fixed trampoline, returns non-zero, and re-raises it as the cause of
+  `KeyUnavailable`.
+- **The callback's own life.** A callback object a garbage collector frees
+  while C still holds its address is a crash at some later call. Neither
+  binding makes one per key: each has two fixed trampolines for the life of the
+  module, and the key function is a number in a table until `release` says it
+  may go.
 
 ### Key material escapes `zeroize`
 

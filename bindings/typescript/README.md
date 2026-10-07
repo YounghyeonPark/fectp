@@ -73,6 +73,22 @@ crossing.
 it makes. What you pass in stays yours, and you cannot wipe it — which is the
 argument for keeping the handle and never having the bytes here at all.
 
+### Or never have it here
+
+`Identity.fromKey` takes a key held by a secure element, an HSM or a TPM, and
+FECTP never sees it:
+
+```ts
+const identity = Identity.fromKey(device.publicKey, (peerPublic) =>
+  // Ask the device for X25519 with its private key; 32 bytes back.
+  device.derive(peerPublic)
+);
+```
+
+The function runs synchronously, twice per handshake on each side. If it
+throws, the handshake ends with `KeyUnavailable` whose `cause` is what was
+thrown; the identity can be used again. Its result is wiped after copying.
+
 ## What this does not do
 
 The session layer only. **Retransmission, congestion control, fragmentation and

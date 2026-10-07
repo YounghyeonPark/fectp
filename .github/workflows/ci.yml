@@ -166,7 +166,10 @@ jobs:
           components: miri
       - uses: Swatinem/rust-cache@v2
       - name: the C ABI under Miri
-        run: cargo miri test -p fectp-ffi --test c_abi
+        # `hardware_key` too: calling the host's key function is a fourth
+        # shape of `unsafe` at this boundary, and the one where a pointer the
+        # host holds outlives the handle it came with.
+        run: cargo miri test -p fectp-ffi --test c_abi --test hardware_key
 
   # Everything else calls the C ABI from Rust, through the compiler that built
   # it — which cannot catch a wrong calling convention, a mistaken pointer

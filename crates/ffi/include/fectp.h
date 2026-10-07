@@ -24,6 +24,11 @@
  * It wipes its own copy before returning. The copy you passed in is yours to
  * erase.
  *
+ * Better still, the key need never be in your process at all.
+ * fectp_identity_from_key() takes a public key and a function that performs
+ * the Diffie-Hellman with the private half — a secure element, an HSM, a TPM —
+ * and this library calls it and never sees the key.
+ *
  * ---------------------------------------------------------------------------
  * Buffers
  *
@@ -75,6 +80,9 @@ extern "C" {
 #define FECTP_ERR_PANIC (-4)
 /* A length did not fit this platform's intptr_t. Nothing was read or written. */
 #define FECTP_ERR_TOO_LARGE (-5)
+/* Your key function (fectp_identity_from_key) returned non-zero: the device
+ * was busy, locked or absent. The handshake it happened in is over. */
+#define FECTP_ERR_KEY (-6)
 
 /* Public and secret keys are both 32 bytes. */
 #define FECTP_KEY_LEN 32
@@ -97,6 +105,44 @@ intptr_t fectp_identity_public(const fectp_identity *identity, uint8_t *out);
 
 /* Frees an identity, wiping its secret. */
 void fectp_identity_free(fectp_identity *identity);
+
+/*
+ * Performs X25519 with a private key this library never sees: reads the
+ * peer's 32-byte public key at `peer_public`, writes the 32-byte shared secret
+ * to `shared`, and returns 0. Any other return is FECTP_ERR_KEY from the call
+ * that asked.
+ *
+ * Called synchronously, from inside fectp_initiator_write_init(),
+ * fectp_initiator_read_response() and fectp_responder_read_init(), on the
+ * thread that called them — twice per handshake on each side. If you drive
+ * several handshakes from one identity on several threads at once, serve
+ * concurrent calls or take a lock. Must not unwind: no C++ exception and no
+ * longjmp may cross this library; catch them and return non-zero.
+ */
+typedef int32_t (*fectp_dh_fn)(void *context, const uint8_t *peer_public,
+                               uint8_t *shared);
+
+/* Tells you the key is no longer referenced, so `context` may be let go. */
+typedef void (*fectp_release_fn)(void *context);
+
+/*
+ * An identity whose private key you hold — in a secure element, an HSM, a TPM.
+ *
+ * `public_key` is its 32-byte public half, read once now. `dh` is called
+ * whenever a handshake needs the private half, with `context` passed back
+ * unchanged; this library never reads `context` itself.
+ *
+ * `release` (may be NULL) is called exactly once, when nothing here can call
+ * `dh` again: after this identity is freed AND every initiator and responder
+ * begun from it has been consumed or freed. A handshake may outlive the
+ * identity handle it began from, and its key goes with it.
+ *
+ * NULL if `public_key` or `dh` is NULL, in which case `release` is not called
+ * and `context` is still yours.
+ */
+fectp_identity *fectp_identity_from_key(const uint8_t *public_key,
+                                        fectp_dh_fn dh, void *context,
+                                        fectp_release_fn release);
 
 /* ---------------------------------------------------------------- initiator */
 

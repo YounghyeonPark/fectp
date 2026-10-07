@@ -165,5 +165,128 @@ class Handles(unittest.TestCase):
             initiator.read_response(b"\x00" * 64)
 
 
+
+# --------------------------------------------------------- a key held elsewhere
+
+# X25519 as RFC 7748 writes it, in Python, standing in for a secure element.
+# The standard library has none, and an implementation that shares no code
+# with the Rust one is worth having for its own sake: the first test below
+# checks the two agree before anything else trusts this one.
+_P = 2**255 - 19
+
+
+def _x25519(scalar: bytes, u: bytes) -> bytes:
+    k = bytearray(scalar)
+    k[0] &= 248
+    k[31] &= 127
+    k[31] |= 64
+    k = int.from_bytes(k, "little")
+    x1 = int.from_bytes(u, "little") & ((1 << 255) - 1)
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for t in reversed(range(255)):
+        bit = (k >> t) & 1
+        swap ^= bit
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a, b = (x2 + z2) % _P, (x2 - z2) % _P
+        aa, bb = a * a % _P, b * b % _P
+        e = (aa - bb) % _P
+        c, d = (x3 + z3) % _P, (x3 - z3) % _P
+        da, cb = d * a % _P, c * b % _P
+        x3, z3 = (da + cb) ** 2 % _P, x1 * (da - cb) ** 2 % _P
+        x2, z2 = aa * bb % _P, e * (aa + 121665 * e) % _P
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, _P - 2, _P) % _P).to_bytes(32, "little")
+
+
+_BASE = (9).to_bytes(32, "little")
+
+
+class SoftElement:
+    """A device: it does Diffie-Hellman, counts the calls, and can be locked."""
+
+    def __init__(self, fill: int):
+        self._secret = bytes([fill]) * 32
+        self.public = _x25519(self._secret, _BASE)
+        self.calls = 0
+        self.locked = False
+
+    def dh(self, peer_public: bytes) -> bytearray:
+        self.calls += 1
+        if self.locked:
+            raise RuntimeError("the device is locked")
+        return bytearray(_x25519(self._secret, peer_public))
+
+
+class HardwareKey(unittest.TestCase):
+    def handshake(self, client, server):
+        initiator = fectp.Initiator(client, server.public, session_id=0xE1E)
+        responder = fectp.Responder(server)
+        responder.read_init(initiator.write_init())
+        server_session, reply = responder.write_response()
+        client_session, _ = initiator.read_response(reply)
+        self.assertEqual(server_session.open(client_session.seal(b"up")), b"up")
+        self.assertEqual(client_session.open(server_session.seal(b"down")), b"down")
+
+    def test_the_stand_in_agrees_with_fectp_about_x25519(self):
+        # Otherwise every test below would be testing the stand-in.
+        element = SoftElement(0x31)
+        with fectp.Identity.from_secret(bytes([0x31]) * 32) as same_key:
+            self.assertEqual(element.public, same_key.public)
+
+    def test_a_key_held_elsewhere_works_on_either_side(self):
+        element = SoftElement(0x32)
+        with fectp.Identity.from_key(element.public, element.dh) as held, \
+                fectp.Identity.generate() as ordinary:
+            self.assertEqual(held.public, element.public)
+            self.handshake(held, ordinary)
+            self.assertEqual(element.calls, 2, "an initiator uses its key twice")
+            self.handshake(ordinary, held)
+            self.assertEqual(element.calls, 4, "and a responder twice")
+
+    def test_a_failing_key_raises_with_its_own_exception_as_the_cause(self):
+        element = SoftElement(0x33)
+        with fectp.Identity.from_key(element.public, element.dh) as held, \
+                fectp.Identity.generate() as ordinary:
+            element.locked = True
+            initiator = fectp.Initiator(held, ordinary.public, session_id=1)
+            with self.assertRaises(fectp.KeyUnavailable) as raised:
+                initiator.write_init()
+            self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+            self.assertIn("locked", str(raised.exception.__cause__))
+            initiator.close()
+
+            # A refusal ends the handshake, not the identity.
+            element.locked = False
+            self.handshake(held, ordinary)
+
+    def test_a_wrong_length_is_a_key_failure(self):
+        with fectp.Identity.generate() as ordinary, \
+                fectp.Identity.from_key(SoftElement(0x34).public, lambda _peer: b"short") as held:
+            initiator = fectp.Initiator(held, ordinary.public, session_id=2)
+            with self.assertRaises(fectp.KeyUnavailable) as raised:
+                initiator.write_init()
+            self.assertIsInstance(raised.exception.__cause__, ValueError)
+            initiator.close()
+
+    def test_the_key_function_is_held_until_fectp_lets_it_go(self):
+        # A handshake can outlive the identity it began from, and its key goes
+        # with it; the function has to stay reachable until FECTP says so.
+        element = SoftElement(0x35)
+        before = set(fectp._held_keys)
+        held = fectp.Identity.from_key(element.public, element.dh)
+        (number,) = set(fectp._held_keys) - before
+
+        with fectp.Identity.generate() as ordinary:
+            initiator = fectp.Initiator(held, ordinary.public, session_id=3)
+            held.close()
+            self.assertIn(number, fectp._held_keys, "still referenced by the handshake")
+            initiator.write_init()
+            self.assertEqual(element.calls, 1)
+            initiator.close()
+        self.assertNotIn(number, fectp._held_keys, "released once nothing can call it")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

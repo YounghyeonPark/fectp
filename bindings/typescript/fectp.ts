@@ -31,6 +31,11 @@
  * runtime cannot be wiped: a `Buffer` may be copied by the garbage collector,
  * the old copy is not cleared, and it may reach swap. Keep the handle, not the
  * bytes.
+ *
+ * Better still, the key never has to be here at all. {@link Identity.fromKey}
+ * takes a public key and a function that performs the Diffie-Hellman with the
+ * private half — a secure element, an HSM, a TPM, reached through whatever
+ * library talks to it — and FECTP calls that function and never sees the key.
  */
 
 import { createRequire } from "node:module";
@@ -47,6 +52,7 @@ const ERR_BUFFER = -2;
 const ERR_PROTOCOL = -3;
 const ERR_PANIC = -4;
 const ERR_TOO_LARGE = -5;
+const ERR_KEY = -6;
 
 /** Room for a frame and a handshake's overhead; the wrapper's scratch size. */
 const SCRATCH = 65535;
@@ -72,6 +78,15 @@ export class BufferTooSmall extends FectpError {}
  * the handle it happened on is unusable.
  */
 export class InternalPanic extends FectpError {}
+
+/**
+ * The key function given to {@link Identity.fromKey} failed.
+ *
+ * The device was busy, locked or absent, or the function threw — in which case
+ * what it threw is this error's `cause`. The handshake it happened in is over;
+ * the identity is not, and may be used again.
+ */
+export class KeyUnavailable extends FectpError {}
 
 /** Where the shared library is, by environment or by convention. */
 function libraryPath(): string {
@@ -119,7 +134,22 @@ function load() {
   // is only written.
   const slot = koffi.inout(koffi.pointer(ptr));
   const outPtr = koffi.out(koffi.pointer(ptr));
+  // The context is declared as an integer of pointer width rather than a
+  // pointer, which is the same thing to the ABI and lets it carry a plain key
+  // number instead of an address JavaScript would have to invent.
+  const dhFn = koffi.proto(
+    "int32_t fectp_dh_fn(intptr_t context, const uint8_t *peer_public, uint8_t *shared)",
+  );
+  const releaseFn = koffi.proto("void fectp_release_fn(intptr_t context)");
   return {
+    koffi,
+    dhFn: koffi.pointer(dhFn),
+    releaseFn: koffi.pointer(releaseFn),
+    identityFromKey: lib.func(
+      "fectp_identity_from_key",
+      ptr,
+      [u8, koffi.pointer(dhFn), "intptr_t", koffi.pointer(releaseFn)],
+    ),
     identityGenerate: lib.func("fectp_identity_generate", ptr, []),
     identityFromSecret: lib.func("fectp_identity_from_secret", ptr, [u8]),
     identityPublic: lib.func("fectp_identity_public", "intptr_t", [ptr, u8]),
@@ -159,6 +189,57 @@ function load() {
 
 const lib = load();
 
+/**
+ * Keys FECTP may still call, by the number it was given as a context. An entry
+ * leaves only when FECTP says it is done with that key — after the identity and
+ * every handshake begun from it have gone.
+ */
+const heldKeys = new Map<number, (peerPublic: Uint8Array) => Uint8Array>();
+let nextKey = 1;
+
+/**
+ * What a key function threw, until the call that triggered it turns it into
+ * {@link KeyUnavailable}. Nothing may be thrown across C; this is how it gets
+ * to the caller anyway. One slot is enough: JavaScript runs one call at a time.
+ */
+let keyFailure: unknown = undefined;
+
+/** Exposed for the binding's own tests, to see what is still held. */
+export const _heldKeyCount = (): number => heldKeys.size;
+
+// The two C functions every key held outside JavaScript goes through: made
+// once and kept for the life of the module. A callback unregistered while C
+// still holds its address is a crash at some later call, so none is made per
+// key.
+const dhTrampoline = lib.koffi.register(
+  (context: number | bigint, peerPublic: unknown, shared: unknown): number => {
+    try {
+      const dh = heldKeys.get(Number(context));
+      if (!dh) throw new FectpError("no key is registered under this context");
+      const peer = Uint8Array.from(lib.koffi.decode(peerPublic, "uint8_t", KEY_LEN));
+      const result = dh(peer);
+      if (result.length !== KEY_LEN) {
+        throw new RangeError(`a key function must return ${KEY_LEN} bytes, not ${result.length}`);
+      }
+      lib.koffi.encode(shared, "uint8_t", Array.from(result), KEY_LEN);
+      // The one copy this wrapper can reach.
+      result.fill(0);
+      return 0;
+    } catch (failure) {
+      keyFailure = failure;
+      return 1;
+    }
+  },
+  lib.dhFn,
+);
+
+const releaseTrampoline = lib.koffi.register(
+  (context: number | bigint): void => {
+    heldKeys.delete(Number(context));
+  },
+  lib.releaseFn,
+);
+
 /** Turns a negative return into the error it stands for. */
 function check(code: number): number {
   if (code >= 0) return code;
@@ -173,6 +254,11 @@ function check(code: number): number {
       throw new InternalPanic("a panic was caught inside FECTP; this handle is unusable");
     case ERR_TOO_LARGE:
       throw new FectpError("a length did not fit the platform's word size");
+    case ERR_KEY: {
+      const cause = keyFailure;
+      keyFailure = undefined;
+      throw new KeyUnavailable("the key function failed; this handshake is over", { cause });
+    }
     default:
       throw new FectpError(`unrecognised error code ${code}`);
   }
@@ -254,6 +340,35 @@ export class Identity extends Handle {
       throw new RangeError(`a secret is ${KEY_LEN} bytes, not ${secret.length}`);
     }
     return new Identity(lib.identityFromSecret(Buffer.from(secret)));
+  }
+
+  /**
+   * An identity whose private key FECTP never sees.
+   *
+   * `publicKey` is the key's 32-byte public half. `dh` performs X25519 with the
+   * private half: it is given the peer's 32-byte public key and returns the
+   * 32-byte shared secret, synchronously, twice per handshake on each side.
+   * The result is wiped after it is copied.
+   *
+   * Throwing from `dh`, or returning the wrong length, ends the handshake with
+   * {@link KeyUnavailable}, whose `cause` is what was thrown.
+   *
+   * `dh` is held until FECTP says it is done with it — which may be after this
+   * identity is closed, if a handshake begun from it is still running.
+   */
+  static fromKey(publicKey: Uint8Array, dh: (peerPublic: Uint8Array) => Uint8Array): Identity {
+    if (publicKey.length !== KEY_LEN) {
+      throw new RangeError(`a public key is ${KEY_LEN} bytes, not ${publicKey.length}`);
+    }
+    if (typeof dh !== "function") throw new TypeError("dh must be a function");
+    const number = nextKey++;
+    heldKeys.set(number, dh);
+    const ptr = lib.identityFromKey(Buffer.from(publicKey), dhTrampoline, number, releaseTrampoline);
+    if (!ptr) {
+      // Refused, so FECTP will never release it; that is ours to do.
+      heldKeys.delete(number);
+    }
+    return new Identity(ptr);
   }
 
   /** The 32-byte public key, which peers need in order to reach you. */

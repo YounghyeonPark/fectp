@@ -27,20 +27,30 @@ The C ABI does not export such a call, and this wrapper could not add one.
 :func:`Identity.from_secret` exists for restoring a key you stored elsewhere.
 Whatever you pass it is yours to erase — use a ``bytearray`` and overwrite it,
 because a ``bytes`` cannot be.
+
+Better still, the key never has to be in Python at all.
+:func:`Identity.from_key` takes a public key and a function that performs the
+Diffie-Hellman with the private half — a secure element, an HSM, a TPM, reached
+through whatever library talks to it — and FECTP calls that function and never
+sees the key.
 """
 
 from __future__ import annotations
 
 import ctypes
+import itertools
 import os
 import sys
-from ctypes import POINTER, c_size_t, c_ssize_t, c_ubyte, c_uint16, c_uint32, c_void_p
+import threading
+from ctypes import POINTER, c_int32, c_size_t, c_ssize_t, c_ubyte, c_uint16, c_uint32, c_void_p
 from pathlib import Path
+from typing import Callable
 
 __all__ = [
     "FectpError",
     "ProtocolError",
     "BufferTooSmall",
+    "KeyUnavailable",
     "Identity",
     "Initiator",
     "Responder",
@@ -56,6 +66,7 @@ _ERR_BUFFER = -2
 _ERR_PROTOCOL = -3
 _ERR_PANIC = -4
 _ERR_TOO_LARGE = -5
+_ERR_KEY = -6
 
 # Room for a frame plus the handshake's overhead. The protocol's own limit is
 # negotiated per session; this is the wrapper's scratch size and is generous.
@@ -78,6 +89,15 @@ class ProtocolError(FectpError):
 
 class BufferTooSmall(FectpError):
     """An output buffer was too small. Nothing was written to it."""
+
+
+class KeyUnavailable(FectpError):
+    """The key function given to :func:`Identity.from_key` failed.
+
+    The device was busy, locked or absent, or the function raised — in which
+    case that exception is this one's ``__cause__``. The handshake it happened
+    in is over; the identity is not, and may be used again.
+    """
 
 
 class _Panic(FectpError):
@@ -112,6 +132,15 @@ def _library_path() -> Path:
     )
 
 
+# The two C functions every key held outside Python goes through: fixed, and
+# alive for the life of the module. A ctypes callback object that is collected
+# while C still holds its address is a crash at some later call, so none is
+# made per key. Each key is a number in `_held_keys` instead, passed to C as
+# its context and back to these.
+_DH_FN = ctypes.CFUNCTYPE(c_int32, c_void_p, POINTER(c_ubyte), POINTER(c_ubyte))
+_RELEASE_FN = ctypes.CFUNCTYPE(None, c_void_p)
+
+
 def _bind() -> ctypes.CDLL:
     lib = ctypes.CDLL(str(_library_path()))
     u8p = POINTER(c_ubyte)
@@ -127,6 +156,8 @@ def _bind() -> ctypes.CDLL:
     lib.fectp_identity_public.argtypes = [c_void_p, u8p]
     lib.fectp_identity_free.restype = None
     lib.fectp_identity_free.argtypes = [c_void_p]
+    lib.fectp_identity_from_key.restype = c_void_p
+    lib.fectp_identity_from_key.argtypes = [u8p, _DH_FN, c_void_p, _RELEASE_FN]
 
     lib.fectp_initiator_new.restype = c_void_p
     lib.fectp_initiator_new.argtypes = [c_void_p, u8p, c_uint32, c_uint16]
@@ -161,6 +192,42 @@ def _bind() -> ctypes.CDLL:
 
 _lib = _bind()
 
+# Keys FECTP may still call, by the number it was given as a context. An entry
+# leaves only when FECTP says it is done with that key — after the identity and
+# every handshake begun from it have gone.
+_held_keys: dict[int, Callable[[bytes], bytes]] = {}
+_held_lock = threading.Lock()
+_key_numbers = itertools.count(1)
+
+# The exception a key function raised, kept per thread until the call that
+# triggered it turns into `KeyUnavailable`. A Python exception cannot cross C;
+# this is how it gets to the caller anyway.
+_key_failure = threading.local()
+
+
+@_DH_FN
+def _dh_trampoline(context, peer_public, shared):
+    try:
+        with _held_lock:
+            dh = _held_keys[context]
+        result = dh(ctypes.string_at(peer_public, KEY_LEN))
+        if len(result) != KEY_LEN:
+            raise ValueError(f"a key function must return {KEY_LEN} bytes, not {len(result)}")
+        ctypes.memmove(shared, bytes(result), KEY_LEN)
+        if isinstance(result, bytearray):
+            # The one copy this wrapper can reach. A `bytes` cannot be wiped.
+            result[:] = bytes(KEY_LEN)
+        return 0
+    except BaseException as failure:  # noqa: BLE001 - nothing may unwind into C
+        _key_failure.error = failure
+        return 1
+
+
+@_RELEASE_FN
+def _release_trampoline(context):
+    with _held_lock:
+        _held_keys.pop(context, None)
+
 
 def _buffer(size: int = _SCRATCH):
     return (c_ubyte * size)()
@@ -188,6 +255,10 @@ def _check(code: int) -> int:
         raise _Panic("a panic was caught inside FECTP; this handle is unusable")
     if code == _ERR_TOO_LARGE:
         raise FectpError("a length did not fit the platform's word size")
+    if code == _ERR_KEY:
+        cause = getattr(_key_failure, "error", None)
+        _key_failure.error = None
+        raise KeyUnavailable("the key function failed; this handshake is over") from cause
     raise FectpError(f"unrecognised error code {code}")
 
 
@@ -268,6 +339,38 @@ class Identity(_Handle):
             raise ValueError(f"a secret is {KEY_LEN} bytes, not {len(secret)}")
         raw, _ = _as_input(secret)
         return cls(_lib.fectp_identity_from_secret(raw))
+
+    @classmethod
+    def from_key(cls, public, dh: Callable[[bytes], bytes]) -> "Identity":
+        """An identity whose private key FECTP never sees.
+
+        ``public`` is the key's 32-byte public half. ``dh`` performs X25519 with
+        the private half: it is given the peer's 32-byte public key and returns
+        the 32-byte shared secret. It is called synchronously, on the thread that
+        drives the handshake, twice per handshake on each side.
+
+        Raising from ``dh``, or returning the wrong length, ends the handshake
+        with :class:`KeyUnavailable` carrying the original exception. Return a
+        ``bytearray`` and this wrapper wipes it after copying; a ``bytes`` it
+        cannot.
+
+        ``dh`` is held until FECTP says it is done with it — which may be after
+        this identity is closed, if a handshake begun from it is still running.
+        """
+        if len(public) != KEY_LEN:
+            raise ValueError(f"a public key is {KEY_LEN} bytes, not {len(public)}")
+        if not callable(dh):
+            raise TypeError("dh must be callable")
+        number = next(_key_numbers)
+        with _held_lock:
+            _held_keys[number] = dh
+        raw, _ = _as_input(public)
+        ptr = _lib.fectp_identity_from_key(raw, _dh_trampoline, number, _release_trampoline)
+        if not ptr:
+            # Refused, so FECTP will never release it; that is ours to do.
+            with _held_lock:
+                _held_keys.pop(number, None)
+        return cls(ptr)
 
     @property
     def public(self) -> bytes:

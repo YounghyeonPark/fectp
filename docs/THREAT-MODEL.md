@@ -251,8 +251,9 @@ attacker-chosen bytes in one payload is outside what this protects.
 
 `fectp-core` and `fectp` carry it. `crates/ffi` cannot: raw pointers,
 caller-chosen lengths and lifetimes the compiler cannot see are what a C ABI
-is. It is 673 lines with 34 `unsafe` blocks and 16 `unsafe fn` items, every
-entry point wrapped in
+is. It is 847 lines with 37 `unsafe` blocks, 17 `unsafe fn` items and two
+`unsafe impl`s — the last for a host's key, whose thread rules are the host's
+(D82) — every entry point wrapped in
 `catch_unwind`, and CI runs its tests under Miri (D72) — which sees undefined
 behaviour the tests cannot, because a fault that changes no answer passes all
 of them.
