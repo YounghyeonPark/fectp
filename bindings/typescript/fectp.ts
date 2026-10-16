@@ -40,7 +40,7 @@
 
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Length of a public or secret key, in bytes. */
@@ -88,7 +88,7 @@ export class InternalPanic extends FectpError {}
  */
 export class KeyUnavailable extends FectpError {}
 
-/** Where the shared library is, by environment or by convention. */
+/** Where the shared library is: named, packaged, or built in a checkout. */
 function libraryPath(): string {
   const named = process.env.FECTP_LIBRARY;
   if (named) return named;
@@ -99,7 +99,16 @@ function libraryPath(): string {
     ? "libfectp.dylib"
     : "libfectp.so";
 
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  // Installed from npm this runs as dist/fectp.js, and the libraries sit in
+  // prebuilds/ beside dist/. From a checkout it runs as fectp.ts itself.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const packageRoot = basename(here) === "dist" ? resolve(here, "..") : here;
+  // macOS ships one library for both architectures.
+  const arch = process.platform === "darwin" ? "universal" : process.arch;
+  const packaged = join(packageRoot, "prebuilds", `${process.platform}-${arch}`, name);
+  if (existsSync(packaged)) return packaged;
+
+  const root = resolve(packageRoot, "..", "..");
   for (const profile of ["release", "debug"]) {
     const candidate = join(root, "target", profile, name);
     if (existsSync(candidate)) return candidate;

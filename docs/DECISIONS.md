@@ -4285,3 +4285,47 @@ release that keeps the function, and a lost exception cause.
 **Two calls per handshake per side**, the same count D78 pinned in Rust, and
 asserted again in every layer, because on a device where a call is a round trip
 over a bus it is the cost.
+
+## D83 — The bindings ship with their library inside
+
+**Problem.** Python and TypeScript could reach everything the C ABI offers,
+hardware keys included (D82), and nobody outside this repository could install
+either: each binding found its library under `target/`, so using one meant
+cloning, installing Rust and running cargo. A binding that needs the toolchain
+of the language it binds has not finished being a binding.
+
+**One wheel per platform, for every Python 3.** The module calls the library
+through `ctypes`, so nothing in it depends on the interpreter's ABI, and
+setuptools' two choices — pure, or one interpreter — are both wrong. `setup.py`
+tags the wheel `py3-none-<platform>`. Three platforms: Windows x64, Linux x64
+built inside `manylinux_2_28` so it asks for glibc 2.28 and nothing newer
+(checked against the library's symbols, and by `auditwheel`), and macOS as one
+library for both architectures. No source distribution: building one needs Rust,
+which is the thing this exists to remove.
+
+**One npm package carrying all three.** Per-platform packages selected by `os`
+and `cpu` are the usual shape and need an npm organisation; three libraries
+in one package cost about 1.5 MB each and need nothing. It ships compiled
+JavaScript with declarations, because Node strips types only outside
+`node_modules` and would refuse the `.ts` an installed package contained.
+
+**Found on the way.** `koffi`, the one dependency, has an install script, and
+current npm blocks install scripts by default. Installed fresh with it blocked,
+koffi loaded and called a system library: the script only copies prebuilt
+binaries it can also find where they ship. A user sees a warning and nothing
+fails. `package.json` said version 0.1.0 and `private`, through two crate
+releases; `check-claims.py` now compares it with the workspace version, and was
+checked by moving it.
+
+**Tested where it installs.** Locally on Windows, and in CI on all three
+platforms: each package installed fresh, outside the checkout, with the
+binding's own tests run against the installed copy — the Python ones on 3.9,
+the oldest it claims, as well as 3.13. Outside the checkout is the point. The
+module falls back to `target/` in a checkout, so a test run there would pass
+with an empty package.
+
+**Published from CI, by tag.** PyPI by trusted publishing, so no token is kept;
+npm by a token in a GitHub environment. Neither runs until every install test
+on that tag has passed. RELEASING.md says what has to exist on each registry
+first.
+

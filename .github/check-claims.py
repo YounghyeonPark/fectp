@@ -42,6 +42,7 @@ like the bug.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -161,6 +162,18 @@ def path_dependency_versions() -> list[str]:
                     f"previous version of its own core, which resolves and is "
                     f"wrong."
                 )
+
+    # The npm package states its version in its manifest, where nothing reads
+    # the workspace's. The Python package reads it from Cargo.toml at build
+    # time and so cannot drift; this one can, and did: it said 0.1.0 through
+    # two crate releases while nothing was published.
+    npm = json.loads(read("bindings/typescript/package.json"))
+    if npm.get("version") != want:
+        problems.append(
+            f"bindings/typescript/package.json: version {npm.get('version')} and "
+            f"the workspace is {want}. The npm package would carry a library "
+            f"built from one version under the number of another."
+        )
     return problems
 
 

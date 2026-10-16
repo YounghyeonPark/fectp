@@ -10,7 +10,8 @@ you have to remember to free.
 breaks protocols for a living. Do not put it in front of an adversary yet.
 
 ``ctypes`` rather than ``cffi`` so that this is the standard library and
-nothing else. The shared library is built by cargo::
+nothing else. Installed from PyPI, the shared library comes inside the wheel.
+From a checkout it is built by cargo::
 
     cargo build -p fectp-ffi --release
 
@@ -109,7 +110,7 @@ class _Panic(FectpError):
 
 
 def _library_path() -> Path:
-    """Where the shared library is, by environment or by convention."""
+    """Where the shared library is: named, packaged, or built in a checkout."""
     named = os.environ.get("FECTP_LIBRARY")
     if named:
         return Path(named)
@@ -121,7 +122,14 @@ def _library_path() -> Path:
     else:
         name = "libfectp.so"
 
-    root = Path(__file__).resolve().parents[2]
+    # Inside an installed wheel, beside this file.
+    packaged = Path(__file__).resolve().parent / "_native" / name
+    if packaged.exists():
+        return packaged
+
+    # In a checkout: bindings/python/fectp/__init__.py, three levels below the
+    # workspace root that holds `target`.
+    root = Path(__file__).resolve().parents[3]
     for profile in ("release", "debug"):
         candidate = root / "target" / profile / name
         if candidate.exists():

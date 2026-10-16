@@ -1,0 +1,272 @@
+# Builds the Python wheels and the npm package for every platform they ship
+# for, installs each one fresh on that platform, and runs the binding's tests
+# against what was installed — not against the checkout.
+#
+# Publishing happens only for a `bindings-v*` tag, and only after every one of
+# those installs has passed. PyPI is reached by trusted publishing (no token
+# stored here); npm by the NPM_TOKEN secret. Both live behind GitHub
+# environments, so a publish can also be made to wait for approval.
+
+name: bindings
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/ffi/**"
+      - "crates/fectp-core/**"
+      - "bindings/**"
+      - ".github/workflows/bindings.yml"
+    tags: ["bindings-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────── the library ──
+
+  library-windows:
+    name: library (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p fectp-ffi --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: library-windows
+          path: target/release/fectp.dll
+
+  # Built inside the manylinux_2_28 image, so the library asks for nothing newer
+  # than glibc 2.28 and the wheel can honestly carry that tag. Built on an
+  # ordinary runner it would need whatever glibc the runner had that week.
+  library-linux:
+    name: library (Linux x64, glibc 2.28)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v5
+      - name: install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo build -p fectp-ffi --release
+      - name: no symbol newer than glibc 2.28
+        run: |
+          newest=$(objdump -T target/release/libfectp.so | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
+          echo "newest glibc symbol: $newest"
+          test "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = "GLIBC_2.28"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: library-linux
+          path: target/release/libfectp.so
+
+  # One library for both architectures: what pip calls universal2 and what the
+  # npm package ships as darwin-universal.
+  library-macos:
+    name: library (macOS universal)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo build -p fectp-ffi --release --target aarch64-apple-darwin
+      - run: cargo build -p fectp-ffi --release --target x86_64-apple-darwin
+      - name: join the two
+        run: |
+          lipo -create -output libfectp.dylib \
+            target/aarch64-apple-darwin/release/libfectp.dylib \
+            target/x86_64-apple-darwin/release/libfectp.dylib
+          lipo -info libfectp.dylib
+          lipo -info libfectp.dylib | grep -q x86_64
+          lipo -info libfectp.dylib | grep -q arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: library-macos
+          path: libfectp.dylib
+
+  # ──────────────────────────────────────────────────────────────── Python ──
+
+  wheel:
+    name: wheel (${{ matrix.name }})
+    needs: [library-windows, library-linux, library-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            library: library-windows
+            file: fectp.dll
+            platform: win_amd64
+          - name: Linux
+            os: ubuntu-latest
+            library: library-linux
+            file: libfectp.so
+            platform: manylinux_2_28_x86_64
+          - name: macOS
+            os: macos-14
+            library: library-macos
+            file: libfectp.dylib
+            platform: macosx_11_0_universal2
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.library }}
+          path: native
+      - run: python bindings/python/stage.py native/${{ matrix.file }}
+      - run: python -m pip install build twine
+      - name: build
+        working-directory: bindings/python
+        env:
+          FECTP_WHEEL_PLATFORM: ${{ matrix.platform }}
+        run: python -m build --wheel
+      - run: python -m twine check bindings/python/dist/*
+      - name: the tag is earned
+        if: matrix.name == 'Linux'
+        run: |
+          python -m pip install auditwheel
+          auditwheel show bindings/python/dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: bindings/python/dist/*.whl
+
+  wheel-test:
+    name: wheel installed (${{ matrix.name }}, Python ${{ matrix.python }})
+    needs: wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest, python: "3.13" }
+          - { name: Linux, os: ubuntu-latest, python: "3.9" }
+          - { name: Linux, os: ubuntu-latest, python: "3.13" }
+          - { name: macOS, os: macos-14, python: "3.13" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: wheel
+      # Outside the checkout and with nothing built in it, so the only library
+      # the module can find is the one inside the wheel.
+      - name: install and test
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ -x "$RUNNER_TEMP/venv/Scripts/python" ]; then py="$RUNNER_TEMP/venv/Scripts/python"; else py="$RUNNER_TEMP/venv/bin/python"; fi
+          "$py" -m pip install wheel/*.whl
+          mkdir "$RUNNER_TEMP/outside" && cp bindings/python/test_fectp.py "$RUNNER_TEMP/outside/"
+          cd "$RUNNER_TEMP/outside"
+          "$py" -c "import fectp; print('library:', fectp._library_path())"
+          "$py" test_fectp.py
+
+  # ──────────────────────────────────────────────────────────────────── npm ──
+
+  npm-package:
+    name: npm package
+    needs: [library-windows, library-linux, library-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: library-*
+          path: native
+          merge-multiple: true
+      - working-directory: bindings/typescript
+        run: |
+          npm ci
+          node stage.mjs ../../native/fectp.dll ../../native/libfectp.so ../../native/libfectp.dylib
+          npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: bindings/typescript/fectp-*.tgz
+
+  npm-test:
+    name: npm package installed (${{ matrix.os }})
+    needs: npm-package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+      # Outside the checkout, importing "fectp" rather than the source file, so
+      # what runs is the compiled package and the library it carries.
+      - name: install and test
+        shell: bash
+        run: |
+          tarball="$PWD/$(ls package/fectp-*.tgz)"
+          mkdir "$RUNNER_TEMP/outside" && cd "$RUNNER_TEMP/outside"
+          npm init -y > /dev/null && npm pkg set type=module
+          npm install "$tarball"
+          sed 's#from "./fectp.ts"#from "fectp"#' "$GITHUB_WORKSPACE/bindings/typescript/test.ts" > test.ts
+          grep -q 'from "fectp"' test.ts
+          node --test test.ts
+
+  # ────────────────────────────────────────────────────────────── publish ──
+
+  publish-pypi:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/bindings-v')
+    needs: [wheel-test, npm-test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-npm:
+    name: publish to npm
+    if: startsWith(github.ref, 'refs/tags/bindings-v')
+    needs: [wheel-test, npm-test]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+      - run: npm publish package/fectp-*.tgz --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

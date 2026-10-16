@@ -1,17 +1,53 @@
 {
   "name": "fectp",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "FECTP from TypeScript, over the C ABI in crates/ffi",
+  "version": "0.2.1",
+  "description": "FECTP from TypeScript: the sans-IO encrypted session layer, over its C ABI. Not security-audited.",
   "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YounghyeonPark/fectp.git",
+    "directory": "bindings/typescript"
+  },
+  "keywords": [
+    "noise-protocol",
+    "udp",
+    "encryption",
+    "transport",
+    "x25519"
+  ],
+  "type": "module",
+  "main": "./dist/fectp.js",
+  "types": "./dist/fectp.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/fectp.d.ts",
+      "default": "./dist/fectp.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "prebuilds/",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "win32",
+    "linux",
+    "darwin"
+  ],
   "scripts": {
-    "test": "node --test test.ts"
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test.ts",
+    "prepack": "node stage.mjs --check && npm run build"
   },
   "dependencies": {
     "koffi": "^3.2.1"
   },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  },
   "engines": {
-    "node": ">=22.6"
+    "node": ">=18"
   }
 }

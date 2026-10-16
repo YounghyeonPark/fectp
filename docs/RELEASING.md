@@ -131,6 +131,43 @@ were checked before the package was made.
 If that skip is ever removed, publishing breaks, and it breaks on docs.rs
 rather than locally.
 
+## The Python and npm packages
+
+The bindings are published separately, as `fectp` on PyPI and on npm, and they
+are not the crates: each carries the C ABI's shared library, built for the
+platform it installs on, and the C ABI is not on crates.io at all. They follow
+the workspace version — `setup.py` reads it from `Cargo.toml`, and
+`check-claims.py` fails if `package.json` says anything else.
+
+`.github/workflows/bindings.yml` builds them. Every push that touches the C ABI,
+the core or the bindings builds the library on Windows, on Linux inside the
+`manylinux_2_28` image, and for both macOS architectures joined with `lipo`;
+packs a wheel per platform and one npm package carrying all three; and installs
+each on its own platform, outside the checkout, and runs the binding's tests
+against what was installed. That last step is the one that matters: a package
+that builds and then cannot find its library is the failure packaging produces,
+and only an install shows it.
+
+Publishing is a tag:
+
+```bash
+git tag -a bindings-v0.2.1 -m "..."   # the workspace version
+git push origin bindings-v0.2.1
+```
+
+and runs only after every install test on that tag has passed. Two things have
+to exist first, both on the registries and neither in this repository:
+
+- **PyPI**: a trusted publisher for the project `fectp` — owner
+  `YounghyeonPark`, repository `fectp`, workflow `bindings.yml`, environment
+  `pypi`. A *pending* publisher works before the project exists. No token is
+  stored anywhere.
+- **npm**: an access token allowed to publish `fectp`, saved as the repository
+  secret `NPM_TOKEN` in the environment `npm`. The package is published with
+  provenance, which links it to the workflow run that built it.
+
+Both are as permanent as crates.io: a version cannot be re-uploaded.
+
 ## Afterwards
 
 - Tag the commit, and make the tag match the published version.

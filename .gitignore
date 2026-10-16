@@ -8,3 +8,18 @@ __pycache__/
 # The TypeScript binding's one dependency, restored by `npm ci` from the
 # lockfile, which is committed.
 node_modules/
+
+# The Python package's staged shared library and build output: made for each
+# platform at packaging time, never committed.
+bindings/python/fectp/_native/
+bindings/python/build/
+bindings/python/dist/
+bindings/python/*.egg-info/
+bindings/python/LICENSE
+
+# The npm package's compiled output and staged libraries: made at packaging
+# time, never committed.
+bindings/typescript/dist/
+bindings/typescript/prebuilds/
+bindings/typescript/LICENSE
+bindings/typescript/*.tgz
