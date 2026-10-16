@@ -4313,7 +4313,12 @@ JavaScript with declarations, because Node strips types only outside
 current npm blocks install scripts by default. Installed fresh with it blocked,
 koffi loaded and called a system library: the script only copies prebuilt
 binaries it can also find where they ship. A user sees a warning and nothing
-fails. `package.json` said version 0.1.0 and `private`, through two crate
+fails. And the first wheels put the package under the wheel's `purelib`
+directory, because setuptools found nothing compiled; a shared library there is
+not a valid binary wheel, and `auditwheel` refused the Linux one outright. It
+had been visible in the Windows wheel's file list and read as harmless, since
+pip installs it either way. `setup.py` now says the distribution carries native
+code, which puts it at the wheel's root. `package.json` said version 0.1.0 and `private`, through two crate
 releases; `check-claims.py` now compares it with the workspace version, and was
 checked by moving it.
 

@@ -20,7 +20,7 @@ import os
 import re
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import Distribution, setup
 from setuptools.command.bdist_wheel import bdist_wheel
 
 
@@ -29,6 +29,20 @@ def workspace_version() -> str:
     text = (root / "Cargo.toml").read_text(encoding="utf-8")
     section = text.split("[workspace.package]", 1)[1]
     return re.search(r'^version = "([^"]+)"', section, re.M).group(1)
+
+
+class NativeDistribution(Distribution):
+    """Says the package carries native code, though none of it is an extension.
+
+    Without this setuptools files the package under the wheel's ``purelib``
+    data directory, because it found nothing compiled, and a shared library
+    there is not a valid binary wheel: ``auditwheel`` refuses it outright. The
+    first Linux wheel built did exactly that. Saying so puts the package at the
+    wheel's root, which for a wheel that is not pure is ``platlib``.
+    """
+
+    def has_ext_modules(self):
+        return True
 
 
 class PlatformWheel(bdist_wheel):
@@ -53,4 +67,8 @@ def staged_library_present() -> None:
 
 
 staged_library_present()
-setup(version=workspace_version(), cmdclass={"bdist_wheel": PlatformWheel})
+setup(
+    version=workspace_version(),
+    distclass=NativeDistribution,
+    cmdclass={"bdist_wheel": PlatformWheel},
+)
