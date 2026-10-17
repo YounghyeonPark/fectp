@@ -1,22 +1,32 @@
 # FECTP from TypeScript
 
-The sans-IO session layer, over the C ABI in [`crates/ffi`](../../crates/ffi).
+The sans-IO session layer, over the C ABI in [`crates/ffi`](https://github.com/YounghyeonPark/fectp/tree/main/crates/ffi).
 Payloads in, frames out, and back again — **you** own the socket, the thread
 and the event loop. Nothing here is `async`, because nothing here blocks.
 
 **Not audited.** Nothing in this project has been reviewed by someone who
 breaks protocols for a living.
 
-## Running it
+## Installing
+
+```bash
+npm install fectp
+```
+
+One package carrying the shared library for Windows x64, Linux x64 (glibc 2.28
+or newer) and macOS (Apple silicon and Intel), with type declarations. Node 18
+or newer. Its one dependency, `koffi`, declares an install script that recent
+npm blocks by default; it is not needed, and the warning can be ignored.
+
+## Running it from a checkout
 
 ```bash
 cargo build -p fectp-ffi --release
 cd bindings/typescript && npm ci && npm test
 ```
 
-Node 22.6 or newer runs the `.ts` files directly, so there is no build step and
-nothing compiled to go stale. The shared library is found under `target/`, or
-named through `FECTP_LIBRARY`.
+Node 22.6 or newer runs the `.ts` files directly. The shared library is found
+under `target/`, or named through `FECTP_LIBRARY`.
 
 ## What it looks like
 
@@ -96,7 +106,7 @@ keep-alive are not here** — they live in the `fectp` crate, above the layer th
 binds. A caller who needs reliable delivery builds it or does without.
 
 That trade is why the binding is this shape at all
-([OTHER-LANGUAGES.md](../../docs/OTHER-LANGUAGES.md)): binding the layer above
+([OTHER-LANGUAGES.md](https://github.com/YounghyeonPark/fectp/blob/main/docs/OTHER-LANGUAGES.md)): binding the layer above
 would mean blocking calls in an event loop that must not block, threads the
 library owns, and memory crossing the boundary in both directions.
 

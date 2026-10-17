@@ -1,21 +1,31 @@
 # FECTP from Python
 
-The sans-IO session layer, over the C ABI in [`crates/ffi`](../../crates/ffi).
+The sans-IO session layer, over the C ABI in [`crates/ffi`](https://github.com/YounghyeonPark/fectp/tree/main/crates/ffi).
 Payloads in, frames out, and back again — **you** own the socket, the thread
 and the event loop.
 
 **Not audited.** Nothing in this project has been reviewed by someone who
 breaks protocols for a living.
 
-## Running it
+## Installing
+
+```bash
+pip install fectp
+```
+
+Wheels for Windows x64, Linux x64 (glibc 2.28 or newer) and macOS (Apple
+silicon and Intel), each carrying the shared library it needs — no Rust and no
+compiler. Python 3.9 or newer. `ctypes` underneath, so nothing else is pulled
+in.
+
+## Running it from a checkout
 
 ```bash
 cargo build -p fectp-ffi --release
 python3 bindings/python/test_fectp.py
 ```
 
-`ctypes`, so there is nothing to install: the standard library and the shared
-library cargo just built. It is found under `target/`, or named through
+The shared library cargo just built is found under `target/`, or named through
 `FECTP_LIBRARY`.
 
 ## What it looks like
@@ -42,7 +52,7 @@ server_session.open(frame)                        # -> b"hello"
 `Initiator.read_response` and `Responder.write_response` **consume** the handle
 they are called on, success or failure — a handshake cannot be retried from a
 half-read state. Using one again raises rather than corrupting memory, which is
-[what happens](../../docs/DECISIONS.md) without that check: removing it takes
+[what happens](https://github.com/YounghyeonPark/fectp/blob/main/docs/DECISIONS.md) without that check: removing it takes
 this test suite from passing to the interpreter dying.
 
 ## The secret key
@@ -84,7 +94,7 @@ keep-alive are not here** — they live in the `fectp` crate, above the layer th
 binds. A caller who needs reliable delivery builds it or does without.
 
 That trade is why the binding is this shape at all
-([OTHER-LANGUAGES.md](../../docs/OTHER-LANGUAGES.md)): binding the layer above
+([OTHER-LANGUAGES.md](https://github.com/YounghyeonPark/fectp/blob/main/docs/OTHER-LANGUAGES.md)): binding the layer above
 would mean blocking calls to hold the GIL over, threads the library owns, and
 memory crossing the boundary in both directions.
 
