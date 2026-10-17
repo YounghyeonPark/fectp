@@ -18,7 +18,16 @@ on:
       - "bindings/**"
       - ".github/workflows/bindings.yml"
     tags: ["bindings-v*"]
+  # Run by hand to rebuild and re-test; with `publish` set, to publish too —
+  # for finishing a release whose tagged run failed partway, without moving the
+  # tag. Each registry refuses a version it already has, so nothing published
+  # can be published twice.
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI and npm after every install test passes"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -236,7 +245,7 @@ jobs:
 
   publish-pypi:
     name: publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/bindings-v')
+    if: startsWith(github.ref, 'refs/tags/bindings-v') || inputs.publish
     needs: [wheel-test, npm-test]
     runs-on: ubuntu-latest
     environment: pypi
@@ -249,10 +258,14 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A re-run after a partial release finds its own wheels already
+          # there; that is success, not a reason to fail.
+          skip-existing: true
 
   publish-npm:
     name: publish to npm
-    if: startsWith(github.ref, 'refs/tags/bindings-v')
+    if: startsWith(github.ref, 'refs/tags/bindings-v') || inputs.publish
     needs: [wheel-test, npm-test]
     runs-on: ubuntu-latest
     environment: npm
@@ -267,6 +280,9 @@ jobs:
         with:
           name: npm-package
           path: package
-      - run: npm publish package/fectp-*.tgz --provenance --access public
+      # `./` is load-bearing: without it npm reads `package/fectp-...tgz` as
+      # the GitHub repository `package/fectp-...`, which is how the first
+      # attempt at 0.2.1 failed — before uploading anything.
+      - run: npm publish ./package/fectp-*.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
