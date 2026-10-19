@@ -163,9 +163,13 @@ to exist first, both on the registries and neither in this repository:
   `YounghyeonPark`, repository `fectp`, workflow `bindings.yml`, environment
   `pypi`. A *pending* publisher works before the project exists. No token is
   stored anywhere.
-- **npm**: an access token allowed to publish `fectp`, saved as the repository
-  secret `NPM_TOKEN` in the environment `npm`. The package is published with
-  provenance, which links it to the workflow run that built it.
+- **npm**: a trusted publisher on `@younghyeonpark/fectp` — owner
+  `YounghyeonPark`, repository `fectp`, workflow `bindings.yml`, environment
+  `npm`. No token is stored. npm cannot configure one for a package that does
+  not exist yet, so 0.2.1, the first, was published with a short-lived token;
+  this workflow no longer reads one, and the token and its `NPM_TOKEN` secret
+  are deleted once trusted publishing is in place. The package carries
+  provenance, linking it to the run that built it.
 
 Both are as permanent as crates.io: a version cannot be re-uploaded.
 

@@ -4346,3 +4346,14 @@ with an explicit `publish` input rather than by moving a tag that had already
 published, and PyPI's step skips files it has, so the re-runs could not publish
 twice.
 
+**No token stays.** npm cannot attach a trusted publisher to a package that
+does not exist, so the first version went out on a granular token, scoped to
+writing packages and set to expire in days. With the package created, the
+workflow publishes by trusted publishing, as PyPI's always did, and reads no
+token; the token and its secret are left to be deleted, not kept as a fallback
+that would hide whether the new path works. npm also warned, on that first publish, that tokens
+which bypass two-factor authentication are being restricted for publishing —
+the token was the thing on its way out either way. The switch is proven only by
+the next release, which is the first to publish without it; a failure there
+uploads nothing, as both failures above did not.
+

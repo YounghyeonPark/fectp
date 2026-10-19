@@ -3,9 +3,9 @@
 # against what was installed — not against the checkout.
 #
 # Publishing happens only for a `bindings-v*` tag, and only after every one of
-# those installs has passed. PyPI is reached by trusted publishing (no token
-# stored here); npm by the NPM_TOKEN secret. Both live behind GitHub
-# environments, so a publish can also be made to wait for approval.
+# those installs has passed. Both registries are reached by trusted
+# publishing: each trusts this workflow, in its environment, and no token is
+# stored anywhere. Both environments can also be made to wait for approval.
 
 name: bindings
 
@@ -280,9 +280,18 @@ jobs:
         with:
           name: npm-package
           path: package
+      # Trusted publishing needs npm 11.5.1 or newer. Checked rather than
+      # upgraded in place, so what publishes is the npm this Node shipped with
+      # and a too-old one fails here, before anything is attempted.
+      - name: npm can publish by trusted publishing
+        run: |
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)"
       # `./` is load-bearing: without it npm reads `package/fectp-...tgz` as
       # the GitHub repository `package/fectp-...`, which is how the first
       # attempt at 0.2.1 failed — before uploading anything.
+      #
+      # No token: npm exchanges this job's OIDC identity for a short-lived
+      # credential, against the trusted publisher configured on the package.
+      # Provenance comes with it.
       - run: npm publish ./package/*fectp-*.tgz --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
