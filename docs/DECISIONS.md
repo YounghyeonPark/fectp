@@ -4334,3 +4334,15 @@ npm by a token in a GitHub environment. Neither runs until every install test
 on that tag has passed. RELEASING.md says what has to exist on each registry
 first.
 
+**The npm name is scoped, and two first attempts failed before it was.** The
+tagged run published the wheels and then failed at npm without uploading:
+`npm publish package/fectp-0.2.1.tgz` reads a bare relative path as a GitHub
+repository and tries to clone it, which the local tests never met because they
+used absolute paths. With `./` in front, npm refused the name itself — "too
+similar to existing package ftp", its typosquatting rule. So the npm package is
+`@younghyeonpark/fectp`, under the publishing account's own scope, which needs
+no organisation; PyPI kept `fectp`. The release was finished by a manual run
+with an explicit `publish` input rather than by moving a tag that had already
+published, and PyPI's step skips files it has, so the re-runs could not publish
+twice.
+

@@ -10,11 +10,13 @@ breaks protocols for a living.
 ## Installing
 
 ```bash
-npm install fectp
+npm install @younghyeonpark/fectp
 ```
 
 One package carrying the shared library for Windows x64, Linux x64 (glibc 2.28
-or newer) and macOS (Apple silicon and Intel), with type declarations. Node 18
+or newer) and macOS (Apple silicon and Intel), with type declarations. Scoped
+because npm refuses the bare name `fectp` as too close to the existing `ftp`;
+the Python package on PyPI is plain `fectp`. Node 18
 or newer. Its one dependency, `koffi`, declares an install script that recent
 npm blocks by default; it is not needed, and the warning can be ignored.
 
@@ -31,7 +33,7 @@ under `target/`, or named through `FECTP_LIBRARY`.
 ## What it looks like
 
 ```typescript
-import { Identity, Initiator, Responder } from "./fectp.ts";
+import { Identity, Initiator, Responder } from "@younghyeonpark/fectp";
 
 const server = Identity.generate();
 const client = Identity.generate();

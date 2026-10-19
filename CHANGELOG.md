@@ -13,8 +13,9 @@ which is the long form: this file says what changed, that one says why.
 **The Python and TypeScript bindings are packaged, with the library inside.**
 Wheels for Windows x64, Linux x64 (glibc 2.28 or newer) and macOS (both
 architectures), and one npm package carrying all three, built and
-install-tested on each platform in CI. Not yet published; RELEASING.md says
-how (D83).
+install-tested on each platform in CI: `pip install fectp`, and
+`npm install @younghyeonpark/fectp` — scoped, because npm refused the bare
+name as too close to `ftp` (D83).
 
 **A secure element or HSM can hold the key from C, Python and TypeScript.**
 `fectp_identity_from_key` takes a public key and a function that performs the

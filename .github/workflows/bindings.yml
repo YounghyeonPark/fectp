@@ -209,7 +209,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: npm-package
-          path: bindings/typescript/fectp-*.tgz
+          path: bindings/typescript/*fectp-*.tgz
 
   npm-test:
     name: npm package installed (${{ matrix.os }})
@@ -228,17 +228,17 @@ jobs:
         with:
           name: npm-package
           path: package
-      # Outside the checkout, importing "fectp" rather than the source file, so
+      # Outside the checkout, importing the package rather than the source file, so
       # what runs is the compiled package and the library it carries.
       - name: install and test
         shell: bash
         run: |
-          tarball="$PWD/$(ls package/fectp-*.tgz)"
+          tarball="$PWD/$(ls package/*fectp-*.tgz)"
           mkdir "$RUNNER_TEMP/outside" && cd "$RUNNER_TEMP/outside"
           npm init -y > /dev/null && npm pkg set type=module
           npm install "$tarball"
-          sed 's#from "./fectp.ts"#from "fectp"#' "$GITHUB_WORKSPACE/bindings/typescript/test.ts" > test.ts
-          grep -q 'from "fectp"' test.ts
+          sed 's#from "./fectp.ts"#from "@younghyeonpark/fectp"#' "$GITHUB_WORKSPACE/bindings/typescript/test.ts" > test.ts
+          grep -q 'from "@younghyeonpark/fectp"' test.ts
           node --test test.ts
 
   # ────────────────────────────────────────────────────────────── publish ──
@@ -283,6 +283,6 @@ jobs:
       # `./` is load-bearing: without it npm reads `package/fectp-...tgz` as
       # the GitHub repository `package/fectp-...`, which is how the first
       # attempt at 0.2.1 failed — before uploading anything.
-      - run: npm publish ./package/fectp-*.tgz --provenance --access public
+      - run: npm publish ./package/*fectp-*.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

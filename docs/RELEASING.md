@@ -133,7 +133,8 @@ rather than locally.
 
 ## The Python and npm packages
 
-The bindings are published separately, as `fectp` on PyPI and on npm, and they
+The bindings are published separately, as `fectp` on PyPI and
+`@younghyeonpark/fectp` on npm, and they
 are not the crates: each carries the C ABI's shared library, built for the
 platform it installs on, and the C ABI is not on crates.io at all. They follow
 the workspace version — `setup.py` reads it from `Cargo.toml`, and
