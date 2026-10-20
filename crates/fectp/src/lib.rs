@@ -70,9 +70,10 @@
 //! this protocol exists to avoid. An application that needs order sequences its
 //! own payloads.
 //!
-//! Nothing discovers the path MTU. The frame ceiling is a setting
-//! ([`set_max_datagram`]), safe anywhere at its default and reclaimable where
-//! the path is known.
+//! Path MTU discovery runs only up to a ceiling the application raises
+//! ([`set_max_datagram`]); at the default, 1200 bytes, which any path carries,
+//! there is nothing to discover. It does not control the don't-fragment bit,
+//! so a size it settles on may be one that crosses the path in pieces (D85).
 //!
 //! A `Connection` does not follow a *server* that changes address — its socket
 //! is connected to one — though an [`Endpoint`] follows a peer that does.
@@ -93,7 +94,9 @@
 
 pub mod compress;
 mod pipeline;
+mod pmtu;
 use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
+use pmtu::Pmtu;
 mod endpoint;
 pub mod udp;
 
@@ -166,7 +169,7 @@ pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};
 pub use fectp_core::reliability::{
     INITIAL_CWND, MAX_IN_FLIGHT as MAX_UNACKED, MAX_RETRIES, MIN_CWND,
 };
-pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_RELIABLE, CAP_ZSTD};
+pub use fectp_core::session::{ResumptionTicket as Ticket, CAP_PMTU_PROBE, CAP_RELIABLE, CAP_ZSTD};
 /// `StaticKey`, `DHLEN`, `ProtocolError` and `ProtocolResult` are here so that
 /// implementing a [`SharedKey`] needs nothing but this crate. `ProtocolError`
 /// is the error [`Error::Protocol`] already carries, named for the variant
@@ -177,7 +180,8 @@ pub use fectp_core::{
     StaticKey, DHLEN,
 };
 pub use udp::{
-    max_datagram, set_max_datagram, UdpTransport, DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
+    max_datagram, path_mtu_discovery, set_max_datagram, set_path_mtu_discovery, UdpTransport,
+    DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
 };
 
 /// Whether an I/O error is a receive timeout rather than a real failure.
@@ -559,7 +563,9 @@ impl std::fmt::Debug for Identity {
 pub(crate) fn local_capabilities() -> Capabilities {
     let has_zstd = cfg!(feature = "compress");
     Capabilities {
-        flags: CAP_RELIABLE | if has_zstd { CAP_ZSTD } else { 0 },
+        // Every session answers a probe, whether or not it sends any: the
+        // answer is the ordinary path response, and costs nothing to give.
+        flags: CAP_RELIABLE | CAP_PMTU_PROBE | if has_zstd { CAP_ZSTD } else { 0 },
         max_frame_size: udp::max_datagram() as u16,
         codecs: CODECS_CORE | if has_zstd { CODEC_ZSTD } else { 0 },
     }
@@ -586,14 +592,28 @@ struct Core {
     /// When something was last put on the wire, on the same clock as the
     /// reliability layer.
     last_sent_ms: u64,
+    /// What this connection has learned about its path's frame size, when it
+    /// is looking: none when discovery is off or the peer does not answer
+    /// probes, and the limit is then the ceiling, as it always was.
+    pmtu: Option<Pmtu>,
+    /// Whether anything authenticated has arrived since the handshake. Probes
+    /// wait for it, as an endpoint's do.
+    spoke: bool,
 }
 
 impl Core {
     fn new(transport: UdpTransport, link: Session) -> Self {
         let size = transport.max_datagram_size();
+        let caps = link.peer_capabilities();
+        let cap = (caps.max_frame_size as usize).min(size);
+        let pmtu =
+            (udp::path_mtu_discovery() && caps.supports_pmtu_probe() && cap > udp::BASE_DATAGRAM)
+                .then(|| Pmtu::new(cap, Instant::now()));
         Self {
             transport,
             peer: Peer::new(link, size),
+            pmtu,
+            spoke: false,
             tx: vec![0u8; size],
             inbox: VecDeque::new(),
             epoch: Instant::now(),
@@ -624,6 +644,53 @@ impl Core {
         OsRng.fill_bytes(&mut token);
         let n = self.peer.challenge(&token, &mut self.tx)?;
         self.transmit(n)
+    }
+
+    /// The largest datagram to send now.
+    ///
+    /// The peer's own limit is applied on top of this wherever it is used.
+    fn limit(&self) -> usize {
+        self.pmtu
+            .as_ref()
+            .map_or(self.transport.max_datagram_size(), Pmtu::current)
+    }
+
+    /// How long to wait for a probe's answer before asking again.
+    fn probe_retry(&self) -> Duration {
+        Duration::from_millis(self.peer.retransmit.rto_ms().into())
+    }
+
+    /// Sends whatever path MTU probes are due.
+    ///
+    /// A probe that fails to send is left to go unanswered, which is what a
+    /// size the path does not carry looks like anyway; it is not an error of
+    /// the connection's.
+    fn drive_pmtu(&mut self) {
+        if !self.spoke {
+            return;
+        }
+        let retry = self.probe_retry();
+        let Some(pmtu) = &mut self.pmtu else {
+            return;
+        };
+        let sends = pmtu.due(Instant::now(), retry);
+        for send in sends {
+            let Ok(n) = self.peer.probe(&send.token, send.size, &mut self.tx) else {
+                continue;
+            };
+            if self.transport.send(&self.tx[..n]).is_ok() {
+                self.last_sent_ms = self.now_ms();
+            }
+        }
+    }
+
+    /// How long until a probe is next due, if one will be.
+    fn pmtu_due_in(&self) -> Option<Duration> {
+        if !self.spoke {
+            return None;
+        }
+        let at = self.pmtu.as_ref()?.next_deadline(self.probe_retry())?;
+        Some(at.saturating_duration_since(Instant::now()))
     }
 
     /// When the next keep-alive is due, if any.
@@ -883,7 +950,7 @@ impl Core {
     /// a message identifier, so its limit is
     /// [`max_reliable_payload`](Self::max_reliable_payload), which is smaller.
     pub fn max_payload(&self) -> usize {
-        self.peer.max_payload(self.transport.max_datagram_size())
+        self.peer.max_payload(self.limit())
     }
 
     /// Largest slice of a split message that one
@@ -892,8 +959,7 @@ impl Core {
     /// A fragment gives up room to both the message identifier and the
     /// fragment descriptor.
     pub fn max_fragment_payload(&self) -> usize {
-        self.peer
-            .max_fragment_payload(self.transport.max_datagram_size())
+        self.peer.max_fragment_payload(self.limit())
     }
 
     /// Largest uncompressed payload for a single
@@ -903,8 +969,7 @@ impl Core {
     /// identifier a reliable frame carries. Anything above this needs
     /// [`send_reliable`](Self::send_reliable), which splits it across frames.
     pub fn max_reliable_payload(&self) -> usize {
-        self.peer
-            .payload_room(self.transport.max_datagram_size(), true, false)
+        self.peer.payload_room(self.limit(), true, false)
     }
 
     /// Pads outgoing frames to a 64-byte boundary to mask payload lengths.
@@ -971,7 +1036,7 @@ impl Core {
             payload_type,
             data: data.to_vec(),
             fragment: None,
-            limit: self.transport.max_datagram_size(),
+            limit: self.limit(),
         });
         Ok(id)
     }
@@ -983,7 +1048,7 @@ impl Core {
         payload_type: PayloadType,
         message_id: Option<MessageId>,
     ) -> Result<usize> {
-        let limit = self.transport.max_datagram_size();
+        let limit = self.limit();
         self.peer
             .seal(data, payload_type, message_id, None, limit, &mut self.tx)
     }
@@ -999,11 +1064,21 @@ impl Core {
         // and usually sends nothing, and stamping unconditionally would mean
         // the clock always read "just now" and a keep-alive never came due.
         let stamp = &mut self.last_sent_ms;
+        let mut large_resent = false;
         self.peer.drive_retransmits(now, &mut self.tx, |frame| {
+            large_resent |= frame.len() > udp::BASE_DATAGRAM;
             transport.send(frame).map_err(Error::Io)?;
             *stamp = now;
             Ok(())
-        })
+        })?;
+        // A large frame needing another go is ordinary loss, or a path that
+        // no longer carries large frames. Asking is how to tell.
+        if large_resent {
+            if let Some(pmtu) = &mut self.pmtu {
+                pmtu.suspect(Instant::now());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1278,7 +1353,7 @@ impl Connection {
     pub fn send_reliable(&self, data: &[u8], payload_type: PayloadType) -> Result<()> {
         {
             let mut core = self.core()?;
-            let limit = core.transport.max_datagram_size();
+            let limit = core.limit();
 
             // One frame is the common case and does not need the queue: it goes
             // straight out, as it always has.
@@ -1474,6 +1549,7 @@ impl Connection {
             {
                 core.send_keepalive()?;
             }
+            core.drive_pmtu();
             let now = core.now_ms();
             let until_retransmit = core
                 .peer
@@ -1487,10 +1563,16 @@ impl Connection {
             let until_keepalive = core
                 .keepalive_due_ms()
                 .map(|at| Duration::from_millis(at.saturating_sub(now)));
-            [until_retransmit, until_deadline, until_keepalive]
-                .into_iter()
-                .flatten()
-                .min()
+            let until_probe = core.pmtu_due_in();
+            [
+                until_retransmit,
+                until_deadline,
+                until_keepalive,
+                until_probe,
+            ]
+            .into_iter()
+            .flatten()
+            .min()
         };
 
         let mut reader = self.reader.lock().map_err(|_| Error::Closed)?;
@@ -1520,11 +1602,19 @@ impl Connection {
             transport: sender,
             tx,
             inbox,
+            pmtu,
+            spoke,
             ..
         } = &mut *core;
         let ingested = peer.ingest(&mut rx[..n], now, tx, &mut ack_len)?;
         if ack_len > 0 {
             sender.send(&tx[..ack_len])?;
+        }
+        if !matches!(ingested, Ingested::Rejected) {
+            *spoke = true;
+        }
+        if let (Ingested::PathValidated(token), Some(pmtu)) = (&ingested, pmtu) {
+            pmtu.answered(token, Instant::now());
         }
 
         let (len, compressed) = match ingested {

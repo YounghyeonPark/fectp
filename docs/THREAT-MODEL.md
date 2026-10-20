@@ -187,6 +187,13 @@ reflector. **Answer 0-RTT with a small unreliable reply, or wait for the peer
 to say something authenticated first** — `Event::Message` from that peer is
 that proof, and it is the same signal the eviction order already relies on.
 
+Path MTU probes (D85) are held to the same rule as keep-alives: none is sent
+until the peer has said something authenticated. They are the largest frames
+the protocol sends unasked — several sizes at once, three tries each — so
+sending them on a handshake alone would have been a reflector of exactly this
+kind. Their answer is 38 bytes whatever the probe's size, and a padded answer
+is refused, so a probe cannot ask for more than it sent.
+
 The counterweight, measured in the same file: a session that has authenticated
 nothing is the first thing evicted, so this does not also buy table space.
 

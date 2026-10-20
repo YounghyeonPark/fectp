@@ -6,7 +6,7 @@
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fectp_core::Transport;
 
@@ -42,6 +42,29 @@ pub(crate) fn handshake_datagram() -> usize {
     max_datagram().min(BASE_DATAGRAM)
 }
 
+/// Whether sessions look for a larger frame size than the base.
+static DISCOVERY: AtomicBool = AtomicBool::new(true);
+
+/// Whether path MTU discovery is on.
+pub fn path_mtu_discovery() -> bool {
+    DISCOVERY.load(Ordering::Relaxed)
+}
+
+/// Turns path MTU discovery on or off, for sessions established afterwards.
+///
+/// On by default. With it on, a session whose peer answers probes starts at
+/// 1200 bytes and probes its way up towards the ceiling — the smaller of
+/// [`max_datagram`] and the peer's own — and falls back to 1200 when a large
+/// reliable frame has to be resent and a check of the size in use goes
+/// unanswered, or at the next ten-minute re-check. Off, a session sends at the ceiling from the start, which
+/// is how every session behaved before discovery existed: right where the
+/// path is known, and silent loss where it is not.
+///
+/// It decides nothing while the ceiling is at its default, which is the base.
+pub fn set_path_mtu_discovery(enabled: bool) {
+    DISCOVERY.store(enabled, Ordering::Relaxed);
+}
+
 /// The ceiling in force, shared by every connection in this process.
 static MAX_DATAGRAM: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DATAGRAM);
 
@@ -65,11 +88,23 @@ pub fn max_datagram() -> usize {
 /// handshake, as the largest frame this side can receive, and a peer that has
 /// already been told 1200 will keep sending 1200.
 ///
-/// **Raise it only where the path is known.** Nothing here discovers the MTU —
-/// there is no probe and no blackhole detection — so a value the path cannot
-/// carry means datagrams that vanish with no error anywhere. A LAN, a tunnel of
-/// known overhead, or a link you configured yourself: those are the cases. The
-/// open internet is not one.
+/// **Raising it is what lets a session look for more.** With
+/// [path MTU discovery](set_path_mtu_discovery) on, as it is by default, a
+/// session whose peer answers probes starts at 1200 regardless, sends probes up
+/// to the ceiling, uses the largest size that is answered, and falls back to
+/// 1200 when a large reliable frame needs resending and a check of that size
+/// goes unanswered, or at the next ten-minute re-check; large *unreliable*
+/// frames lost in between are lost silently. Handshakes stay at 1200 whatever
+/// this says, since nothing about the path is known while one runs.
+///
+/// What an answered probe proves is that a frame that size *arrived*. This
+/// crate does not control the don't-fragment bit, so it may have been split on
+/// the way — by a router, or by the sending host once it has learned the
+/// path's MTU, on IPv6 as on IPv4 — and a session can settle on frames that
+/// cross in pieces: delivered, but lost whenever either piece is.
+/// With discovery off, or with a peer that does not answer probes, sessions
+/// send at the ceiling from the start, and a value the path cannot carry means
+/// datagrams that vanish with no error anywhere.
 ///
 /// Clamped to [`MIN_MAX_DATAGRAM`] and to 65535, which is what the capability
 /// field can express.

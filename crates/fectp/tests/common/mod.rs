@@ -87,9 +87,10 @@ impl Echo {
                         if echo {
                             // `send` is one frame, so a message that arrived
                             // split across several cannot go back that way.
-                            // Falling back rather than checking a limit first:
-                            // the frame size is the peer's to advertise and an
-                            // `Endpoint` does not expose it per peer.
+                            // Falling back on failure rather than checking
+                            // `max_payload` first, which with path MTU
+                            // discovery can change between the check and the
+                            // send.
                             if server.send(peer, &data, PayloadType::Opaque).is_err() {
                                 let _ = server.send_reliable(peer, &data, PayloadType::Opaque);
                             }

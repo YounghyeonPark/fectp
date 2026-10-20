@@ -572,7 +572,7 @@ These are unimplemented, not overlooked.
 | **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
-| **Path MTU discovery** | Nothing probes the path. The ceiling is settable ([D36](#d36--the-frame-ceiling-is-a-setting-not-a-constant)) but not discovered. | 1200 is what an arbitrary internet path carries; a LAN carries 1472, and reclaiming that is the operator's call because a value the path cannot take loses datagrams with no error anywhere. |
+| **Fragmentation is invisible to the frame-size search** | Sessions search for a frame size up to a raised ceiling ([D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)), but this crate does not control the don't-fragment bit, so a probe split on the way — by a router or by the sending host, on IPv4 or IPv6 — still comes back answered. | Setting the bit takes `setsockopt`, which needs `unsafe` this crate forbids, or a dependency that holds it, and on Windows none is safe. The default ceiling stays at 1200, where the question does not arise. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. A consequence of [D14](#d14--many-peers-share-one-socket-through-an-event-loop), not a defect in it. | What a datagram costs no longer grows with the number of peers ([D62](#d62--the-loop-was-charging-every-datagram-for-the-whole-peer-table)), so what is left is the queueing itself. Measured since, once BENCHMARKS.md §11's table was given a same-run control and its conditions interleaved: two dozen busy neighbours cost the median about half again (1.47x) and the tail about sevenfold (280 us against 43 idle), on a run whose control landed at 1.00x. The earlier reading here — no control, a conclusion that did not reproduce — was not evidence either way, and is what prompted the rework. |
 | **Counter exhaustion ends a session** | A session ends after 2^64 frames. Keys are replaced along the way ([D50](#d50--one-key-does-not-last-a-whole-session)), but the counter is never reset — it is the nonce. | Not reachable in practice: at a million frames a second it is half a million years. The error path exists (`Error::NonceExhausted`) because a bound with no code behind it is a comment. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
@@ -1429,6 +1429,11 @@ a blackhole, and a value the path cannot carry means datagrams that vanish with
 no error at either end — the failure this default exists to avoid. The
 documentation says so in every place the setting appears. Discovery is the
 larger job and remains unbuilt.
+
+*Since [D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)*: raising
+the ceiling now starts a search rather than an assumption. It still governs
+both halves, but the sending half is reached by probing, and handshakes stay at
+1200.
 
 Buffers scale with it, so raising it costs memory per connection and per
 endpoint. `fectp-core` is untouched: a microcontroller sets its own
@@ -4423,3 +4428,93 @@ fresh from both registries afterwards, outside the checkout: 16 and 17 tests
 passed against the published copies, the npm package carrying all four
 libraries.
 
+## D85 — Path MTU discovery without the don't-fragment bit
+
+**Problem**: D36 made the frame ceiling a setting, so a LAN could reclaim the
+fifth of every frame that 1200 bytes gives away. But a raised ceiling was an
+assumption: nothing checked the path carried it, and a value it could not carry
+meant datagrams vanishing with no error at either end. The setting was safe
+only where an operator already knew the answer.
+
+**Decision**: a session searches. A probe is a path challenge padded to the size
+under test (SPEC §5.8.7), answered by the ordinary 38-byte response — so the
+answer proves that size arrived, and the exchange shrinks rather than amplifies.
+
+- **Who is probed.** Only a peer that sets capability bit `PMTU_PROBE`. Before
+  the bit existed, a receiver refused a padded challenge without answering,
+  which a sender cannot tell from loss; the bit is how silence comes to mean
+  something. Older peers ignore it, as reserved capability bits must be ignored,
+  so the wire version stays 1, and toward them a session sends at the ceiling
+  as before.
+- **The search.** Every candidate at once — 1280, 1400, 1452, 1472 and the
+  ceiling, above the current size and within both sides' limits — each with
+  its own token, three tries apiece, keeping the largest answered. One round
+  trip in the usual case; a binary search over the same range takes nine.
+  Repeated every ten minutes (RFC 8899's raise timer), and each repeat checks
+  the size in use as well as the ones above it.
+- **Falling back.** A frame larger than 1200 needing a resend is ordinary loss,
+  or a path that stopped carrying large frames. The resend prompts a check of
+  the size in use; if nothing the check sends is answered, the session drops to
+  1200 and searches again a minute later. Frames already sealed at the larger
+  size keep it: a message in flight cannot be re-cut, since every fragment but
+  the last must be the same length, so those are lost and reported as lost.
+  That needed a fix of its own first: resends had been resealed at the
+  session's limit *now*, which was safe only while it never moved. Lowered, it
+  refused them, and the error left `Endpoint::poll` and stopped service to
+  every peer. Each frame now keeps the limit it was first sealed at.
+- **When.** Not until the peer has sent something authenticated. A handshake
+  can be completed from a forged source address, and probes are the largest
+  thing an endpoint sends unasked — several sizes, three tries each — so
+  probing on a handshake alone would let one datagram aim kilobytes at a
+  victim. Keep-alives wait for the same proof (D57). A session that moves
+  starts again from 1200: what was learned was learned about the old path, the
+  reasoning SPEC §5.8.4 applies to timing and capacity. Handshake frames stay at 1200 whatever the ceiling, since
+  nothing about the path is known while one runs.
+- **Where.** Both an `Endpoint` and a `Connection`. A `Connection` has no loop
+  of its own, so it searches while it is receiving or flushing, as its
+  keep-alives and retransmissions run. `Endpoint::max_payload(peer)` exposes
+  the moving limit, which a `Connection` already had.
+
+**What it cannot see: fragmentation.** A probe tests the path only if nothing
+on the way is allowed to split it, and this crate does not control the bit that
+says so. Where the sending system leaves it clear on IPv4 — macOS and Windows
+by default — a router with a smaller MTU splits the probe, the pieces arrive,
+and it is answered. Where the system sets it — Linux, for IPv4 and IPv6 alike —
+the first try is dropped with an ICMP error, the kernel learns the smaller MTU,
+and from then on splits the datagram itself, so the second or third try is
+answered. IPv6 routers never fragment, but a sending host does. Neither family
+is exempt: what discovery measures is that a size *arrives*, not that it
+arrives whole.
+
+Setting the bit is a `setsockopt` call that neither `std` nor `socket2`
+exposes. `nix` and `rustix` do, safely, on Linux and macOS; Windows has no safe
+route at all. So the choices were `unsafe` — forbidden in this crate
+([D75](#d75--what-an-audit-of-the-threat-model-found-including-two-things-that-were-not-true)) — a small crate of its own to
+hold it, published and maintained beside the two that exist, or a
+platform-specific dependency that would still leave Windows open. None was
+taken.
+
+The consequence is a session that can settle on frames that cross in pieces.
+They are delivered — but lost whenever either piece is, and blocked outright by
+a middlebox that drops fragments, which the fall-back then catches as a path
+that stopped carrying large frames, if the traffic is reliable.
+
+**So the default does not move.** The plan had been to raise
+`DEFAULT_MAX_DATAGRAM` to 1472 once discovery existed, so every session would
+search. Without the bit, that would have every IPv4 session behind a smaller
+MTU — PPPoE's 1492, most tunnels — able to settle on fragmented frames by
+default, on either family. At
+1200 nothing is searched for, and the default stays what it was: safe anywhere.
+Discovery is for an application that raises the ceiling, where it replaces
+D36's "know the path or lose datagrams silently" with "probe the path, and fall
+back when it changes".
+
+**Verified by breaking it.** Through a relay that drops what is over a size,
+changeable mid-session: a session rises to the ceiling, settles at 1400 behind
+a 1400 limit, falls back when the relay shrinks to 1200 and still delivers,
+starts again after a move, sends nothing over 1200 before the peer has spoken,
+and with discovery off sends at the ceiling from the start. Each piece of the
+wiring was removed in turn — answers ignored, no check on a large resend, no
+reset on a move, a fall-back not applied, probing before the peer has spoken —
+and a test failed for each. The last needed the test to wake the loop with
+keep-alives, because a quiet session never runs the pass that would probe.

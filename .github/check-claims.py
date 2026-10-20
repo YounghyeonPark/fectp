@@ -62,9 +62,13 @@ NOISE = {
 # Absent-claims whose words appear in a public name for an unrelated reason.
 # Each entry is a claim phrase and why the match is not a contradiction.
 ALLOWED = {
-    "path mtu discovery":
-        "`path` matches PathChallenge and PATH_TOKEN_LEN, which are the address "
-        "validation of SPEC 5.8 and have nothing to do with discovering an MTU.",
+    "when and what to probe":
+        "`probe` matches CAP_PMTU_PROBE, the capability for the probe frame "
+        "that SPEC 5.8.7 does specify; what section 10 leaves open is the "
+        "schedule, which has no name of its own to collide with.",
+    "peer discovery and nat traversal":
+        "`discovery` matches set_path_mtu_discovery, which finds a frame size "
+        "for a peer already connected, not the peer.",
     "ordering":
         "`order` matches nothing built; reordering *tolerance* is a different "
         "property and is in the Working list under its own name.",

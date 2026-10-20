@@ -62,6 +62,8 @@ use fectp_core::PublicKey;
 use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
+use crate::pmtu::Pmtu;
+use crate::udp::BASE_DATAGRAM;
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
     PayloadType, Result, SharedKey, MAX_RETRIES,
@@ -533,6 +535,12 @@ struct PeerEntry {
     /// followed it would be pointing its data stream at whoever was named.
     /// Nothing is sent here but the challenge until the answer comes back.
     probe: Option<Probe>,
+    /// What this session has learned about its path's frame size, when it is
+    /// looking. `datagram_limit` follows it.
+    ///
+    /// None when discovery is off or the peer does not answer probes; the
+    /// limit is then the ceiling, as it always was.
+    pmtu: Option<Pmtu>,
     /// Whether anything has ever arrived from this peer since.
     ///
     /// This is what separates a flood from a quiet peer. Completing a
@@ -883,6 +891,7 @@ impl Endpoint {
                 }
                 self.drive_liveness();
                 self.drive_keepalives()?;
+                self.drive_pmtu();
                 self.next_wake = self.earliest_deadline();
             }
             // The exception: a queue moves when an acknowledgement frees
@@ -1085,16 +1094,31 @@ impl Endpoint {
         // The frame authenticated, which is the first thing a peer does that
         // an attacker completing handshakes never does. It is what keeps this
         // session off the eviction list, and what keeps it off the timeout.
+        let first_word = !entry.spoke;
         entry.spoke = true;
         entry.last_heard = Instant::now();
         // It answered, so it has the handshake response and will not ask again.
         entry.handshake_reply = None;
+        // Probes wait for this, for the reason keep-alives do: until the peer
+        // has spoken, the address on file is only what a datagram claimed,
+        // and a probe is the largest thing this endpoint sends unasked.
+        if first_word && entry.pmtu.is_some() {
+            self.wake_at(Instant::now());
+        }
 
         if established {
             if ack_len > 0 {
                 send_datagram(&self.socket, &self.ack[..ack_len], from)?;
                 if let Some(entry) = self.peers.get_mut(&peer_id) {
                     entry.last_sent = Instant::now();
+                }
+            }
+            if let Ingested::PathValidated(token) = &ingested {
+                if let Some(entry) = self.peers.get_mut(&peer_id) {
+                    if let Some(pmtu) = &mut entry.pmtu {
+                        pmtu.answered(token, Instant::now());
+                        entry.datagram_limit = pmtu.current();
+                    }
                 }
             }
         } else if let Ingested::PathValidated(token) = ingested {
@@ -1210,8 +1234,13 @@ impl Endpoint {
         entry.addr = from;
         entry.probe = None;
         // The round-trip time and window were earned on the old path and do
-        // not describe this one.
+        // not describe this one, and nor was the frame size.
         entry.peer.forget_path();
+        let moved_at = Instant::now();
+        if let Some(pmtu) = &mut entry.pmtu {
+            pmtu.reset(moved_at);
+            entry.datagram_limit = pmtu.current();
+        }
         let session_id = entry.session_id;
 
         self.routes.remove(&(previous, session_id));
@@ -1233,6 +1262,7 @@ impl Endpoint {
             }
         }
 
+        self.wake_at(moved_at);
         Some(Event::PeerMoved {
             peer: peer_id,
             from: previous,
@@ -1358,11 +1388,9 @@ impl Endpoint {
             .insert(link.resumption_ticket(), *link.remote_static());
 
         let session_id = link.session_id();
-        let datagram_limit = (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
-
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
-        self.file(peer_id, link, addr, session_id, datagram_limit);
+        self.file(peer_id, link, addr, session_id);
 
         Event::Connected {
             peer: peer_id,
@@ -1386,8 +1414,7 @@ impl Endpoint {
         self.tickets
             .insert(link.resumption_ticket(), *link.remote_static());
         let session_id = link.session_id();
-        let datagram_limit = (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
-        self.file(peer_id, link, addr, session_id, datagram_limit);
+        self.file(peer_id, link, addr, session_id);
 
         Event::Connected {
             peer: peer_id,
@@ -1723,15 +1750,18 @@ impl Endpoint {
         }
     }
 
-    fn file(
-        &mut self,
-        peer_id: PeerId,
-        link: Session,
-        addr: SocketAddr,
-        session_id: u32,
-        datagram_limit: usize,
-    ) {
+    fn file(&mut self, peer_id: PeerId, link: Session, addr: SocketAddr, session_id: u32) {
         self.make_room();
+
+        // The most this session may ever send: what the peer can take, or
+        // what this side allows, whichever is less. With discovery, it starts
+        // at the base and earns the rest.
+        let cap = (link.peer_capabilities().max_frame_size as usize).min(max_datagram());
+        let pmtu = (crate::udp::path_mtu_discovery()
+            && link.peer_capabilities().supports_pmtu_probe()
+            && cap > BASE_DATAGRAM)
+            .then(|| Pmtu::new(cap, Instant::now()));
+        let datagram_limit = pmtu.as_ref().map_or(cap, Pmtu::current);
 
         // A reconnect from the same address and session id replaces the old
         // entry rather than shadowing it.
@@ -1761,6 +1791,7 @@ impl Endpoint {
                 last_sent: Instant::now(),
                 handshake_reply: None,
                 probe: None,
+                pmtu,
                 spoke: false,
                 datagram_limit,
             },
@@ -1878,9 +1909,19 @@ impl Endpoint {
             .min()
             .map(|at| now + Duration::from_millis(at.saturating_sub(now_ms)));
         let handshake = self.outbound.values().map(|o| o.next_attempt).min();
+        let pmtu = self
+            .peers
+            .values()
+            .filter(|e| e.spoke)
+            .filter_map(|e| {
+                let retry = Duration::from_millis(e.peer.retransmit.rto_ms().into());
+                e.pmtu.as_ref()?.next_deadline(retry)
+            })
+            .min();
         [
             retransmit,
             handshake,
+            pmtu,
             self.next_keepalive().map(|d| now + d),
             self.next_liveness_check().map(|d| now + d),
         ]
@@ -1972,6 +2013,36 @@ impl Endpoint {
         Ok(())
     }
 
+    /// Sends whatever path MTU probes are due, to peers that have spoken.
+    ///
+    /// A probe that fails to send is left to go unanswered: a size the
+    /// socket refuses is a size the path does not carry, which is exactly
+    /// what an unanswered probe concludes. Treating it as an error would end
+    /// the poll loop for every peer over one session's search.
+    fn drive_pmtu(&mut self) {
+        let now = Instant::now();
+        for entry in self.peers.values_mut() {
+            if !entry.spoke {
+                continue;
+            }
+            let Some(pmtu) = &mut entry.pmtu else {
+                continue;
+            };
+            let retry = Duration::from_millis(entry.peer.retransmit.rto_ms().into());
+            let sends = pmtu.due(now, retry);
+            // A search that ran out may have fallen back.
+            entry.datagram_limit = pmtu.current();
+            for send in sends {
+                let Ok(n) = entry.peer.probe(&send.token, send.size, &mut self.tx) else {
+                    continue;
+                };
+                if crate::udp::send_to(&self.socket, &self.tx[..n], entry.addr).is_ok() {
+                    entry.last_sent = now;
+                }
+            }
+        }
+    }
+
     /// When the earliest keep-alive falls due, if any.
     fn next_keepalive(&self) -> Option<Duration> {
         let every = self.keepalive?;
@@ -1994,11 +2065,20 @@ impl Endpoint {
             let addr = entry.addr;
             let socket = &self.socket;
             let stamp = &mut entry.last_sent;
+            let mut large_resent = false;
             entry.peer.drive_retransmits(now, &mut self.tx, |frame| {
+                large_resent |= frame.len() > BASE_DATAGRAM;
                 send_datagram(socket, frame, addr)?;
                 *stamp = Instant::now();
                 Ok(())
             })?;
+            // A large frame needing a second go is ordinary loss, or a path
+            // that no longer carries large frames. Asking is how to tell.
+            if large_resent {
+                if let Some(pmtu) = &mut entry.pmtu {
+                    pmtu.suspect(Instant::now());
+                }
+            }
 
             // Anything given up on above that no queue is waiting for. A
             // fragmented message reports itself when its queue finishes; this
@@ -2013,6 +2093,18 @@ impl Endpoint {
             }
         }
         Ok(())
+    }
+
+    /// The largest payload one frame to `peer` carries now, the most
+    /// [`send`](Self::send) accepts.
+    ///
+    /// It can change during a session. With path MTU discovery on, a session
+    /// starts at what any path carries, rises as larger frames are confirmed,
+    /// and falls back when a large reliable frame's resend prompts a check that
+    /// goes unanswered; read it when sizing a message, not once at connect.
+    pub fn max_payload(&self, peer: PeerId) -> Result<usize> {
+        let entry = self.peers.get(&peer).ok_or(Error::UnknownPeer)?;
+        Ok(entry.peer.max_payload(entry.datagram_limit))
     }
 
     /// Sends `data` to one peer, unreliably.

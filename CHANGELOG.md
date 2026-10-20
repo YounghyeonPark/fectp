@@ -10,7 +10,28 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
-Nothing yet.
+**Path MTU discovery, up to a ceiling you raise.** With `set_max_datagram`
+above 1200, a session whose peer supports it starts at 1200, probes upward,
+and uses the largest size answered. It falls back to 1200 when a large reliable
+frame has to be resent and a check of the size in use goes unanswered, or at
+the next ten-minute re-check. On by default; `set_path_mtu_discovery(false)` restores sending at
+the ceiling from the start. At the default ceiling of 1200 nothing changes.
+fectp does not control the don't-fragment bit, so a size that crosses in
+pieces can be settled on (D85). New capability bit `CAP_PMTU_PROBE` (SPEC's
+`PMTU_PROBE`) and a padded path challenge
+(SPEC §5.8.7); older peers ignore the bit and are never probed, and the wire
+version is still 1.
+
+**`Endpoint::max_payload(peer)`**, since the limit can now move during a
+session. `Connection::max_payload` and its siblings move the same way.
+
+**Handshake frames stay at 1200 bytes** whatever the ceiling is raised to,
+including a handshake reply and data sent with the opening frame: nothing
+about the path is known while a handshake runs.
+
+**A retransmission is resealed at the size it was first sent at.** It had been
+resealed at the session's current limit, which never moved before; lowered, it
+refused the frame and the error ended `Endpoint::poll` for every peer.
 
 ## 0.2.2 — 2026-10-20
 

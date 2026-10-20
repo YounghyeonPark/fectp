@@ -92,6 +92,10 @@ fn raising_the_ceiling_puts_more_in_every_frame() {
     const ETHERNET: usize = 1472;
     fectp::set_max_datagram(ETHERNET);
     assert_eq!(fectp::max_datagram(), ETHERNET);
+    // Told, not searched for: with discovery on, a session would start at
+    // 1200 and probe its way up, which `path_mtu.rs` tests. This is the mode
+    // for a path the operator already knows.
+    fectp::set_path_mtu_discovery(false);
 
     // A fresh endpoint, because the value travels in the handshake: a peer
     // already told 1200 goes on believing it.
@@ -128,6 +132,7 @@ fn raising_the_ceiling_puts_more_in_every_frame() {
     // Restore, so that anything added to this file later starts from the
     // default rather than from whatever the previous test left behind.
     fectp::set_max_datagram(fectp::DEFAULT_MAX_DATAGRAM);
+    fectp::set_path_mtu_discovery(true);
 }
 
 /// The ceiling is clamped, because both ends of the range break something.

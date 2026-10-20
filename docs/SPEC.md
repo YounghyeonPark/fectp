@@ -1253,9 +1253,10 @@ These are absent by omission and remain to be defined:
 - **Ordering.** Deliberately absent, not merely unspecified; see §5.5.
 - **Delayed acknowledgement.** Acknowledgements are sent per message; no
   batching algorithm is defined.
-- **Path MTU discovery.** The probe is specified (§5.8.7); the search is not.
-  Which sizes to try, when, and how to tell a path that stopped carrying large
-  frames from one that is losing everything are each implementation's own.
+- **When and what to probe.** The probe path MTU discovery uses is specified
+  (§5.8.7); the search is not. Which sizes to try, when, and how to tell a path
+  that stopped carrying large frames from one that is losing everything are
+  each implementation's own.
 - **Key distribution.** Obtaining the responder's static public key is out of
   scope. So is distributing the first ticket, which falls out of the full
   handshake.

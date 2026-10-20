@@ -213,6 +213,7 @@ without limit. Progress happens inside `poll`.
 | `public_key()` | This endpoint's static key, in public-key mode. |
 | `peers()` / `peer_count()` | Who is connected. |
 | `peer_public_key(peer)` / `peer_addr(peer)` | About one of them. |
+| `max_payload(peer)` | Largest `send` to one peer now. Moves with path MTU discovery. |
 | `unacknowledged(peer)` | Reliable messages still in flight to one peer. |
 | `outstanding_tickets()` | Resumption tickets issued and not yet redeemed. |
 
@@ -270,6 +271,8 @@ processes so the key genuinely has to be copied between them.
 |---|---|
 | `max_datagram()` | The largest datagram this process will send or advertise. |
 | `set_max_datagram(n)` | Raises or lowers it. Clamped to `MIN_MAX_DATAGRAM..=65535`. |
+| `path_mtu_discovery()` | Whether sessions search for a size above 1200. |
+| `set_path_mtu_discovery(on)` | Turns that on or off, for sessions established afterwards. On by default. |
 
 `DEFAULT_MAX_DATAGRAM` is 1200, which any internet path carries without
 fragmenting. On ethernet that leaves 272 bytes of every frame unused — 1472 is
@@ -280,10 +283,20 @@ peer's advertised limit could only ever lower it.
 network this process sits on rather than to a connection, and the value travels
 to the peer inside the handshake: one already told 1200 keeps sending 1200.
 
-**Nothing discovers the MTU.** There is no probe and no blackhole detection, so
-a value the path cannot carry means datagrams that disappear with no error. Set
-it where the path is known — a LAN, a tunnel of known overhead — and leave it
-alone otherwise.
+**Raised, it is searched for, not assumed.** Each session starts at 1200 and
+probes upward (SPEC §5.8.7) and uses the largest size answered. It falls back
+to 1200 when a large reliable frame has to be resent and a check of the size in
+use goes unanswered; otherwise the ten-minute re-check is what notices, so large
+*unreliable* frames lost in between are lost silently. Read
+`max_payload` when sizing a message, not once at connect. Handshakes stay at
+1200. A peer that does not answer probes — any before this — is sent at the
+ceiling from the start, as is everyone with discovery off.
+
+**An answer proves arrival, not wholeness.** fectp does not control the
+don't-fragment bit, so a size split on the way — by a router, or by the sending
+host, on IPv4 or IPv6 — can still be answered, and settled on
+([D85](DECISIONS.md#d85--path-mtu-discovery-without-the-dont-fragment-bit)).
+Where that matters, set the ceiling to what the path carries whole.
 
 ---
 

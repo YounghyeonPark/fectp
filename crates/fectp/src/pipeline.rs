@@ -713,6 +713,16 @@ impl Peer {
         Ok(self.session.seal_path_challenge(token, out)?)
     }
 
+    /// Seals a path MTU probe of exactly `size` bytes.
+    pub fn probe(
+        &mut self,
+        token: &[u8; PATH_TOKEN_LEN],
+        size: usize,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        Ok(self.session.seal_path_probe(token, size, out)?)
+    }
+
     /// Discards what was measured about the path this session used to be on.
     pub fn forget_path(&mut self) {
         self.retransmit.forget_path();
