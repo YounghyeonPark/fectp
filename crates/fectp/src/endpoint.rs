@@ -1780,10 +1780,9 @@ impl Endpoint {
                 continue;
             };
             let addr = entry.addr;
-            let limit = entry.datagram_limit;
             let socket = &self.socket;
             let stamp = &mut entry.last_sent;
-            let finished = entry.peer.drive_queue(now, limit, &mut self.tx, |frame| {
+            let finished = entry.peer.drive_queue(now, &mut self.tx, |frame| {
                 send_datagram(socket, frame, addr)?;
                 *stamp = Instant::now();
                 Ok(())
@@ -1991,16 +1990,13 @@ impl Endpoint {
                 continue;
             };
             let addr = entry.addr;
-            let limit = entry.datagram_limit;
             let socket = &self.socket;
             let stamp = &mut entry.last_sent;
-            entry
-                .peer
-                .drive_retransmits(now, limit, &mut self.tx, |frame| {
-                    send_datagram(socket, frame, addr)?;
-                    *stamp = Instant::now();
-                    Ok(())
-                })?;
+            entry.peer.drive_retransmits(now, &mut self.tx, |frame| {
+                send_datagram(socket, frame, addr)?;
+                *stamp = Instant::now();
+                Ok(())
+            })?;
 
             // Anything given up on above that no queue is waiting for. A
             // fragmented message reports itself when its queue finishes; this
@@ -2077,6 +2073,7 @@ impl Endpoint {
                 payload_type,
                 data: data.to_vec(),
                 fragment: None,
+                limit,
             });
             // A retransmission is now pending, and the loop only wakes for
             // work it has been told about.

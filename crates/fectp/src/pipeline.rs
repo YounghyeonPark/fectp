@@ -40,6 +40,11 @@ pub(crate) struct Queued {
     payload_type: PayloadType,
     data: Vec<u8>,
     per_fragment: usize,
+    /// The datagram limit the message was cut for. Every fragment is sealed
+    /// against it, however the session's limit moves afterwards: the
+    /// receiver needs every fragment but the last to be the same length
+    /// (SPEC §5.6), so a message in flight cannot be re-cut.
+    limit: usize,
     count: u16,
     /// Next fragment to hand to the window.
     next: u16,
@@ -66,6 +71,17 @@ pub(crate) struct Pending {
     /// fragment would go out looking like a whole message and be delivered as
     /// one.
     pub fragment: Option<Fragment>,
+    /// The datagram limit this was first sealed against, and so the one every
+    /// retransmission is sealed against too.
+    ///
+    /// Resealing at whatever the session's limit is *now* used to be safe
+    /// only because that limit never moved. Once it can — path MTU discovery
+    /// lowers it when large frames stop arriving — a frame first sealed at a
+    /// higher limit no longer fits, `seal` refuses it, and the error leaves
+    /// `Endpoint::poll` and stops service to every peer. Kept at its own size,
+    /// a frame the path can no longer carry runs out of retries like any other
+    /// lost message, and is reported as one.
+    pub limit: usize,
 }
 
 /// Messages a receiver will reassemble at once.
@@ -575,6 +591,7 @@ impl Peer {
             payload_type,
             data: data.to_vec(),
             per_fragment,
+            limit: datagram_limit,
             count,
             next: 0,
             outstanding: Vec::new(),
@@ -591,7 +608,6 @@ impl Peer {
     pub fn drive_queue<F>(
         &mut self,
         now_ms: u64,
-        datagram_limit: usize,
         tx: &mut [u8],
         mut send: F,
     ) -> Result<Option<Finished>>
@@ -637,26 +653,21 @@ impl Peer {
             let end = (start + job.per_fragment).min(job.data.len());
             let chunk = job.data[start..end].to_vec();
             let payload_type = job.payload_type;
+            let limit = job.limit;
             let fragment = Fragment {
                 message: job.message,
                 index: job.next,
                 count: job.count,
             };
 
-            let n = self.seal(
-                &chunk,
-                payload_type,
-                Some(id),
-                Some(fragment),
-                datagram_limit,
-                tx,
-            )?;
+            let n = self.seal(&chunk, payload_type, Some(id), Some(fragment), limit, tx)?;
             send(&tx[..n])?;
             self.pending.push(Pending {
                 id,
                 payload_type,
                 data: chunk,
                 fragment: Some(fragment),
+                limit,
             });
 
             let job = self.queue.front_mut().expect("checked");
@@ -815,13 +826,7 @@ impl Peer {
 
     /// Collects the messages due for retransmission, resealing each into
     /// `tx` and handing it to `send`.
-    pub fn drive_retransmits<F>(
-        &mut self,
-        now_ms: u64,
-        datagram_limit: usize,
-        tx: &mut [u8],
-        mut send: F,
-    ) -> Result<()>
+    pub fn drive_retransmits<F>(&mut self, now_ms: u64, tx: &mut [u8], mut send: F) -> Result<()>
     where
         F: FnMut(&[u8]) -> Result<()>,
     {
@@ -841,8 +846,8 @@ impl Peer {
                     let data = core::mem::take(&mut self.pending[index].data);
                     let payload_type = self.pending[index].payload_type;
                     let fragment = self.pending[index].fragment;
-                    let sealed =
-                        self.seal(&data, payload_type, Some(id), fragment, datagram_limit, tx);
+                    let limit = self.pending[index].limit;
+                    let sealed = self.seal(&data, payload_type, Some(id), fragment, limit, tx);
                     self.pending[index].data = data;
                     send(&tx[..sealed?])?;
                 }

@@ -968,6 +968,7 @@ impl Core {
             payload_type,
             data: data.to_vec(),
             fragment: None,
+            limit: self.transport.max_datagram_size(),
         });
         Ok(id)
     }
@@ -988,7 +989,6 @@ impl Core {
     /// retries.
     fn drive_retransmits(&mut self) -> Result<()> {
         let now = self.now_ms();
-        let limit = self.transport.max_datagram_size();
         let transport = &mut self.transport;
         // A retransmission is a datagram like any other and refreshes a
         // mapping like any other, so it counts. Stamped inside the closure
@@ -996,12 +996,11 @@ impl Core {
         // and usually sends nothing, and stamping unconditionally would mean
         // the clock always read "just now" and a keep-alive never came due.
         let stamp = &mut self.last_sent_ms;
-        self.peer
-            .drive_retransmits(now, limit, &mut self.tx, |frame| {
-                transport.send(frame).map_err(Error::Io)?;
-                *stamp = now;
-                Ok(())
-            })
+        self.peer.drive_retransmits(now, &mut self.tx, |frame| {
+            transport.send(frame).map_err(Error::Io)?;
+            *stamp = now;
+            Ok(())
+        })
     }
 }
 
@@ -1295,7 +1294,6 @@ impl Connection {
     fn drive_queue(&self) -> Result<()> {
         let mut core = self.core()?;
         let now = core.now_ms();
-        let limit = core.transport.max_datagram_size();
         let Core {
             peer,
             transport,
@@ -1303,7 +1301,7 @@ impl Connection {
             last_sent_ms: stamp,
             ..
         } = &mut *core;
-        peer.drive_queue(now, limit, tx, |frame| {
+        peer.drive_queue(now, tx, |frame| {
             transport.send(frame).map_err(Error::Io)?;
             *stamp = now;
             Ok(())
