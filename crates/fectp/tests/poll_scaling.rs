@@ -17,25 +17,49 @@
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fectp::{Connection, Endpoint, Event, Identity, PayloadType};
 
-/// Sessions to put on file. Enough to show a per-peer cost, few enough that
-/// the handshakes are not the slow part of the test in a debug build.
-const PEERS: usize = 64;
+/// Sessions to put on file. Enough to show a per-peer cost behind a burst
+/// small enough to queue, which is what decided it: at 64, putting the bug back
+/// cost about 2x, too close to what a correct build reads on a noisy host. The
+/// handshakes are now most of the test's time, about 11 seconds in a debug build
+/// on one desktop.
+const PEERS: usize = 256;
 
 /// Datagrams in the burst. Sent and then stopped, rather than sustained: a
 /// thread that floods for the length of a test starves the other test binaries
 /// `cargo test` runs beside it.
-const BURST: usize = 4000;
+///
+/// It was 4000, sent while the server was running. The server drained them as
+/// they came, so whether the measured round trip waited behind any of them
+/// depended on whether the sender outran it — and on a macOS runner it did not:
+/// the empty table measured 110 to 140 µs, a bare round trip with no burst in
+/// front, against about 2 ms crowded, where 64 live sessions kept the server
+/// busy enough to fall behind. The comparison was of who kept up, not of what a
+/// datagram costs. Now the server is paused while the burst and the measured
+/// message are queued, so the burst is always in front; and the burst has to
+/// fit in the socket's receive buffer while it waits. Linux charges that buffer
+/// per datagram rather than per byte, so its default holds a few hundred this
+/// small, by estimate rather than measurement; 200 is meant to stay under it.
+/// A buffer that overflowed would drop the measured message, which was sent
+/// last: that sample would be missing, and if all were, the test fails saying
+/// the echo peer never answered, rather than passing on a short queue.
+const BURST: usize = 200;
 
 struct Echo {
     addr: SocketAddr,
     public: [u8; 32],
     stop: Arc<AtomicBool>,
+    /// Set to stop the server polling, so datagrams queue in its socket.
+    paused: Arc<AtomicBool>,
+    /// Set by the server once it has seen `paused` and is not inside `poll`.
+    parked: Arc<AtomicBool>,
+    /// How long the server took, from leaving its pause to the next message.
+    timed: Arc<Mutex<Option<Duration>>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -45,11 +69,28 @@ impl Echo {
         let addr = server.local_addr().expect("addr");
         let public = *server.public_key().expect("identity");
         let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let parked = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        let timed = Arc::new(Mutex::new(None));
+        let (hold, holding) = (Arc::clone(&paused), Arc::clone(&parked));
+        let clock = Arc::clone(&timed);
         let handle = thread::spawn(move || {
+            let mut resumed = None;
             while !flag.load(Ordering::Relaxed) {
+                if hold.load(Ordering::SeqCst) {
+                    holding.store(true, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                if holding.swap(false, Ordering::SeqCst) {
+                    resumed = Some(Instant::now());
+                }
                 match server.poll(Some(Duration::from_millis(5))) {
                     Ok(Event::Message { peer, data }) => {
+                        if let Some(at) = resumed.take() {
+                            *clock.lock().expect("clock") = Some(at.elapsed());
+                        }
                         let _ = server.send(peer, &data, PayloadType::Opaque);
                     }
                     Ok(_) => {}
@@ -61,8 +102,25 @@ impl Echo {
             addr,
             public,
             stop,
+            paused,
+            parked,
+            timed,
             handle: Some(handle),
         }
+    }
+
+    /// Stops the server polling, and waits until it is not inside `poll`, so
+    /// that whatever is sent from here on queues in its socket untouched.
+    fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        while !self.parked.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn resume(&self) {
+        *self.timed.lock().expect("clock") = None;
+        self.paused.store(false, Ordering::SeqCst);
     }
 }
 
@@ -86,49 +144,54 @@ fn burst_of_rubbish(server: SocketAddr) {
     }
 }
 
-/// Every round trip measured behind a burst of rubbish, in order.
+/// How long the server took to reach a message queued behind a burst of
+/// rubbish, every time, in order.
 ///
-/// All of them rather than only one, because one alone cannot tell two very
-/// different things apart. The measurement is a round trip queued *behind* the
-/// burst; a sample far faster than the rest means the burst had already
-/// drained when the clock started, which is this harness racing itself, while
-/// five slow samples mean the datagram genuinely costs more. A failure on a machine
-/// that cannot be reproduced locally is readable only if the message carries
-/// them, and the first one was on a macOS runner.
-fn round_trips_behind_a_burst(conn: &Connection, server: SocketAddr) -> Vec<Duration> {
+/// The server is paused while the burst and then the message are sent, so
+/// both are queued in its socket, in that order, when it starts again: the
+/// message cannot be read before the burst is. The server keeps the clock —
+/// from leaving its pause to the message coming out of `poll` — so neither the
+/// pause, which sleeps, nor the reply's trip back is in the number; with a
+/// burst this small they were larger than the thing being measured.
+///
+/// All the samples rather than only one, because a failure on a machine that
+/// cannot be reproduced locally is readable only if the message carries them,
+/// and the first ones were on a macOS runner.
+fn time_behind_a_burst(conn: &Connection, echo: &Echo) -> Vec<Duration> {
     let mut samples = Vec::with_capacity(5);
     let mut buf = vec![0u8; 4096];
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
     for _ in 0..5 {
-        burst_of_rubbish(server);
-        conn.set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("timeout");
-        let started = Instant::now();
+        echo.pause();
+        burst_of_rubbish(echo.addr);
         conn.send(b"behind the burst", PayloadType::Opaque)
             .expect("send");
+        echo.resume();
         if conn.recv(&mut buf).is_ok() {
-            samples.push(started.elapsed());
+            samples.extend(*echo.timed.lock().expect("clock"));
         }
     }
     assert!(!samples.is_empty(), "the echo peer never answered");
     samples
 }
 
-/// The middle of those samples.
+/// The fastest of those samples.
 ///
-/// It was the minimum, on the reasoning that the kindest number for the code
-/// under test is the one to hold it to. That is kind on one side of the
-/// comparison only: the empty table's minimum is the *harshest* baseline, and a
-/// sample where the burst had already drained — the race described above —
-/// is exactly a minimum. A macOS runner produced one, [2.04, 6.14, 3.18, 0.39,
-/// 3.51] ms against a crowded [5.28, 5.03, 5.29, 7.00, 2.60], and failed at
-/// 6.6x on a baseline that had measured no burst at all. Medians put the same
-/// run at 1.7x. They lose nothing that matters: measured with the time-driven
-/// work put back on every pass, which is the bug this file was written for,
-/// both statistics read 390 to 600x against 0.8 to 1.1x correct.
-fn median(samples: &[Duration]) -> Duration {
-    let mut sorted = samples.to_vec();
-    sorted.sort();
-    sorted[sorted.len() / 2]
+/// It was the median for a while, and the minimum before that. The minimum was
+/// dropped because of a race: with the server running while the burst was
+/// sent, a sample could start after the burst had drained, and that sample was
+/// the minimum — a macOS runner failed at 6.6x on a baseline that had measured
+/// no burst at all. The pause closed the race. Every sample now waits behind
+/// the whole burst, and whatever else a host does to a sample — a preemption,
+/// a slow wake — only adds to it, so the fastest is the best estimate of the
+/// cost. The median was not: with five samples, one or two slow ones on the
+/// empty side moved it, and a correct debug build here read 4.4x by median and
+/// 2.3x by minimum in the same run. Measured with the time-driven work put back
+/// on every pass, the bug this file was written for, the minimum read 6 to 24x
+/// in a release build and 64 to 79x in debug, on one desktop.
+fn fastest(samples: &[Duration]) -> Duration {
+    *samples.iter().min().expect("samples")
 }
 
 #[test]
@@ -140,7 +203,7 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
     // The control: the same burst, the same measurement, an almost empty peer
     // table. Measured in the same run on the same host, so what is left when
     // the two are compared is the cost of the table.
-    let alone = round_trips_behind_a_burst(&conn, echo.addr);
+    let alone = time_behind_a_burst(&conn, &echo);
 
     // Fill the table. These sessions do nothing afterwards; they are on file,
     // which is all the old loop needed to charge for them.
@@ -157,21 +220,19 @@ fn a_burst_of_rubbish_does_not_cost_more_when_more_peers_are_on_file() {
         held.len()
     );
 
-    let crowded = round_trips_behind_a_burst(&conn, echo.addr);
+    let crowded = time_behind_a_burst(&conn, &echo);
 
     assert!(
-        median(&crowded) < median(&alone) * 4,
-        "a burst of {BURST} rejected datagrams took a median round trip of \
+        fastest(&crowded) < fastest(&alone) * 4,
+        "a burst of {BURST} rejected datagrams kept a message waiting at best \
          {:?} with an almost empty table and {:?} with {} sessions on it. What a \
          datagram costs must not grow with the number of peers, because the \
          table is reachable by anyone holding the endpoint's public key.\n\
-         Every sample, so one slow reading can be told from a slow set: an \
-         outlier means the burst had drained before the clock started, which \
-         is this harness racing itself, while a slow set is the cost itself.\n\
+         Every sample, so one slow reading can be told from a slow set.\n\
          empty table {alone:?}\n\
          {} sessions {crowded:?}",
-        median(&alone),
-        median(&crowded),
+        fastest(&alone),
+        fastest(&crowded),
         held.len(),
         held.len()
     );
