@@ -22,7 +22,7 @@ use fectp_core::noise::{
 };
 use fectp_core::reliability::{Ack, ACK_BLOCK_LEN, ACK_WINDOW, MESSAGE_ID_LEN};
 use fectp_core::session::{
-    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket, CAPS_LEN, CAP_RELIABLE,
+    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket, CAPS_LEN, CAP_PMTU_PROBE, CAP_RELIABLE,
     CAP_ZSTD, DATA_OVERHEAD, INITIATOR_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
     RESPONDER_OVERHEAD, TICKET_ID_LEN,
 };
@@ -141,6 +141,7 @@ fn capability_block_layout() {
     assert_eq!(CAPS_LEN, 8);
     assert_eq!(CAP_ZSTD, 0x01);
     assert_eq!(CAP_RELIABLE, 0x02);
+    assert_eq!(CAP_PMTU_PROBE, 0x04);
 
     assert_eq!(CODEC_ZSTD, 0x01);
     assert_eq!(CODEC_I16_DELTA, 0x02);

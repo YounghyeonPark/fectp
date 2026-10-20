@@ -14,7 +14,8 @@ FECTP runs over an unreliable, unordered datagram transport that preserves
 datagram boundaries. UDP is the expected substrate.
 
 FECTP provides optional per-message retransmission (§5.5). It does not
-provide ordering or path MTU discovery.
+provide ordering, and of path MTU discovery it provides only the probe
+(§5.8.7).
 
 - All multi-byte integers are **little-endian**.
 - Byte offsets are zero-based and inclusive of the start, exclusive of the end.
@@ -300,6 +301,7 @@ than 8 bytes.
 |---|---|
 | 0x01 | `ZSTD` — this peer can decompress Zstandard. |
 | 0x02 | `RELIABLE` — this peer implements the reliability layer. |
+| 0x04 | `PMTU_PROBE` — this peer answers path MTU probes (§5.8.7). |
 
 `max_frame_size` is the largest frame, header included, that this peer is
 willing to receive. A sender MUST NOT emit a frame larger than the peer's
@@ -804,7 +806,9 @@ Both are sealed like any other frame (§5) and consume sequence numbers from the
 same space, so the replay window of §5.1 covers them. Neither is padded: they
 are the same size in each direction, which is what keeps the exchange from
 amplifying. Neither carries `FLAG_RELIABLE`, `FLAG_FRAGMENT`, or
-`FLAG_COMPRESSED`; a receiver MUST reject one that does.
+`FLAG_COMPRESSED`; a receiver MUST reject one that does. The one exception is
+a `PathChallenge` carrying `FLAG_PADDED`, which is a path MTU probe and is
+§5.8.7's; a `PathResponse` is never padded.
 
 `token` MUST be 8 bytes and MUST be unpredictable to anyone who has not seen
 the challenge. A responder MUST echo the token unchanged, and MUST send its
@@ -873,6 +877,35 @@ An attacker already on the path can drop, delay, or forward traffic whatever
 this section says; validation does not change that, and is not meant to. What
 it removes is the ability to point the session at a **third party** — an
 address the attacker does not control and cannot answer for.
+
+#### 5.8.7 A challenge padded to a size
+
+A path MTU probe is a `PathChallenge` with `FLAG_PADDED` set, its plaintext
+padded (§5.3) so the whole frame is the size being tested:
+
+```
+-> PathChallenge : header(14) || seal(len=8 || token[8] || zeros)   any size
+<- PathResponse  : header(14) || seal(token[8])                       38 bytes
+```
+
+The answer is an ordinary `PathResponse`, and it proves that a frame of the
+probe's size crossed the path. The padding need not end on a §5.3 block
+boundary: a probe is exactly the size it tests.
+
+A sender MUST NOT send a probe to a peer whose capability block lacks
+`PMTU_PROBE`, and MUST NOT send one larger than the peer's `max_frame_size`.
+Before this bit was assigned, a receiver rejected any padded challenge without
+answering, which a sender cannot tell from the path losing it; the bit is how
+a sender knows the silence means something. A receiver that advertises the bit
+MUST accept a padded challenge whose length prefix states exactly 8 bytes, and
+answer it as §5.8.2 answers any challenge. It MUST still reject a padded
+`PathResponse`: the response is the small half of the exchange, and padding it
+would let 38 bytes ask for more.
+
+A probe is sent to the address the session is using, so §5.8.5 applies to its
+answer: nothing moves. What sizes to probe, how often, and what to conclude
+from silence are not specified; a lost probe proves nothing, since loss is not
+only about size.
 
 ### 5.9 Key replacement
 
@@ -1220,7 +1253,9 @@ These are absent by omission and remain to be defined:
 - **Ordering.** Deliberately absent, not merely unspecified; see §5.5.
 - **Delayed acknowledgement.** Acknowledgements are sent per message; no
   batching algorithm is defined.
-- **Path MTU discovery.** Frame size comes from `max_frame_size` alone.
+- **Path MTU discovery.** The probe is specified (§5.8.7); the search is not.
+  Which sizes to try, when, and how to tell a path that stopped carrying large
+  frames from one that is losing everything are each implementation's own.
 - **Key distribution.** Obtaining the responder's static public key is out of
   scope. So is distributing the first ticket, which falls out of the full
   handshake.

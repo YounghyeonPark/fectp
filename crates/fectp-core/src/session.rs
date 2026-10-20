@@ -24,6 +24,15 @@ pub const CAP_ZSTD: u8 = 0b0000_0001;
 /// Capability flag: this peer implements the reliability layer.
 pub const CAP_RELIABLE: u8 = 0b0000_0010;
 
+/// Capability flag: this peer answers a path MTU probe, a `PathChallenge`
+/// padded to the size being tested (SPEC §5.8.7).
+///
+/// A peer that does not set it refuses a padded challenge, silently, which is
+/// indistinguishable from the path losing it; so a probe is only ever sent to
+/// a peer that says it will answer. Every version-1 peer before this bit
+/// existed ignores it, as reserved capability bits are required to be.
+pub const CAP_PMTU_PROBE: u8 = 0b0000_0100;
+
 /// What a peer can do, exchanged inside the encrypted handshake payload.
 ///
 /// This is the fix for the interoperability gap in the original design. The
@@ -73,6 +82,11 @@ impl Capabilities {
     /// abandoned.
     pub fn supports_reliable(&self) -> bool {
         self.flags & CAP_RELIABLE != 0
+    }
+
+    /// Whether this peer answers path MTU probes.
+    pub fn supports_pmtu_probe(&self) -> bool {
+        self.flags & CAP_PMTU_PROBE != 0
     }
 
     /// Whether this peer advertised every bit in `codecs`.
@@ -260,6 +274,21 @@ pub const PAD_BLOCK: usize = 64;
 
 /// Bytes of length prefix inside a padded plaintext.
 const LEN_PREFIX: usize = 2;
+
+/// The smallest frame [`Session::seal_path_probe`] can build: a challenge
+/// with its token behind a length prefix and nothing after it.
+pub const MIN_PROBE_LEN: usize = PATH_FRAME_LEN + LEN_PREFIX;
+
+/// How a frame's plaintext is padded.
+#[derive(Clone, Copy)]
+enum Padding {
+    /// Not at all.
+    None,
+    /// Up to the next [`PAD_BLOCK`] boundary, to hide the payload's length.
+    Block,
+    /// To exactly this many bytes of plaintext, to make the frame a size.
+    Exact(usize),
+}
 
 /// What [`Session::open`] recovered from a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,7 +499,45 @@ impl Session {
         // is no length here for padding to hide — and a challenge and its
         // response being the same size in both directions is what keeps the
         // exchange from amplifying.
-        self.seal_frame_padded(FrameType::PathChallenge, token, None, None, 0, false, out)
+        self.seal_frame_padded(
+            FrameType::PathChallenge,
+            token,
+            None,
+            None,
+            0,
+            Padding::None,
+            out,
+        )
+    }
+
+    /// Encrypts a challenge padded so the whole frame is `frame_len` bytes:
+    /// a path MTU probe (SPEC §5.8.7).
+    ///
+    /// An answer proves a frame of that size crossed the path. Send one only
+    /// to a peer whose capabilities include [`CAP_PMTU_PROBE`]; any other
+    /// refuses it without a word. The answer is an ordinary 38-byte
+    /// [`PathResponse`](FrameType::PathResponse), smaller than the probe, so
+    /// the exchange cannot amplify.
+    ///
+    /// `frame_len` must be at least [`MIN_PROBE_LEN`].
+    pub fn seal_path_probe(
+        &mut self,
+        token: &[u8; PATH_TOKEN_LEN],
+        frame_len: usize,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        if frame_len < MIN_PROBE_LEN {
+            return Err(Error::MessageTooShort);
+        }
+        self.seal_frame_padded(
+            FrameType::PathChallenge,
+            token,
+            None,
+            None,
+            0,
+            Padding::Exact(frame_len - DATA_OVERHEAD),
+            out,
+        )
     }
 
     /// Encrypts the answer to a challenge, echoing its token back.
@@ -479,7 +546,15 @@ impl Session {
         token: &[u8; PATH_TOKEN_LEN],
         out: &mut [u8],
     ) -> Result<usize> {
-        self.seal_frame_padded(FrameType::PathResponse, token, None, None, 0, false, out)
+        self.seal_frame_padded(
+            FrameType::PathResponse,
+            token,
+            None,
+            None,
+            0,
+            Padding::None,
+            out,
+        )
     }
 
     /// Builds any outgoing frame.
@@ -497,9 +572,13 @@ impl Session {
         flags: u8,
         out: &mut [u8],
     ) -> Result<usize> {
-        let padded = self.padding;
+        let padding = if self.padding {
+            Padding::Block
+        } else {
+            Padding::None
+        };
         self.seal_frame_padded(
-            frame_type, payload, message_id, fragment, flags, padded, out,
+            frame_type, payload, message_id, fragment, flags, padding, out,
         )
     }
 
@@ -512,7 +591,7 @@ impl Session {
         message_id: Option<MessageId>,
         fragment: Option<Fragment>,
         flags: u8,
-        padded: bool,
+        padding: Padding,
         out: &mut [u8],
     ) -> Result<usize> {
         if self.send_seq == u64::MAX {
@@ -547,18 +626,27 @@ impl Session {
             .ok_or(Error::PayloadTooLarge)?;
 
         // With padding on, the plaintext is rounded up to a block boundary so
-        // the frame size no longer reveals the exact payload length.
-        let plaintext_len = if padded {
+        // the frame size no longer reveals the exact payload length; for a
+        // probe, it is made exactly the size asked for.
+        let padded = !matches!(padding, Padding::None);
+        if padded {
             if inner_len > u16::MAX as usize {
                 return Err(Error::PayloadTooLarge);
             }
             flags |= FLAG_PADDED;
-            LEN_PREFIX
+        }
+        let plaintext_len = match padding {
+            Padding::None => inner_len,
+            Padding::Block => LEN_PREFIX
                 .checked_add(inner_len)
                 .ok_or(Error::PayloadTooLarge)?
-                .next_multiple_of(PAD_BLOCK)
-        } else {
-            inner_len
+                .next_multiple_of(PAD_BLOCK),
+            Padding::Exact(n) => {
+                if n < LEN_PREFIX + inner_len {
+                    return Err(Error::PayloadTooLarge);
+                }
+                n
+            }
         };
 
         let total = plaintext_len
@@ -703,15 +791,24 @@ impl Session {
 
         // A challenge is a fixed-length token and nothing else. Anything
         // wrapped around it — a message identifier, a fragment descriptor, a
-        // codec header, padding — is not a challenge, and accepting one would
-        // mean the two sides disagree about what was just proved.
+        // codec header — is not a challenge, and accepting one would mean the
+        // two sides disagree about what was just proved. Padding is the one
+        // exception, and only on a challenge: a path MTU probe is a challenge
+        // padded to the size being tested (SPEC §5.8.7). The token inside is
+        // still exactly eight bytes, which the length prefix states. A
+        // response is never padded: it is the small half of the exchange, and
+        // padding it would let a probe ask for an amplified answer.
+        let allowed = match header.frame_type {
+            FrameType::PathChallenge => FLAG_PADDED,
+            _ => 0,
+        };
         if matches!(
             header.frame_type,
             FrameType::PathChallenge | FrameType::PathResponse
         ) && (len != PATH_TOKEN_LEN
             || message_id.is_some()
             || fragment.is_some()
-            || header.flags != 0)
+            || header.flags & !allowed != 0)
         {
             return Err(Error::BadHeader);
         }
@@ -1408,6 +1505,97 @@ mod hostile_peer {
                 "a challenge flagged {flag:#04x} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_probe_is_exactly_the_size_asked_for_and_opens_to_its_token() {
+        let token = [0x42; PATH_TOKEN_LEN];
+        for size in [MIN_PROBE_LEN, MIN_PROBE_LEN + 1, 1200, 1280, 1472, 9000] {
+            let (mut client, mut server) = connect();
+            let mut wire = [0u8; 9000];
+            let n = server
+                .seal_path_probe(&token, size, &mut wire)
+                .expect("seal probe");
+            assert_eq!(n, size, "a probe asked to be {size} bytes");
+            let opened = client.open(&mut wire[..n]).expect("a probe opens");
+            assert_eq!(opened.header.frame_type, FrameType::PathChallenge);
+            assert_eq!(opened.len, PATH_TOKEN_LEN);
+            assert_eq!(&wire[HEADER_LEN..HEADER_LEN + PATH_TOKEN_LEN], &token);
+        }
+    }
+
+    #[test]
+    fn a_probe_smaller_than_a_challenge_can_carry_is_refused() {
+        let (_, mut server) = connect();
+        let mut wire = [0u8; 256];
+        assert_eq!(
+            server.seal_path_probe(&[0x42; PATH_TOKEN_LEN], MIN_PROBE_LEN - 1, &mut wire),
+            Err(Error::MessageTooShort)
+        );
+    }
+
+    #[test]
+    fn padding_is_accepted_on_a_challenge_and_nowhere_else_on_the_path_frames() {
+        let token = [0x42; PATH_TOKEN_LEN];
+
+        // A padded response. Accepting it would let a 38-byte challenge be
+        // answered with something larger, which is amplification.
+        let (mut client, mut server) = connect();
+        let mut wire = [0u8; 256];
+        let n = server
+            .seal_frame_padded(
+                FrameType::PathResponse,
+                &token,
+                None,
+                None,
+                0,
+                Padding::Exact(200),
+                &mut wire,
+            )
+            .expect("seal");
+        assert_eq!(
+            client.open(&mut wire[..n]).map(|_| ()),
+            Err(Error::BadHeader),
+            "a padded response must be refused"
+        );
+
+        // A padded challenge whose token is not eight bytes. The padding
+        // exception is for size, not for a different payload.
+        for wrong in [7usize, 9] {
+            let (mut client, mut server) = connect();
+            let payload = &[0x42u8; 9][..wrong];
+            let n = server
+                .seal_frame_padded(
+                    FrameType::PathChallenge,
+                    payload,
+                    None,
+                    None,
+                    0,
+                    Padding::Exact(200),
+                    &mut wire,
+                )
+                .expect("seal");
+            assert_eq!(
+                client.open(&mut wire[..n]).map(|_| ()),
+                Err(Error::BadHeader),
+                "a padded challenge carrying {wrong} bytes must be refused"
+            );
+        }
+
+        // The control: the same construction with an eight-byte token opens.
+        let (mut client, mut server) = connect();
+        let n = server
+            .seal_frame_padded(
+                FrameType::PathChallenge,
+                &token,
+                None,
+                None,
+                0,
+                Padding::Exact(200),
+                &mut wire,
+            )
+            .expect("seal");
+        client.open(&mut wire[..n]).expect("an honest probe opens");
     }
 
     /// Drives `frames` frames from `a` to `b`, checking each one arrives.
