@@ -28,9 +28,14 @@ on:
 # than the default read-only token. Without this it finds the advisory, says so
 # in the log, and then fails a second time trying to tell anyone — which is how
 # RUSTSEC-2026-0285 was first seen here.
+#
+# On the schedule it reports by opening an issue instead, which needs
+# `issues: write`. Without it the Monday run that found RUSTSEC-2026-0346 to
+# -0349 in rustls failed the same second way: found them, then could not say so.
 permissions:
   contents: read
   checks: write
+  issues: write
 
 jobs:
   audit:
