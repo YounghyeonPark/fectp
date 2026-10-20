@@ -150,6 +150,13 @@ against what was installed. That last step is the one that matters: a package
 that builds and then cannot find its library is the failure packaging produces,
 and only an install shows it.
 
+A release can be the bindings' alone. 0.2.2 was: the workspace moved to 0.2.2
+so the packages could, and the crates were not republished, because
+`fectp-core` and `fectp` had not changed by a line since 0.2.1 — checked with
+`git diff --stat v0.2.1 -- crates/fectp-core crates/fectp`, which was empty.
+crates.io then simply has no 0.2.2, and the next crate release takes the next
+number; Cargo minds a gap in version numbers no more than anyone else does.
+
 Publishing is a tag:
 
 ```bash

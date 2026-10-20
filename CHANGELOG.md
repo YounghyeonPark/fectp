@@ -10,10 +10,23 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
-**The Python and npm packages build for Linux arm64.** A Raspberry Pi on a
+Nothing yet.
+
+## 0.2.2 — 2026-10-20
+
+**Bindings only.** `fectp` on PyPI and `@younghyeonpark/fectp` on npm. The
+crates stay at 0.2.1 on crates.io: `fectp-core` and `fectp` have not changed by
+a line since, so there is nothing new to publish there. Wire version 1.
+
+**Linux arm64.** Both packages now carry the library for a Raspberry Pi on a
 64-bit OS, AWS Graviton and other arm64 Linux with glibc 2.28 or newer, built
-and install-tested natively on arm64 in CI. Takes effect with the next
-publish of the bindings (D84).
+and install-tested natively on arm64 in CI (D84).
+
+### Already in the bindings' first release, 0.2.1
+
+The bindings were first published as 0.2.1 — PyPI on 2026-10-17, npm on
+2026-10-19 — from `main` after the crates' 0.2.1, and carried the two entries
+below. This file had left them under Unreleased.
 
 **The Python and TypeScript bindings are packaged, with the library inside.**
 Wheels for Windows x64, Linux x64 (glibc 2.28 or newer) and macOS (both

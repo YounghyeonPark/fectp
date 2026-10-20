@@ -1,6 +1,6 @@
 {
   "name": "@younghyeonpark/fectp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "FECTP from TypeScript: the sans-IO encrypted session layer, over its C ABI. Not security-audited.",
   "license": "BSD-3-Clause",
   "repository": {
