@@ -149,6 +149,17 @@ pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
 /// factor of two on a margin that was 3.3 and is now 6.6; it does not make an
 /// unreachable peer noticeably slower to report, because nothing waits the
 /// whole budget unless there is nothing there.
+///
+/// **The failure that argued for ten was mostly the test's relay.** It read in
+/// a loop of 25 ms timeouts, which on Windows can swallow a datagram (D80), and
+/// it counted only the drops it was told to make, so "every intended drop
+/// accounted for" could not see one it made by accident. Re-measured, three
+/// lost opening frames, 150 connects each: through that relay 34 took over two
+/// seconds, in steps of one backoff interval — 2.54, 3.80, 5.31 s — and one
+/// would have failed a five-second budget; through a relay that blocks, none
+/// did, the slowest at 1.57 s. The "2.6 s where 1.5 was nominal" above is the
+/// first of those steps. Ten seconds stays: a loaded host and a lossy path are
+/// real, and reporting an unreachable peer five seconds later costs little.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub use fectp_core::fragment::{MAX_FRAGMENTS, MAX_MESSAGE_LEN};

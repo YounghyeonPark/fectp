@@ -32,11 +32,12 @@ const HANDSHAKE_INIT: u8 = 0x11;
 /// one opening frame on request, go silent, or hold replies back.
 ///
 /// Armed rather than counted. Naming the *n*th opening frame looked simpler and
-/// was wrong: loopback loses datagrams of its own — one warm-up handshake in
-/// fifteen runs here lost its opening frame for real — and an adapted schedule
-/// occasionally resends one early, so the index drifts and the drop lands on a
-/// handshake the test was not measuring. Arming it makes the next opening frame
-/// the one that goes, whatever came before.
+/// was wrong: an adapted schedule occasionally resends one early, so the index
+/// drifts and the drop lands on a handshake the test was not measuring. Arming
+/// it makes the next opening frame the one that goes, whatever came before.
+/// This used to add that loopback lost one warm-up opening frame in fifteen;
+/// re-measured through this relay and the old timed one, 300 each, it lost
+/// none (D71).
 ///
 /// **Blocking, with no read timeout, and that is load-bearing.** This relay
 /// used to read its socket in a loop of short timeouts, and on Windows it lost

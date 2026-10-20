@@ -3133,6 +3133,20 @@ timer already does for data. The handshake has no round-trip estimate to work
 from, which is precisely why it uses a fixed schedule, and inventing one from a
 single exchange is a different piece of work.
 
+*Corrected after D80.* "Nothing was lost that should not have been" rested on
+the relay's counter, which counted the drops it was told to make and nothing
+else — and the relay read its socket in a loop of 25 ms timeouts, which on
+Windows can take a datagram with it, uncounted. Re-measured with three lost
+opening frames, 150 connects through each relay shape, interleaved: through
+the old one 34 took over two seconds and one 5.31 s, which a five-second budget
+would have failed, every one with the counter reporting exactly three drops;
+through a relay that blocks, none took over 1.57 s. The delays came in steps of
+one backoff interval — 2.54, 3.80, 5.31 s — which is a frame going missing and
+being resent, not a host running slow, which would spread them. So the failure
+this decision answered was mostly the harness. The host effect it also cited is
+real and measured separately (`--bin idle`), and ten seconds stays; but the
+margin of 3.3 was not what failed.
+
 ## D67 — The long-term secret was not being wiped, and nothing said so
 
 **Problem.** Found while designing the C binding, which is the wrong place to
@@ -3509,6 +3523,13 @@ away looked simpler and was wrong; the relay now arms a one-shot drop, and a
 trial where anything *else* went missing is repeated rather than believed.
 `handshake_loss.rs` has said a relay is a network since it was written — the
 same trap, met from a new direction.
+
+*Re-measured after D80, and not reproduced.* 300 warm-up handshakes through a
+relay of the old shape, with its 1 ms read timeout, and 300 through one that
+blocks: none sent its opening frame twice, either way. The one in fifteen was
+seen, and is left as seen; what caused it is not known, and it is no longer
+evidence that loopback loses datagrams. The armed drop stays, because it is the
+right design whatever the loss rate.
 
 Both were found by running the file thirty times, which is the only reason they
 were found before CI. Four runs in thirty failed, for these two reasons; the
@@ -4202,6 +4223,14 @@ opening frame", in D71 among others. Those were measured on Windows through
 relays of the old shape, so how much was loopback and how much the relay is not
 known. They are left as written, with this note, rather than re-measured one by
 one.
+
+*Re-measured afterwards, the two that mattered.* D66's failure, which set
+`HANDSHAKE_TIMEOUT` at ten seconds, was mostly the relay: with three lost
+opening frames, 34 connects in 150 through the old shape took over two seconds
+in steps of one backoff interval, one at 5.31 s, while the counter saw nothing
+amiss; none did through a relay that blocks. D71's one warm-up handshake in
+fifteen did not reproduce through either shape in 300 each. Both records carry
+the correction.
 
 **Not done: the benchmarks.** `crates/bench/src/transports.rs` has relays of the
 same shape, with timeouts from 2 to 20 ms, including the ones that emulate a
