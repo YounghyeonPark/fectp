@@ -50,10 +50,21 @@ jobs:
   # Built inside the manylinux_2_28 image, so the library asks for nothing newer
   # than glibc 2.28 and the wheel can honestly carry that tag. Built on an
   # ordinary runner it would need whatever glibc the runner had that week.
+  #
+  # arm64 on a native arm64 runner, in the same image built for aarch64: a
+  # Raspberry Pi 4 or 5 on a 64-bit OS, AWS Graviton, an Ampere server. Native
+  # rather than cross-compiled, so the tests that follow run on the
+  # architecture the library is for.
   library-linux:
-    name: library (Linux x64, glibc 2.28)
-    runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    name: library (Linux ${{ matrix.arch }}, glibc 2.28)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest, image: quay.io/pypa/manylinux_2_28_x86_64 }
+          - { arch: arm64, os: ubuntu-24.04-arm, image: quay.io/pypa/manylinux_2_28_aarch64 }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v5
       - name: install Rust
@@ -68,7 +79,7 @@ jobs:
           test "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = "GLIBC_2.28"
       - uses: actions/upload-artifact@v4
         with:
-          name: library-linux
+          name: library-linux-${{ matrix.arch }}
           path: target/release/libfectp.so
 
   # One library for both architectures: what pip calls universal2 and what the
@@ -108,16 +119,25 @@ jobs:
       matrix:
         include:
           - name: Windows
+            id: windows
             os: windows-latest
             library: library-windows
             file: fectp.dll
             platform: win_amd64
-          - name: Linux
+          - name: Linux x64
+            id: linux-x64
             os: ubuntu-latest
-            library: library-linux
+            library: library-linux-x64
             file: libfectp.so
             platform: manylinux_2_28_x86_64
+          - name: Linux arm64
+            id: linux-arm64
+            os: ubuntu-24.04-arm
+            library: library-linux-arm64
+            file: libfectp.so
+            platform: manylinux_2_28_aarch64
           - name: macOS
+            id: macos
             os: macos-14
             library: library-macos
             file: libfectp.dylib
@@ -141,13 +161,13 @@ jobs:
         run: python -m build --wheel
       - run: python -m twine check bindings/python/dist/*
       - name: the tag is earned
-        if: matrix.name == 'Linux'
+        if: startsWith(matrix.id, 'linux')
         run: |
           python -m pip install auditwheel
           auditwheel show bindings/python/dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.name }}
+          name: wheel-${{ matrix.id }}
           path: bindings/python/dist/*.whl
 
   wheel-test:
@@ -157,10 +177,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Windows, os: windows-latest, python: "3.13" }
-          - { name: Linux, os: ubuntu-latest, python: "3.9" }
-          - { name: Linux, os: ubuntu-latest, python: "3.13" }
-          - { name: macOS, os: macos-14, python: "3.13" }
+          - { name: Windows, id: windows, os: windows-latest, python: "3.13" }
+          - { name: Linux x64, id: linux-x64, os: ubuntu-latest, python: "3.9" }
+          - { name: Linux x64, id: linux-x64, os: ubuntu-latest, python: "3.13" }
+          - { name: Linux arm64, id: linux-arm64, os: ubuntu-24.04-arm, python: "3.9" }
+          - { name: Linux arm64, id: linux-arm64, os: ubuntu-24.04-arm, python: "3.13" }
+          - { name: macOS, id: macos, os: macos-14, python: "3.13" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -169,7 +191,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@v4
         with:
-          name: wheel-${{ matrix.name }}
+          name: wheel-${{ matrix.id }}
           path: wheel
       # Outside the checkout and with nothing built in it, so the only library
       # the module can find is the one inside the wheel.
@@ -196,15 +218,17 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      # Not merged: both Linux libraries are called libfectp.so, so each stays
+      # in a directory named for its artifact, and stage.mjs reads which
+      # architecture each is from the ELF header rather than from the name.
       - uses: actions/download-artifact@v4
         with:
           pattern: library-*
           path: native
-          merge-multiple: true
       - working-directory: bindings/typescript
         run: |
           npm ci
-          node stage.mjs ../../native/fectp.dll ../../native/libfectp.so ../../native/libfectp.dylib
+          node stage.mjs ../../native/*/*
           npm pack
       - uses: actions/upload-artifact@v4
         with:
@@ -217,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-14]
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

@@ -13,8 +13,9 @@ breaks protocols for a living.
 pip install fectp
 ```
 
-Wheels for Windows x64, Linux x64 (glibc 2.28 or newer) and macOS (Apple
-silicon and Intel), each carrying the shared library it needs — no Rust and no
+Wheels for Windows x64, Linux x64 and arm64 (glibc 2.28 or newer — a
+Raspberry Pi on a 64-bit OS, AWS Graviton) and macOS (Apple silicon and Intel),
+each carrying the shared library it needs — no Rust and no
 compiler. Python 3.9 or newer. `ctypes` underneath, so nothing else is pulled
 in.
 

@@ -10,6 +10,11 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+**The Python and npm packages build for Linux arm64.** A Raspberry Pi on a
+64-bit OS, AWS Graviton and other arm64 Linux with glibc 2.28 or newer, built
+and install-tested natively on arm64 in CI. Takes effect with the next
+publish of the bindings (D84).
+
 **The Python and TypeScript bindings are packaged, with the library inside.**
 Wheels for Windows x64, Linux x64 (glibc 2.28 or newer) and macOS (both
 architectures), and one npm package carrying all three, built and

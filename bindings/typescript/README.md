@@ -13,8 +13,9 @@ breaks protocols for a living.
 npm install @younghyeonpark/fectp
 ```
 
-One package carrying the shared library for Windows x64, Linux x64 (glibc 2.28
-or newer) and macOS (Apple silicon and Intel), with type declarations. Scoped
+One package carrying the shared library for Windows x64, Linux x64 and arm64
+(glibc 2.28 or newer — a Raspberry Pi on a 64-bit OS, AWS Graviton) and macOS
+(Apple silicon and Intel), with type declarations. Scoped
 because npm refuses the bare name `fectp` as too close to the existing `ftp`;
 the Python package on PyPI is plain `fectp`. Node 18
 or newer. Its one dependency, `koffi`, declares an install script that recent

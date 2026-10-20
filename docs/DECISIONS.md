@@ -4357,3 +4357,29 @@ the token was the thing on its way out either way. The switch is proven only by
 the next release, which is the first to publish without it; a failure there
 uploads nothing, as both failures above did not.
 
+## D84 — Linux arm64 in both packages
+
+**Problem.** The packages of D83 covered Windows x64, Linux x64 and macOS. This
+protocol is aimed at devices, and the Linux devices people run it on are
+mostly arm64 — a Raspberry Pi 4 or 5 on a 64-bit OS, AWS Graviton, Ampere — so
+the first platform a device user would meet was the one missing.
+
+**Built natively, in the same image.** On GitHub's arm64 runner, inside
+`manylinux_2_28` built for aarch64, so the library asks for glibc 2.28 and
+nothing newer, checked the same way as x64's: against its symbols, and by
+`auditwheel` on the wheel. Native rather than cross-compiled, so the install
+tests that follow run on the architecture the library is for, not on an
+emulator or not at all.
+
+**Two files with one name.** Both Linux libraries are `libfectp.so`, and the
+npm staging script chose a folder by file extension — which would have filed
+the second over the first. It reads the ELF header's machine field now: 62 is
+x86-64 and 183 is AArch64, and anything else, or anything that is not ELF, is
+refused rather than filed somewhere plausible. Checked with crafted headers for
+both, for 32-bit ARM (40) and for a text file. The package's pre-pack check
+requires all four libraries, so one missing cannot ship.
+
+**Not added: Windows arm64 and 32-bit ARM.** Neither was asked for, and each is
+a runner and a test matrix to keep. Both stage as refusals rather than as
+something wrong.
+

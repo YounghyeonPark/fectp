@@ -141,8 +141,9 @@ the workspace version — `setup.py` reads it from `Cargo.toml`, and
 `check-claims.py` fails if `package.json` says anything else.
 
 `.github/workflows/bindings.yml` builds them. Every push that touches the C ABI,
-the core or the bindings builds the library on Windows, on Linux inside the
-`manylinux_2_28` image, and for both macOS architectures joined with `lipo`;
+the core or the bindings builds the library on Windows, on Linux x64 and arm64
+inside the `manylinux_2_28` image for each, and for both macOS architectures
+joined with `lipo`;
 packs a wheel per platform and one npm package carrying all three; and installs
 each on its own platform, outside the checkout, and runs the binding's tests
 against what was installed. That last step is the one that matters: a package
