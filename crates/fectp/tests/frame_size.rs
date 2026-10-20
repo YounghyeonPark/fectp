@@ -157,3 +157,67 @@ fn the_ceiling_is_clamped_at_both_ends() {
     fectp::set_max_datagram(original);
     assert_eq!(fectp::max_datagram(), original);
 }
+
+/// Raising the ceiling raises what a session sends once it exists, not what a
+/// handshake sends. A handshake happens before anything is known about the
+/// path, which is the one moment a frame sized for it cannot be justified —
+/// and path MTU discovery, which is what makes a raised ceiling safe to use,
+/// cannot have run yet.
+#[test]
+fn a_raised_ceiling_does_not_raise_a_handshake() {
+    let _guard = exclusive();
+    let original = fectp::max_datagram();
+    fectp::set_max_datagram(1472);
+
+    // Fits 1472, not 1200.
+    let large = vec![0x5a; 1250];
+    // Fits 1200 with room for any handshake's overhead.
+    let small = vec![0x5a; 900];
+
+    let mut server = fectp::Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let reply_refused = server.set_handshake_reply(&large).is_err();
+    let reply_accepted = server.set_handshake_reply(&small).is_ok();
+
+    // The opening frame. An endpoint sends it without waiting for an answer,
+    // so nothing has to be listening.
+    let mut client = fectp::Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let target = server.local_addr().expect("addr");
+    let public = *server.public_key().expect("identity");
+    let opening_refused = client
+        .connect_and_send(target, Some(&public), &large)
+        .is_err();
+    let opening_accepted = client
+        .connect_and_send(target, Some(&public), &small)
+        .is_ok();
+
+    // A connection waits for the answer, so this one has a peer that gives
+    // it: refusing for the size has to be told apart from failing to connect.
+    let echo = Echo::start();
+    let connection_refused =
+        Connection::connect_and_send(echo.addr(), &echo.public(), &Identity::generate(), &large)
+            .is_err();
+    let connection_accepted =
+        Connection::connect_and_send(echo.addr(), &echo.public(), &Identity::generate(), &small)
+            .is_ok();
+
+    fectp::set_max_datagram(original);
+
+    assert!(reply_accepted, "a handshake reply that fits 1200 bytes");
+    assert!(
+        reply_refused,
+        "a handshake reply that only fits a raised ceiling must be refused"
+    );
+    assert!(opening_accepted, "an opening frame that fits 1200 bytes");
+    assert!(
+        opening_refused,
+        "an endpoint's opening frame must not grow with the ceiling"
+    );
+    assert!(
+        connection_accepted,
+        "a connection whose opening fits 1200 bytes"
+    );
+    assert!(
+        connection_refused,
+        "a connection's opening frame must not grow with the ceiling"
+    );
+}

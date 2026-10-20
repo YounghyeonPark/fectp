@@ -22,9 +22,9 @@ use fectp_core::noise::{
 };
 use fectp_core::reliability::{Ack, ACK_BLOCK_LEN, ACK_WINDOW, MESSAGE_ID_LEN};
 use fectp_core::session::{
-    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket, CAPS_LEN, CAP_PMTU_PROBE, CAP_RELIABLE,
-    CAP_ZSTD, DATA_OVERHEAD, INITIATOR_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL, REPLAY_WINDOW,
-    RESPONDER_OVERHEAD, TICKET_ID_LEN,
+    Capabilities, ResumeInitiator, ResumeResponder, ResumptionTicket, CAPS_LEN, CAP_PMTU_PROBE,
+    CAP_RELIABLE, CAP_ZSTD, DATA_OVERHEAD, INITIATOR_OVERHEAD, PAD_BLOCK, REKEY_INTERVAL,
+    REPLAY_WINDOW, RESPONDER_OVERHEAD, TICKET_ID_LEN,
 };
 
 /// SPEC §2 — cipher suite sizes.

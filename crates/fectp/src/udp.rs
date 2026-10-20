@@ -24,6 +24,24 @@ pub const DEFAULT_MAX_DATAGRAM: usize = 1200;
 /// payload. Below this nothing can connect at all.
 pub const MIN_MAX_DATAGRAM: usize = 128;
 
+/// The largest datagram sent before anything is known about the path.
+///
+/// A handshake is exactly that moment, so its frames are sized from this
+/// rather than from the ceiling, whatever the ceiling has been raised to.
+/// Raising the ceiling says what this side can receive and how far it may
+/// send once the path is known; it is not evidence that this path carries it.
+pub(crate) const BASE_DATAGRAM: usize = 1200;
+
+/// What a handshake frame is sized from: the ceiling, but no more than
+/// [`BASE_DATAGRAM`].
+///
+/// At the default ceiling the two are the same, so this changes nothing
+/// there. Its effect is that raising the ceiling no longer raises what a
+/// handshake sends.
+pub(crate) fn handshake_datagram() -> usize {
+    max_datagram().min(BASE_DATAGRAM)
+}
+
 /// The ceiling in force, shared by every connection in this process.
 static MAX_DATAGRAM: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DATAGRAM);
 

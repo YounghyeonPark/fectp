@@ -749,7 +749,7 @@ impl Core {
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size + ResumeInitiator::OVERHEAD];
+        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + ResumeInitiator::OVERHEAD];
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 
@@ -804,7 +804,7 @@ impl Core {
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size + ResumeInitiator::OVERHEAD];
+        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + ResumeInitiator::OVERHEAD];
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 
@@ -844,7 +844,10 @@ impl Core {
         zero_rtt: &[u8],
     ) -> Result<Self> {
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size + INITIATOR_OVERHEAD];
+        // Sized for a path nothing is known about yet; `rx` stays at the
+        // ceiling, because that is what this side has told the peer it can
+        // receive.
+        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + INITIATOR_OVERHEAD];
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 

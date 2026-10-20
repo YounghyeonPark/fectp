@@ -691,7 +691,7 @@ impl Endpoint {
         let addr = crate::resolve(addr)?;
         let session_id = OsRng.next_u32();
         let caps = local_capabilities();
-        let mut frame = vec![0u8; max_datagram() + INITIATOR_OVERHEAD];
+        let mut frame = vec![0u8; crate::udp::handshake_datagram() + INITIATOR_OVERHEAD];
 
         let (handshake, len) = match &self.mode {
             Mode::PublicKey(key) => {
@@ -1608,10 +1608,12 @@ impl Endpoint {
     /// said needs the round trip after.
     ///
     /// Fails with [`Error::PayloadTooLarge`](fectp_core::Error::PayloadTooLarge)
-    /// if it would not fit a handshake frame.
+    /// if it would not fit a handshake frame, which is sized for a path nothing
+    /// is known about yet: at most 1200 bytes, even when
+    /// [`set_max_datagram`](crate::set_max_datagram) has raised the ceiling.
     pub fn set_handshake_reply(&mut self, payload: &[u8]) -> Result<()> {
         let overhead = RESPONDER_OVERHEAD.max(ResumeResponder::OVERHEAD);
-        if payload.len() + overhead > max_datagram() {
+        if payload.len() + overhead > crate::udp::handshake_datagram() {
             return Err(Error::Protocol(fectp_core::Error::PayloadTooLarge));
         }
         self.handshake_reply = payload.to_vec();
