@@ -179,6 +179,15 @@ to exist first, both on the registries and neither in this repository:
   are deleted once trusted publishing is in place. The package carries
   provenance, linking it to the run that built it.
 
+  Two things about npm's side, both met publishing 0.2.2. The trusted
+  publisher lists the actions it may take, and **publish** has to be ticked:
+  without it npm answers `403 OIDC permission denied for this action`, after
+  the identity check has already succeeded. And the package uses npm's staged
+  publishing — its first version left a `0.0.0-stage` placeholder — so a
+  publish the CLI reports as done (`+ @younghyeonpark/fectp@0.2.2`) may not be
+  on the registry yet. 0.2.2 appeared only once it was released on npmjs.com.
+  Check the registry, not the log: `npm view @younghyeonpark/fectp versions`.
+
 Both are as permanent as crates.io: a version cannot be re-uploaded.
 
 ## Afterwards

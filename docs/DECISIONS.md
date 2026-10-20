@@ -4383,3 +4383,14 @@ requires all four libraries, so one missing cannot ship.
 a runner and a test matrix to keep. Both stage as refusals rather than as
 something wrong.
 
+**Released as 0.2.2, and the token-free npm path proved.** PyPI took the four
+wheels on the tag. npm first refused with `OIDC permission denied for this
+action`: the trusted publisher had been registered without the publish action
+ticked. With it ticked, a re-run on the same commit — PyPI skipping what it had
+— published by trusted publishing, the registry recording the publisher as
+GitHub Actions rather than an account. The version then waited, staged, until
+it was released on npmjs.com; the CLI had already reported success. Installed
+fresh from both registries afterwards, outside the checkout: 16 and 17 tests
+passed against the published copies, the npm package carrying all four
+libraries.
+
