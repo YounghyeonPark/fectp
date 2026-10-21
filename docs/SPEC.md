@@ -1263,6 +1263,184 @@ These are absent by omission and remain to be defined:
 - **Close semantics.** The `Close` frame type is assigned; its payload and
   state machine are not defined.
 
+## Appendix A. Rendezvous and relay
+
+Optional. Nothing in §1–§9 depends on it, and a peer that implements none of
+it is a conforming version-1 peer. It lets two peers that are each behind a NAT
+reach one another, through a third party both can reach: directly if their NATs
+allow a hole to be punched, through that party if they do not.
+
+The rendezvous is an ordinary FECTP peer in public-key mode, and everything
+between it and a client travels as reliable messages (§5.5) on an ordinary
+session. **Nothing here changes a frame.** What is defined is the content of
+those messages, four datagrams that are not FECTP frames, and what each party
+does.
+
+### A.1 Registration
+
+A client registers by sending `REGISTER`. That message is an authenticated
+frame from the client, so it proves what a completed handshake does not: that
+whoever is at the session's address holds the session's keys. A rendezvous
+MUST NOT register a client, or send it any message of this appendix, before it
+has; until an authenticated frame has arrived from the session at all, it
+sends nothing but the handshake response. Completing a handshake needs only
+the rendezvous's public key and one datagram, whose source address may be
+anybody's.
+
+A client's registration is done when `OBSERVED` arrives, and it MUST NOT send
+`INTRODUCE` before then. Reliable messages are not ordered (§5.5), and a
+request that overtook its registration would be ignored.
+
+A registered client is known by its static key (§4.4) and its *observed
+address*: the session's address (§5.8), which is where the client's NAT maps
+it for this destination. The rendezvous answers `REGISTER` with `OBSERVED`,
+telling the client that address.
+
+### A.2 Messages
+
+Each message is one reliable message on the session between a client and the
+rendezvous. Byte 0 is the kind; the rest is the body. A receiver MUST ignore a
+message of a kind it does not know, so that kinds may be added, and MUST ignore
+one whose body is the wrong length for its kind.
+
+An address is encoded as `family(1) || ip || port(2, LE)`, where `family` is 4
+with a 4-byte `ip` or 6 with a 16-byte one.
+
+| kind | direction | name | body |
+|---|---|---|---|
+| 0x01 | client → rendezvous | `REGISTER` | empty |
+| 0x02 | client → rendezvous | `INTRODUCE` | `key[32]` |
+| 0x03 | client → rendezvous | `RELAY` | `key[32]` |
+| 0x81 | rendezvous → client | `OBSERVED` | `addr` |
+| 0x82 | rendezvous → client | `INTRODUCTION` | `key[32] \|\| addr` |
+| 0x83 | rendezvous → client | `UNAVAILABLE` | `key[32] \|\| reason(1)` |
+| 0x84 | rendezvous → client | `RELAY_OFFER` | `key[32] \|\| addr \|\| token[16]` |
+
+`reason` is 0 when the key is not registered here, 1 when this rendezvous will
+not introduce the pair, 2 when it will not relay for it, and 3 when the key's
+holder did not ask for this client in time.
+
+### A.3 Introduction
+
+**Both parties must ask.** A rendezvous introduces clients `A` and `B` only
+when `A` has sent `INTRODUCE` naming `B`, `B` has sent `INTRODUCE` naming `A`,
+and the two requests are within a window the rendezvous chooses. Then it sends
+each an `INTRODUCTION` naming the other's key and observed address, once per
+pair however many requests arrived. A request is held for the window even if
+the key it names has not registered yet, so two parties starting at once do
+not depend on whose registration lands first. One whose counterpart does not
+come in time is answered with `UNAVAILABLE`: reason 3 if the key is
+registered, 0 if it is not.
+
+A rendezvous MUST bound how many requests one source address may make, and
+answers one over its bound with `UNAVAILABLE` reason 1. Per address rather
+than per client: keys cost nothing, so one address can register many.
+
+Asking is consent. An introduction tells each party where the other is and has
+each send to the other, and a NAT that kept one of them unreachable no longer
+does once it has. Neither side should be able to bring that about alone.
+
+**The roles follow from the keys.** The party whose key is smaller, compared
+as unsigned bytes from the first, starts the handshake; the other waits. Each
+party works this out for itself, so the rendezvous cannot stall a pair by
+telling both to wait.
+
+On `INTRODUCTION`, a client that did not ask for that key, or already has a
+session or a handshake under way with it, MUST ignore it. Otherwise both
+parties send a punch (A.5) to the other's address, and the starting party then
+begins a full handshake (§4.4) to it, naming the key it was given, and
+retransmits it as it would any other. The waiting party accepts an opening
+frame as it accepts any other; it SHOULD treat the resulting session as the
+introduction only if the key the handshake authenticated is the one it was
+introduced to.
+
+The punch is what makes this work through a port-restricted NAT: it opens the
+sender's NAT to the other's address, so the other's next datagram is let in.
+The starting party's own opening frame does the same for it.
+
+A client SHOULD bound how many introductions it acts on at once. Each one has
+it send to an address a rendezvous chose, and a rendezvous is not trusted with
+anything else.
+
+### A.4 Relay
+
+A handshake that does not complete — one party's NAT gives each destination
+its own mapping, so no address the rendezvous observed is of any use — can be
+carried through the rendezvous instead.
+
+The starting party sends `RELAY` naming the other, once per introduction. A
+rendezvous that will relay for a pair it introduced recently allocates two UDP
+ports, one for each party, and sends each a `RELAY_OFFER`: the other's key,
+the address of *its own* port, and a token of 16 random bytes for that port
+alone. It allocates at most once per pair; a second `RELAY` for the same pair
+has the offers sent again. Otherwise it sends `UNAVAILABLE` reason 2 to
+**both** parties — each is waiting on the relay, and the one that did not ask
+would otherwise hear only its own deadline — or reason 0 to the asker if the
+other has gone. A client MUST ignore a `RELAY_OFFER` for a key it has no
+introduction with.
+
+A port is advertised at an address clients can send to. A rendezvous bound to
+a wildcard address, or reached through a NAT of its own, has to be told what
+that address is, and MUST refuse to relay rather than advertise one nobody
+can reach.
+
+**A port records its party's address only once the address has proved it can
+receive there.** A bind (A.5) carrying the port's token draws a check, sent to
+the bind's source address and no larger than the bind, carrying a nonce. A
+proof carrying that nonce, from that address, records it. The first address
+recorded is the party's for the life of the allocation; binds and proofs after
+it are discarded. Without the check, anyone holding a token — which is anyone
+who asked for a relay — could bind it from a forged source address and have
+the other party's traffic sent there.
+
+Once both have recorded an address, a datagram from one party is sent on,
+unchanged, from the *other* port to the other party's address. Anything else
+that arrives is discarded.
+
+The starting party then begins a full handshake to its port's address, and the
+two run an ordinary session through it. **The relay sees only ciphertext**: the
+session is between the two parties' keys, and the rendezvous holds neither.
+
+A rendezvous MUST bound the number of allocations it holds, in total and per
+source address, the rate at which each allocation forwards, and how often a
+port sends checks. It MUST release an allocation that has forwarded nothing
+for a period it chooses; datagrams it discarded do not count as activity.
+
+### A.5 Datagrams that are not frames
+
+Byte 0 of each is 0xF0 — version 15, which no version-1 receiver implements —
+so a FECTP receiver sent one rejects it as it would any frame of a version it
+does not implement (§1.1). The punch is rejected even sooner, being shorter
+than a header.
+
+```
+punch : 0xF0 || 0x50                (2 bytes)   client → peer
+bind  : 0xF0 || 0x42 || token[16]   (18 bytes)  client → relay port
+check : 0xF0 || 0x43 || nonce[16]   (18 bytes)  relay port → client
+proof : 0xF0 || 0x44 || nonce[16]   (18 bytes)  client → relay port
+```
+
+A punch carries nothing and is never answered; it exists to be sent. A client
+answers a check with a proof only if it came from a relay port it was offered,
+and goes on binding and answering until its session through the port is up:
+a proof can be lost, and the port checks again on the next bind. A client
+cannot know when it has been recorded, and a port discards what follows.
+
+### A.6 What this does not provide
+
+- **Privacy of addresses between the pair.** Once both have asked for each
+  other, each learns where the other is. A rendezvous may further restrict
+  which pairs it introduces.
+- **Following a move through a relay.** A port records its party's address
+  once. A party whose NAT gives it a new mapping toward the port loses the
+  relayed session and must be introduced again.
+- **A relay that cannot observe.** Integrity and confidentiality hold end to
+  end, but a relay sees who talks to whom, when, and how much, and can drop or
+  delay anything.
+- **A rendezvous that cannot lie.** It can give a wrong address, or none, and
+  so deny a pair their session. It cannot impersonate either party: the
+  handshake authenticates the key each asked for.
+
 ## Licence
 
 BSD 3-Clause. This specification may be implemented freely, without royalty or

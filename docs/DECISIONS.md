@@ -557,6 +557,11 @@ One socket is necessary but not sufficient. Peer discovery, STUN-style address
 reflection, and the hole-punching handshake itself are all absent; what exists
 is the property they depend on.
 
+*Since [D86](#d86--rendezvous-and-relay-both-sides-must-ask)*: address
+reflection and hole punching exist, through a rendezvous, with a relay for the
+NATs that cannot be punched through. Peer discovery — learning which key to ask
+for — is still absent.
+
 ---
 
 ## Known gaps
@@ -569,7 +574,7 @@ These are unimplemented, not overlooked.
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
 | **A peer timeout needs keep-alives to mean anything** | `set_peer_timeout` releases a peer nothing authenticated has been heard from ([D51](#d51--giving-up-on-a-peer-and-the-bug-that-found)). On its own it is an idle timeout and will drop a peer that is alive and quiet; it is evidence of death only when keep-alives were being sent for it to ignore. | Both are off by default, and the pairing is documented rather than enforced — an idle timeout without keep-alives is occasionally exactly what a caller wants, and a transport that refused to configure it would be guessing. |
-| **NAT traversal** | One socket serves both directions (D16), but there is no discovery, address reflection, or hole-punching coordination. | Those are separable problems built on the socket property, not changes to it. |
+| **A relayed session does not follow a move** | A relay port records its party's address once ([D86](#d86--rendezvous-and-relay-both-sides-must-ask)), so a client whose NAT re-maps it toward the relay loses the session and must be introduced again. | Following it would mean re-proving an address mid-session, which is the check a forged bind is stopped by; done carelessly, it is the hole the check closes. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Fragmentation is invisible to the frame-size search** | Sessions search for a frame size up to a raised ceiling ([D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)), but this crate does not control the don't-fragment bit, so a probe split on the way — by a router or by the sending host, on IPv4 or IPv6 — still comes back answered. | Setting the bit takes `setsockopt`, which needs `unsafe` this crate forbids, or a dependency that holds it, and on Windows none is safe. The default ceiling stays at 1200, where the question does not arise. |
@@ -4518,3 +4523,94 @@ wiring was removed in turn — answers ignored, no check on a large resend, no
 reset on a move, a fall-back not applied, probing before the peer has spoken —
 and a test failed for each. The last needed the test to wake the loop with
 keep-alives, because a quiet session never runs the pass that would probe.
+
+## D86 — Rendezvous and relay: both sides must ask
+
+**Problem**: two peers each behind a NAT cannot reach one another. D16 gave
+every endpoint one socket for both directions, which is what hole punching
+needs, and stopped there: nothing told a peer where it appears from outside,
+or where the other does, or coordinated the two sending at once. And some NATs
+cannot be punched through at all — a symmetric NAT shows each destination its
+own mapping, so the address any third party saw is of no use to anyone else.
+
+**Decision**: a `Rendezvous` type, which both peers can reach, and a client
+side on `Endpoint` (SPEC Appendix A). Everything between them rides on an
+ordinary FECTP session as reliable messages, so **no frame changed**: what is
+new is what those messages say, and four small datagrams that are not frames
+and that every existing receiver rejects at the version check.
+
+- **Registration is a message, not a handshake.** A client registers by
+  sending `REGISTER`. A completed handshake proves nothing about the address
+  it came from — it takes the rendezvous's public key and one datagram — so a
+  rendezvous that registered on connecting would answer, and retransmit to, a
+  forged address: one datagram in, a stream out, which D57 forbade.
+- **Both sides must ask.** An introduction tells each side where the other is
+  and has each send to the other, and a NAT that kept one of them unreachable
+  no longer does once it has. The first design introduced on one side's
+  request; a review before any code was written pointed out that this let
+  anyone who knew a key open that key's holder to them. Now a rendezvous waits
+  for the matching request, and a client ignores an introduction for a key it
+  did not ask for — so a lying rendezvous cannot aim its clients at a victim
+  either.
+- **Roles come from the keys.** The smaller key starts the handshake, worked
+  out by each side for itself, so two sides asking at once run one handshake,
+  and a rendezvous cannot stall a pair by telling both to wait.
+- **The relay proves addresses.** Anyone who asked for a relay holds a token,
+  and a token can be sent from a forged source address. A port that recorded
+  whoever sent the bind would send the other side's traffic there: an open
+  relay, aimed by the forger, from the rendezvous's own address. So a bind
+  draws a check no larger than itself, and only an answered check records the
+  address — once, for the life of the allocation, because a token travels in
+  the clear and a replayed bind that moved the binding would hijack it.
+- **Bounded per address, not per key.** Keys cost nothing to make. Relay
+  allocations are capped at 64 in total and 4 per client IP, registrations at
+  32 per IP, requests — to be introduced or relayed — at 4 a second per IP
+  with a burst of 8, and each allocation
+  forwards at most 1 MiB/s and goes after 60 s of forwarding nothing; what it
+  discards does not count as activity. The rendezvous turns on keep-alives and
+  a peer timeout for itself, so a departed client's address — which may be
+  someone else's by now — is not handed out.
+- **The relay is end to end encrypted.** The two clients run an ordinary
+  session through it, between their own keys. The rendezvous holds neither.
+
+**An `Endpoint` can run on a socket of its caller's making**, which is how this
+was tested: loopback has no NAT, and a relay in front of a real socket cannot
+make one, because a NAT translates everything a host sends and a relay sees
+only what is addressed to it. `DatagramSocket` and `Endpoint::bind_socket`
+let the tests replace the host's socket with an emulated NAT — full cone,
+port-restricted, symmetric — each held to what makes it that kind before
+anything relied on it.
+
+**Verified by breaking it.** Two port-restricted NATs connect directly; a
+symmetric one on either side is reached through the relay; a pair where only
+one side asked is never introduced; a lying rendezvous's introduction is
+ignored. Removing the punch, the fall-back to the relay, the requirement that
+both ask, or the client's check that it asked, each failed a test. On the
+relay: recording a bind without a check, letting a later bind move the
+binding, registering on connecting, and removing the rate cap each failed one.
+
+**What the tests did not find, and a reading of the code did.** Every test
+passed before an audit of the documentation against the code found eight
+behaviours that were wrong, three of them serious. A rendezvous bound to
+`0.0.0.0` — which the usage guide's own example did — advertised relay ports
+at `0.0.0.0`, which nobody can send to; on Windows the client's attempt to was
+an error that ended its poll loop. Every test had bound `127.0.0.1`. A lost
+proof ended the relay for good, because the client stopped binding once it
+had sent one. And an introduction request sent straight after the
+registration could overtake it, reliable messages being unordered, and be
+dropped without a word. Beside those: a client could make the rendezvous's
+poll fail by never acknowledging, a refused relay was reported to only one
+side, a session already up was later reported as a failed introduction, and
+two send paths let a rendezvous end a client's poll loop. Each now has a test
+that fails with the old behaviour put back — for the overtaking request, only
+once the test's socket loses the registration's first transmission, since
+loopback reorders nothing on its own.
+
+**What it does not do.** Learning which key to ask for is the application's.
+A relayed session does not follow a NAT re-mapping. A relay sees who talks to
+whom, when and how much, and can drop anything; a rendezvous can deny a pair
+their session by lying about an address, but cannot impersonate either side,
+because the handshake authenticates the key each asked for. An attacker with
+many IP addresses can still hold every relay allocation; the caps make that
+cost addresses rather than keys, which is the most a rendezvous that serves
+strangers can do on its own.

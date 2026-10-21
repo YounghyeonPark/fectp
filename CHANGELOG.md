@@ -16,6 +16,16 @@ datagram, wait for one with a timeout, say where it is bound. `bind` is
 unchanged and still makes a UDP socket. It is how this crate's tests now put
 endpoints behind emulated NATs, which a real socket on loopback cannot be.
 
+**NAT traversal through a rendezvous.** A new `Rendezvous` type, which two
+peers behind NATs can both reach, introduces them once both have asked for
+each other (`Endpoint::connect_rendezvous`, `Endpoint::introduce`); they punch
+through their NATs and connect directly, or through its relay where a
+symmetric NAT makes that impossible, still encrypted between the two of them.
+New `Event::IntroductionFailed`, `Error::NoRendezvous`, and
+`Endpoint::observed_addr` and `is_relayed`. A rendezvous bound to a wildcard
+address relays only once `set_relay_address` says where clients reach it. SPEC Appendix A; the wire format
+of every frame is unchanged (D86).
+
 ## 0.3.0 — 2026-10-21
 
 **The crates.** crates.io goes from 0.2.1 to 0.3.0: 0.2.2 was the bindings'

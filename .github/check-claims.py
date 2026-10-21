@@ -66,9 +66,14 @@ ALLOWED = {
         "`probe` matches CAP_PMTU_PROBE, the capability for the probe frame "
         "that SPEC 5.8.7 does specify; what section 10 leaves open is the "
         "schedule, which has no name of its own to collide with.",
-    "peer discovery and nat traversal":
+    "a relayed session does not follow a move":
+        "`relayed` matches is_relayed, which says a session runs through a "
+        "relay; what is absent is a relayed session following its client to a "
+        "new address.",
+    "peer discovery":
         "`discovery` matches set_path_mtu_discovery, which finds a frame size "
-        "for a peer already connected, not the peer.",
+        "for a peer already connected, and `peer` matches every per-peer "
+        "item; what is absent is learning which key to ask a rendezvous for.",
     "ordering":
         "`order` matches nothing built; reordering *tolerance* is a different "
         "property and is in the Working list under its own name.",

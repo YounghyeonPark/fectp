@@ -197,6 +197,41 @@ An endpoint that is not polled does nothing.
 An endpoint dials *and* listens on the same socket, which is what makes NAT
 hole punching possible at all.
 
+### Through a rendezvous
+
+| | |
+|---|---|
+| `connect_rendezvous(addr, rendezvous_public)` | Registers with a `Rendezvous`. Its messages are not raised as `Event::Message`. |
+| `introduce(their_public)` | Asks to be introduced. Nothing happens until they ask for this endpoint too. |
+| `observed_addr()` | Where the rendezvous sees this endpoint: outside its NAT. |
+| `is_relayed(peer)` | Whether a session runs through the relay rather than directly. |
+
+Success is an ordinary `Event::Connected` for a peer whose `peer_public_key`
+is the one asked for; failure is `Event::IntroductionFailed { peer_public,
+reason }`, on both sides when the rendezvous refuses to relay. A relay drops a
+session that carries nothing for a minute, so a relayed one that may fall
+quiet wants `set_keepalive` below that. At most `MAX_INTRODUCTIONS` (16) outstanding at once. Public-key
+mode only: a rendezvous knows its clients by their keys.
+
+## Rendezvous
+
+The third party two NATed peers both reach (SPEC Appendix A). An endpoint
+underneath, driven the same way.
+
+| | |
+|---|---|
+| `bind(addr, identity)` | Serves `identity`; clients must know its public key. |
+| `set_relay_address(ip)` | Where clients reach this host, for relay ports to be advertised at. Required to relay when bound to `0.0.0.0` or behind a NAT; until then it refuses. |
+| `poll(timeout)` | Does whatever is due, returning within a second whatever `timeout` says. Call it in a loop. A client cannot make it fail. |
+| `set_policy(allow)` | Which pairs may be introduced, and so relayed. Every pair that asked, by default. |
+| `set_introduction_window(d)` | How long one side's request waits for the other's. 30 s by default. |
+| `clients()` / `relays()` | Registered now; relay allocations held now. |
+
+It turns on keep-alives every 15 s and a 60 s peer timeout for itself, so a
+departed client's address is not handed out. Relay allocations are capped at
+64 in total and 4 per client IP address, forward at most 1 MiB/s each, and go
+after 60 s of forwarding nothing.
+
 ### Sending
 
 The same two calls as `Connection`, with a `PeerId` first:

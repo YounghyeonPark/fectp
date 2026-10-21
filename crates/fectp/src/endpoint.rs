@@ -63,6 +63,7 @@ use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::pmtu::Pmtu;
+use crate::rendezvous::{self, Ask, ClientState, Control, Stage, Unavailable};
 use crate::udp::{DatagramSocket, BASE_DATAGRAM};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
@@ -159,6 +160,14 @@ pub enum Event {
     PeerLost {
         /// The handle, which no longer resolves.
         peer: PeerId,
+    },
+    /// An introduction asked for with [`Endpoint::introduce`] did not end in
+    /// a session.
+    IntroductionFailed {
+        /// The key that was asked for.
+        peer_public: PublicKey,
+        /// Why.
+        reason: crate::rendezvous::Unavailable,
     },
     /// Nothing arrived before the timeout elapsed.
     Idle,
@@ -331,6 +340,8 @@ enum Handshake {
 
 struct Outbound {
     handshake: Handshake,
+    /// The key this handshake names, in public-key mode.
+    peer_key: Option<PublicKey>,
     addr: SocketAddr,
     session_id: u32,
     /// The opening frame, kept so it can be sent again if the reply is lost.
@@ -461,6 +472,8 @@ pub struct Endpoint {
     ack: Vec<u8>,
     scratch: Vec<u8>,
     epoch: Instant,
+    /// This endpoint as a client of a rendezvous, if it is one.
+    rv: ClientState,
 }
 
 /// Sends one datagram, treating "nobody is listening there" as ordinary.
@@ -634,7 +647,430 @@ impl Endpoint {
             ack: vec![0u8; size],
             scratch: vec![0u8; size],
             epoch: Instant::now(),
+            rv: ClientState::default(),
         })
+    }
+
+    // ---- rendezvous, as a client (SPEC Appendix A) -------------------------
+
+    /// Connects to a [`Rendezvous`](crate::Rendezvous) and registers with it,
+    /// so that other clients of it can ask to be introduced to this one.
+    ///
+    /// Registration is sent once the handshake completes, which arrives as
+    /// [`Event::Connected`] for the handle returned here, as any connection's
+    /// does, and is done once the rendezvous answers with where it sees this
+    /// endpoint ([`observed_addr`](Self::observed_addr)). Messages on that
+    /// session are the rendezvous's own and are not raised as
+    /// [`Event::Message`]. One rendezvous at a time; connecting to another
+    /// replaces it.
+    pub fn connect_rendezvous(
+        &mut self,
+        addr: impl ToSocketAddrs,
+        rendezvous_public: &PublicKey,
+    ) -> Result<PeerId> {
+        if !matches!(self.mode, Mode::PublicKey(_)) {
+            // A rendezvous knows its clients by their static keys, which a
+            // pre-shared-key session does not have.
+            return Err(Error::MissingPeerKey);
+        }
+        let peer = self.connect(addr, Some(rendezvous_public))?;
+        self.rv.rendezvous = Some(peer);
+        self.rv.registered = false;
+        self.rv.observed = None;
+        Ok(peer)
+    }
+
+    /// Asks the rendezvous to introduce this endpoint to the holder of `key`.
+    ///
+    /// Nothing happens until that holder asks for this endpoint too, within
+    /// the rendezvous's window, even if it has not registered yet: an
+    /// introduction tells each side where the other is and has each send to
+    /// the other, so it takes both to agree (SPEC A.3). Then the two punch
+    /// holes in their NATs and connect directly, or through the rendezvous
+    /// if their NATs will not allow that. Success is the ordinary
+    /// [`Event::Connected`], for a peer whose
+    /// [`peer_public_key`](Self::peer_public_key) is `key`; failure is
+    /// [`Event::IntroductionFailed`]. With a session to `key` already open,
+    /// nothing is asked: that session is the answer.
+    ///
+    /// Fails with [`Error::NoRendezvous`] with no rendezvous connected — none
+    /// asked for, or the one asked for never answered or has been lost — and
+    /// with [`Error::Protocol`] wrapping `WindowFull` with
+    /// [`MAX_INTRODUCTIONS`](crate::rendezvous::MAX_INTRODUCTIONS) already
+    /// outstanding.
+    pub fn introduce(&mut self, key: &PublicKey) -> Result<()> {
+        if self.rv.rendezvous.is_none() {
+            return Err(Error::NoRendezvous);
+        }
+        if self.has_session_with(key) {
+            return Ok(());
+        }
+        if !self.rv.asks.contains_key(key) && self.rv.asks.len() >= rendezvous::MAX_INTRODUCTIONS {
+            return Err(Error::Protocol(fectp_core::Error::WindowFull));
+        }
+        self.rv.asks.insert(
+            *key,
+            Ask {
+                since: Instant::now(),
+                stage: Stage::Asked,
+            },
+        );
+        if self.rv.registered {
+            self.tell_rendezvous(&Control::Introduce(*key));
+        }
+        self.wake_at(Instant::now());
+        Ok(())
+    }
+
+    /// Where the rendezvous sees this endpoint: its address outside its NAT,
+    /// as of registering. `None` until registration is done.
+    pub fn observed_addr(&self) -> Option<SocketAddr> {
+        self.rv.observed
+    }
+
+    /// Whether a session runs through a rendezvous's relay rather than
+    /// directly.
+    ///
+    /// A relay releases a session that has carried nothing for
+    /// [`RELAY_IDLE`](crate::rendezvous::RELAY_IDLE), a minute, so one that
+    /// may fall quiet wants [`set_keepalive`](Self::set_keepalive) at less
+    /// than that.
+    pub fn is_relayed(&self, peer: PeerId) -> bool {
+        self.rv.relayed.contains(&peer)
+    }
+
+    /// Whether a session with `key` is open or a full handshake to it is
+    /// under way.
+    fn has_session_with(&self, key: &PublicKey) -> bool {
+        self.peers
+            .values()
+            .any(|e| e.peer.session.remote_static() == key)
+            || self
+                .outbound
+                .values()
+                .any(|o| o.peer_key.as_ref() == Some(key))
+    }
+
+    /// Sends the rendezvous a message, dropping it if it cannot go: what was
+    /// asked fails at its deadline instead, and the poll loop is not the
+    /// rendezvous's to end.
+    fn tell_rendezvous(&mut self, control: &Control) {
+        if let Some(rendezvous) = self.rv.rendezvous {
+            let _ = self.send_reliable(rendezvous, &control.encode(), PayloadType::Opaque);
+        }
+    }
+
+    /// Our own static key, in public-key mode.
+    fn own_key(&self) -> Option<PublicKey> {
+        self.public_key().copied()
+    }
+
+    /// Ends an introduction as failed.
+    fn fail_introduction(&mut self, key: PublicKey, reason: Unavailable) {
+        if self.rv.asks.remove(&key).is_some() {
+            self.events.push_back(Event::IntroductionFailed {
+                peer_public: key,
+                reason,
+            });
+        }
+    }
+
+    /// The rendezvous is gone: everything asked of it fails.
+    fn lose_rendezvous(&mut self) {
+        self.rv.rendezvous = None;
+        self.rv.registered = false;
+        self.rv.observed = None;
+        let keys: Vec<PublicKey> = self.rv.asks.keys().copied().collect();
+        for key in keys {
+            self.fail_introduction(key, Unavailable::Unreachable);
+        }
+    }
+
+    /// Sends what the introductions need sent now, and gives up on the ones
+    /// that have run out of time.
+    fn drive_introductions(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<PublicKey> = self
+            .rv
+            .asks
+            .iter()
+            .filter(|(_, ask)| now.duration_since(ask.since) > rendezvous::INTRODUCTION_DEADLINE)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in expired {
+            self.fail_introduction(key, Unavailable::Unreachable);
+        }
+
+        let mut binds = Vec::new();
+        let mut abandoned = Vec::new();
+        for (key, ask) in &mut self.rv.asks {
+            if let Stage::Relaying {
+                port,
+                token,
+                checked,
+                binds: sent,
+                next_bind,
+                ..
+            } = &mut ask.stage
+            {
+                if now < *next_bind || *sent > rendezvous::BINDS {
+                    continue;
+                }
+                if *sent == rendezvous::BINDS {
+                    // Every bind sent. Never checked means the port is not
+                    // there for us; checked, the session decides.
+                    *sent += 1;
+                    if !*checked {
+                        abandoned.push(*key);
+                    }
+                    continue;
+                }
+                // Binds keep going after a check, until the session is up: a
+                // proof can be lost, and the next bind draws a new check.
+                *sent += 1;
+                *next_bind = now + rendezvous::BIND_INTERVAL;
+                let mut bind = vec![rendezvous::NOT_A_FRAME, rendezvous::BIND];
+                bind.extend_from_slice(token);
+                binds.push((bind, *port));
+            }
+        }
+        for key in abandoned {
+            self.fail_introduction(key, Unavailable::Unreachable);
+        }
+        // A bind that cannot be sent is a port that is never checked, which
+        // the count above already handles.
+        for (bind, port) in binds {
+            let _ = self.socket.send_to(&bind, port);
+        }
+    }
+
+    /// When an introduction next needs attention.
+    fn next_introduction_deadline(&self) -> Option<Instant> {
+        self.rv
+            .asks
+            .values()
+            .map(|ask| match &ask.stage {
+                Stage::Relaying {
+                    binds, next_bind, ..
+                } if *binds <= rendezvous::BINDS => *next_bind,
+                _ => ask.since + rendezvous::INTRODUCTION_DEADLINE,
+            })
+            .min()
+    }
+
+    /// Takes the events that belong to the rendezvous machinery, acting on
+    /// them; passes the rest through.
+    fn intercept(&mut self, event: Event) -> Option<Event> {
+        match event {
+            Event::Connected { peer, .. } if Some(peer) == self.rv.rendezvous => {
+                // Registration is done when the rendezvous answers it; what
+                // was asked meanwhile waits for that, because reliable
+                // messages are not ordered and a request that overtook the
+                // registration would be dropped.
+                self.tell_rendezvous(&Control::Register);
+                Some(event)
+            }
+            Event::Connected { peer, .. } => {
+                let Some(key) = self.peer_public_key(peer).copied() else {
+                    return Some(event);
+                };
+                // A session with the key asked for answers the request,
+                // however it came about. Counted only if the handshake
+                // authenticated that key: the waiting side accepts any
+                // opening frame (SPEC A.3).
+                if let Some(ask) = self.rv.asks.remove(&key) {
+                    if let Stage::Relaying { port, .. } = ask.stage {
+                        if self.peer_addr(peer) == Some(port) {
+                            self.rv.relayed.insert(peer);
+                        }
+                    }
+                }
+                Some(event)
+            }
+            Event::Message { peer, data } if Some(peer) == self.rv.rendezvous => {
+                if let Some(control) = Control::decode(&data) {
+                    self.on_control(control);
+                }
+                None
+            }
+            Event::ConnectFailed { peer } if Some(peer) == self.rv.rendezvous => {
+                self.lose_rendezvous();
+                Some(event)
+            }
+            Event::ConnectFailed { peer } => {
+                let owner = self.rv.asks.iter().find_map(|(key, ask)| match &ask.stage {
+                    Stage::Introduced {
+                        outbound: Some(id), ..
+                    }
+                    | Stage::Relaying {
+                        outbound: Some(id), ..
+                    } if *id == peer => Some(*key),
+                    _ => None,
+                });
+                let Some(key) = owner else {
+                    return Some(event);
+                };
+                // Not the application's handle: it asked for an
+                // introduction, not for this connect.
+                let first_failure = match self.rv.asks.get_mut(&key).map(|a| &mut a.stage) {
+                    Some(Stage::Introduced { relay_asked, .. }) if !*relay_asked => {
+                        *relay_asked = true;
+                        true
+                    }
+                    _ => false,
+                };
+                if first_failure {
+                    self.tell_rendezvous(&Control::Relay(key));
+                } else {
+                    self.fail_introduction(key, Unavailable::Unreachable);
+                }
+                None
+            }
+            Event::PeerLost { peer } => {
+                self.rv.relayed.remove(&peer);
+                if Some(peer) == self.rv.rendezvous {
+                    self.lose_rendezvous();
+                }
+                Some(event)
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Acts on one message from the rendezvous.
+    fn on_control(&mut self, control: Control) {
+        match control {
+            Control::Observed(addr) => {
+                self.rv.observed = Some(addr);
+                if !self.rv.registered {
+                    self.rv.registered = true;
+                    let waiting: Vec<PublicKey> = self
+                        .rv
+                        .asks
+                        .iter()
+                        .filter(|(_, a)| matches!(a.stage, Stage::Asked))
+                        .map(|(k, _)| *k)
+                        .collect();
+                    for key in waiting {
+                        self.tell_rendezvous(&Control::Introduce(key));
+                    }
+                }
+            }
+            Control::Unavailable(key, reason) => {
+                self.fail_introduction(key, Unavailable::from_byte(reason));
+            }
+            Control::Introduction(key, addr) => {
+                // Only what was asked for, and not twice (SPEC A.3): a
+                // rendezvous is trusted to say where a peer is, not to have
+                // this endpoint send wherever it likes.
+                let asked = self
+                    .rv
+                    .asks
+                    .get(&key)
+                    .is_some_and(|a| matches!(a.stage, Stage::Asked));
+                if !asked || self.has_session_with(&key) {
+                    return;
+                }
+                // A punch that cannot be sent — an address this socket cannot
+                // reach — fails this introduction, not the poll loop.
+                let _ = self
+                    .socket
+                    .send_to(&[rendezvous::NOT_A_FRAME, rendezvous::PUNCH], addr);
+                let outbound = match self.own_key() {
+                    Some(ours) if rendezvous::starts(&ours, &key) => {
+                        match self.connect(addr, Some(&key)) {
+                            Ok(id) => Some(id),
+                            Err(_) => {
+                                return self.fail_introduction(key, Unavailable::Unreachable);
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(ask) = self.rv.asks.get_mut(&key) {
+                    ask.stage = Stage::Introduced {
+                        outbound,
+                        relay_asked: false,
+                    };
+                }
+            }
+            Control::RelayOffer(key, port, token) => {
+                let Some(ask) = self.rv.asks.get_mut(&key) else {
+                    return;
+                };
+                // An offer again for a port already being proved is covered
+                // by the binds already under way.
+                if matches!(ask.stage, Stage::Introduced { .. }) {
+                    ask.stage = Stage::Relaying {
+                        port,
+                        token,
+                        checked: false,
+                        binds: 0,
+                        next_bind: Instant::now(),
+                        outbound: None,
+                    };
+                    self.wake_at(Instant::now());
+                }
+            }
+            // Not ours to receive.
+            Control::Register | Control::Introduce(_) | Control::Relay(_) => {}
+        }
+    }
+
+    /// A datagram that is not a frame (SPEC A.5). The only one a client
+    /// answers is a check from a relay port it was offered, for as long as
+    /// the session through it is not up: a proof can be lost, and the port
+    /// checks again on the next bind.
+    fn not_a_frame(&mut self, n: usize, from: SocketAddr) {
+        let datagram = &self.rx[..n];
+        let [rendezvous::NOT_A_FRAME, rendezvous::CHECK, nonce @ ..] = datagram else {
+            return;
+        };
+        if nonce.len() != rendezvous::SECRET_LEN {
+            return;
+        }
+        let mut proof = vec![rendezvous::NOT_A_FRAME, rendezvous::PROOF];
+        proof.extend_from_slice(nonce);
+        let ours = self.own_key();
+        let owner = self.rv.asks.iter().find_map(|(key, ask)| match &ask.stage {
+            Stage::Relaying { port, .. } if *port == from => Some(*key),
+            _ => None,
+        });
+        let Some(key) = owner else {
+            return;
+        };
+        let _ = self.socket.send_to(&proof, from);
+        let first = matches!(
+            self.rv.asks.get(&key).map(|a| &a.stage),
+            Some(Stage::Relaying { checked: false, .. })
+        );
+        // The starting side connects through the port once, on the first
+        // check; the handshake's own retransmissions cover the other side
+        // not having proved its address yet.
+        let outbound = match ours {
+            Some(ours) if first && rendezvous::starts(&ours, &key) => {
+                match self.connect(from, Some(&key)) {
+                    Ok(id) => Some(id),
+                    Err(_) => return self.fail_introduction(key, Unavailable::Unreachable),
+                }
+            }
+            _ => None,
+        };
+        if let Some(Ask {
+            stage:
+                Stage::Relaying {
+                    checked,
+                    outbound: slot,
+                    ..
+                },
+            ..
+        }) = self.rv.asks.get_mut(&key)
+        {
+            *checked = true;
+            if outbound.is_some() {
+                *slot = outbound;
+            }
+        }
     }
 
     /// The address the server is bound to.
@@ -742,6 +1178,7 @@ impl Endpoint {
             peer_id,
             Outbound {
                 handshake,
+                peer_key: peer_public.copied(),
                 addr,
                 session_id,
                 frame,
@@ -897,6 +1334,43 @@ impl Endpoint {
     /// regularly for reliable delivery to make progress.
     pub fn poll(&mut self, timeout: Option<Duration>) -> Result<Event> {
         let deadline = timeout.map(|t| Instant::now() + t);
+        loop {
+            // Introductions have timers of their own, and some events are
+            // theirs to consume; neither may cost the caller their timeout.
+            if !self.rv.asks.is_empty() {
+                self.drive_introductions();
+            }
+            if let Some(event) = self.events.pop_front() {
+                if let Some(event) = self.intercept(event) {
+                    return Ok(event);
+                }
+                continue;
+            }
+            let now = Instant::now();
+            let until_deadline = deadline.map(|d| d.saturating_duration_since(now));
+            let until_introduction = self
+                .next_introduction_deadline()
+                .map(|at| at.saturating_duration_since(now));
+            let wait = [until_deadline, until_introduction]
+                .into_iter()
+                .flatten()
+                .min();
+            let event = self.poll_once(wait)?;
+            if !matches!(event, Event::Idle) {
+                if let Some(event) = self.intercept(event) {
+                    return Ok(event);
+                }
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(Event::Idle);
+            }
+        }
+    }
+
+    /// One pass of the loop under [`poll`](Self::poll): everything but the
+    /// rendezvous.
+    fn poll_once(&mut self, timeout: Option<Duration>) -> Result<Event> {
+        let deadline = timeout.map(|t| Instant::now() + t);
 
         loop {
             // Time-driven work runs when it is due, not once per datagram.
@@ -966,6 +1440,14 @@ impl Endpoint {
 
     /// Routes one received datagram.
     fn dispatch(&mut self, n: usize, from: SocketAddr) -> Result<Option<Event>> {
+        // Not a frame (SPEC A.5): a punch, which is never answered, or a relay
+        // port checking an address this endpoint bound.
+        if self.rx[..n].first() == Some(&rendezvous::NOT_A_FRAME) {
+            if !self.rv.asks.is_empty() {
+                self.not_a_frame(n, from);
+            }
+            return Ok(None);
+        }
         let Ok(header) = Header::decode(&self.rx[..n]) else {
             return Ok(None);
         };

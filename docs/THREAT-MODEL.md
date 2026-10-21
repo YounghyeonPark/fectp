@@ -279,6 +279,17 @@ relying on something only the sender's own tests check.
 
 ---
 
+### A rendezvous sees who talks to whom, and a relay can be held by many addresses
+
+Optional, and only for applications that use a `Rendezvous` (D86). It learns
+each client's key and where it appears from, which pairs ask for each other,
+and, for a relayed pair, the timing and volume of everything they send. The
+content is encrypted between the two clients, and a rendezvous cannot
+impersonate either; it can lie about an address and so deny a pair their
+session. An attacker with many IP addresses can hold every relay allocation —
+the caps are per address, because keys are free — and a rendezvous serving
+strangers has no further defence of its own against that.
+
 ## Assumptions
 
 If any of these does not hold, the claims above do not either.

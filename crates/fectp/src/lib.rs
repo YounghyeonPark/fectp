@@ -95,6 +95,7 @@
 pub mod compress;
 mod pipeline;
 mod pmtu;
+pub mod rendezvous;
 use pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending};
 use pmtu::Pmtu;
 mod endpoint;
@@ -126,6 +127,7 @@ pub use endpoint::{
 pub use fectp_core::codec::{CODECS_CORE as CORE_CODECS, CODEC_HEADER_LEN as CODEC_OVERHEAD};
 pub use pipeline::MAX_QUEUED;
 pub use pipeline::{MAX_TICKETS, TICKET_LIFETIME};
+pub use rendezvous::Rendezvous;
 /// How long a handshake waits for the peer's reply before giving up.
 ///
 /// Applies to every way of opening a connection, which is why none of them
@@ -312,6 +314,8 @@ pub enum Error {
     UnknownPeer,
     /// Public-key mode needs the peer's public key, and none was given.
     MissingPeerKey,
+    /// An introduction was asked for with no rendezvous connected.
+    NoRendezvous,
 }
 
 impl std::fmt::Display for Error {
@@ -336,6 +340,7 @@ impl std::fmt::Display for Error {
             Error::UnknownTicket => f.write_str("unknown or already-used resumption ticket"),
             Error::UnknownPeer => f.write_str("no such connected peer"),
             Error::MissingPeerKey => f.write_str("public-key mode requires the peer's public key"),
+            Error::NoRendezvous => f.write_str("no rendezvous is connected"),
             Error::Closed => f.write_str("the connection is closed"),
         }
     }

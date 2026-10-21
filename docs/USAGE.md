@@ -779,6 +779,51 @@ Off by default. Memory is bounded without it: `MAX_PEERS` and the eviction
 order already drop the longest-silent session when room is needed, so a timeout
 buys prompt notice rather than safety.
 
+## Reaching a peer behind a NAT
+
+Two peers each behind a home router cannot dial one another: neither router
+lets in what nobody inside asked for. A `Rendezvous` that both can reach
+introduces them. Each registers with it and asks for the other by key, and
+once **both** have asked, each is told where the other appears; they punch
+holes in their NATs and connect directly. Where a NAT will not allow that — a
+symmetric one, common on mobile networks, shows every destination a different
+address — the rendezvous relays their datagrams instead, still encrypted
+between the two of them.
+
+```rust
+// On a host both can reach, in a loop of its own.
+let mut rendezvous = fectp::Rendezvous::bind("0.0.0.0:4500", Identity::generate())?;
+// Bound to a wildcard, it has to be told where clients reach it before it
+// can advertise relay ports there; until then it refuses to relay.
+rendezvous.set_relay_address("203.0.113.7".parse().expect("an IP address"));
+let rendezvous_public = *rendezvous.public_key();
+rendezvous.poll(Some(Duration::from_millis(100)))?;
+
+// On each peer.
+let mut node = Endpoint::bind("0.0.0.0:0", identity)?;
+node.connect_rendezvous("rendezvous.example:4500", &rendezvous_public)?;
+node.introduce(&their_public)?; // and they ask for us
+
+loop {
+    match node.poll(Some(Duration::from_millis(100)))? {
+        Event::Connected { peer, .. } if node.peer_public_key(peer) == Some(&their_public) => {
+            let how = if node.is_relayed(peer) { "through the relay" } else { "directly" };
+            println!("connected {how}");
+        }
+        Event::IntroductionFailed { reason, .. } => println!("not reached: {reason:?}"),
+        _ => {}
+    }
+}
+```
+
+Asking is consent: an introduction tells each side where the other is, and a
+NAT that kept one of them unreachable no longer does once it has. So nobody is
+introduced on one side's say-so, and a client ignores an introduction for a
+key it did not ask for. Learning which key to ask for is not part of this.
+
+A relay releases a session that has carried nothing for a minute, so if a
+relayed one may fall quiet, turn on `set_keepalive` below that.
+
 ## Length masking
 
 Frame sizes reveal payload lengths. If the lengths themselves are sensitive:

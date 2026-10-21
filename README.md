@@ -301,7 +301,7 @@ let peer = node.connect("other-node:4433", None)?;   // the same socket
 Sharing the socket is not tidiness. A NAT maps a **local port**, so a node that
 dials out from one port and listens on another cannot be reached through the
 mapping its own traffic just created. One socket is the precondition for hole
-punching — though the punching itself is not built.
+punching, which a `Rendezvous` coordinates (see Limitations).
 
 `connect` does not block: it sends the opening packet and returns a handle. The
 handshake completes during `poll`, as `Event::Connected { initiated: true }`, or
@@ -348,7 +348,7 @@ records what each one would cost to change.
 | | |
 |---|---|
 | **Not for browsers** | Nothing here speaks HTTP or WebRTC. Both ends must be software you control. |
-| **Not a P2P stack** | One socket serves both directions, which is the *precondition* for hole punching — but there is no peer discovery, address reflection or traversal coordination. |
+| **Reaching a peer behind a NAT takes a third party** | A `Rendezvous` that both peers can reach introduces them once *both* have asked for each other; they punch through their NATs and connect directly, or through its relay where a symmetric NAT makes that impossible ([D86](docs/DECISIONS.md#d86--rendezvous-and-relay-both-sides-must-ask)). The relay carries ciphertext it cannot read, but sees who talks to whom and how much. Finding a peer's key in the first place is still yours. |
 | **UDP only** | A QUIC backend would slot into the `Transport` trait, which is defined over datagrams; it is not written. **TCP would not** — it is a stream, so it needs a length prefix read before authentication, which is the one thing the header design avoids, and it reinstates the head-of-line blocking this exists to escape ([D40](docs/DECISIONS.md#d40--tcp-is-not-a-backend-it-is-a-different-protocol)). |
 
 ---
@@ -360,12 +360,12 @@ replay protection, reorder tolerance, capability negotiation, per-message
 reliable delivery, messages split across frames, congestion control, session
 resumption, many peers on one socket, outbound dialling on that same socket,
 two security modes, address migration, key replacement within a session,
-path MTU discovery up to a raised ceiling, optional NAT keep-alive, optional
-peer timeouts, optional
+path MTU discovery up to a raised ceiling, optional NAT keep-alive, NAT traversal through a
+rendezvous with a relay to fall back on, optional peer timeouts, optional
 length-masking padding, typed payload codecs, optional Zstandard compression.
 
-**Not built:** ordered delivery, peer discovery and NAT traversal, a QUIC
-backend, bit-packed deltas —
+**Not built:** ordered delivery, peer discovery, a QUIC backend, bit-packed
+deltas —
 each with its consequence under [Limitations](#limitations).
 
 **Not audited.** This is `#![forbid(unsafe_code)]`, cross-validated against an
@@ -385,7 +385,7 @@ sits: in the crate description crates.io shows in search results, and as a
 warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
 the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 394 of them and they pass. Linked for
+`cargo test --workspace` runs 412 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.4 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.
