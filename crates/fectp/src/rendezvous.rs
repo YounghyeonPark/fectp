@@ -73,8 +73,9 @@ pub const MAX_CLIENTS_PER_IP: usize = 32;
 /// More is dropped.
 pub const RELAY_BYTES_PER_SECOND: usize = 1 << 20;
 
-/// Introductions one client may ask for in a second, sustained; a burst of
-/// twice this is allowed.
+/// Requests — to be introduced, or to be relayed — that one IP address may
+/// make of a rendezvous in a second, sustained; a burst of twice this is
+/// allowed.
 pub const INTRODUCTIONS_PER_SECOND: f32 = 4.0;
 
 /// Why a rendezvous would not introduce or relay (SPEC A.2).
@@ -380,8 +381,9 @@ impl Rendezvous {
     /// [`INTRODUCTION_WINDOW`].
     ///
     /// A client gives up on an introduction after
-    /// [`INTRODUCTION_DEADLINE`] whatever this says, so a window longer than
-    /// that ends in the client reporting it unreachable first.
+    /// [`INTRODUCTION_DEADLINE`], ninety seconds, whatever this says, so a
+    /// window longer than that ends in the client reporting it unreachable
+    /// first.
     pub fn set_introduction_window(&mut self, window: Duration) {
         self.window = window;
     }
@@ -470,6 +472,10 @@ impl Rendezvous {
         // address it did not choose (SPEC A.3), and a relay costs this host's
         // bandwidth. Over budget, it is refused, not silently dropped.
         if !self.spend(ip) {
+            // Told to the asker only, relay or not. Over budget is the cheap
+            // path by design: answering the other side as well would let a
+            // flood of requests become a flood of messages to whoever they
+            // name.
             return self.send(
                 peer,
                 &Control::Unavailable(target, Unavailable::Refused.to_byte()),
@@ -571,7 +577,16 @@ impl Rendezvous {
                 &Control::Unavailable(target, Unavailable::NotRegistered.to_byte()),
             );
         };
-        if !recent || !(self.policy)(&from, &target) {
+        // A pair not introduced recently has nobody waiting on the other
+        // side, so only the asker hears; telling the other too would let
+        // anyone send it a message per request.
+        if !recent {
+            return self.send(
+                peer,
+                &Control::Unavailable(target, Unavailable::NoRelay.to_byte()),
+            );
+        }
+        if !(self.policy)(&from, &target) {
             return self.refuse_relay(from, target, Unavailable::NoRelay);
         }
 
@@ -901,8 +916,8 @@ pub const MAX_INTRODUCTIONS: usize = 16;
 
 /// How long a client waits on one introduction, end to end, before reporting
 /// it failed: the window for the other side to ask, then a direct attempt,
-/// then a relayed one.
-pub(crate) const INTRODUCTION_DEADLINE: Duration = Duration::from_secs(90);
+/// then a relayed one. Ninety seconds.
+pub const INTRODUCTION_DEADLINE: Duration = Duration::from_secs(90);
 
 /// Binds a client sends a relay port before giving up on it, and how far
 /// apart.

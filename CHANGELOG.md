@@ -10,6 +10,15 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.1 — 2026-10-21
+
+**The crates only**, with new public items and nothing changed under existing
+ones, so a patch release (RELEASING.md). Wire version 1; every frame is as it
+was. The Python and npm packages are not republished: the C ABI has not
+changed.
+
 **An `Endpoint` can run on a socket of your making.** `Endpoint::bind_socket`
 takes anything implementing the new `DatagramSocket` trait — send one
 datagram, wait for one with a timeout, say where it is bound. `bind` is

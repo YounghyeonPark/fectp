@@ -171,6 +171,7 @@ match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::ConnectFailed { peer } => {}
     Event::PeerMoved { peer, from, to } => {}  // the peer changed address
     Event::PeerLost { peer } => {}             // gave up on the peer
+    Event::IntroductionFailed { peer_public, reason } => {} // see below
     Event::Idle => {}                          // nothing arrived
 }
 ```
@@ -208,29 +209,13 @@ hole punching possible at all.
 
 Success is an ordinary `Event::Connected` for a peer whose `peer_public_key`
 is the one asked for; failure is `Event::IntroductionFailed { peer_public,
-reason }`, on both sides when the rendezvous refuses to relay. A relay drops a
+reason }` — on both sides when the rendezvous refuses to relay for a pair it
+introduced, except for a request over its rate bound, which only the asker
+hears. A relay drops a
 session that carries nothing for a minute, so a relayed one that may fall
-quiet wants `set_keepalive` below that. At most `MAX_INTRODUCTIONS` (16) outstanding at once. Public-key
-mode only: a rendezvous knows its clients by their keys.
-
-## Rendezvous
-
-The third party two NATed peers both reach (SPEC Appendix A). An endpoint
-underneath, driven the same way.
-
-| | |
-|---|---|
-| `bind(addr, identity)` | Serves `identity`; clients must know its public key. |
-| `set_relay_address(ip)` | Where clients reach this host, for relay ports to be advertised at. Required to relay when bound to `0.0.0.0` or behind a NAT; until then it refuses. |
-| `poll(timeout)` | Does whatever is due, returning within a second whatever `timeout` says. Call it in a loop. A client cannot make it fail. |
-| `set_policy(allow)` | Which pairs may be introduced, and so relayed. Every pair that asked, by default. |
-| `set_introduction_window(d)` | How long one side's request waits for the other's. 30 s by default. |
-| `clients()` / `relays()` | Registered now; relay allocations held now. |
-
-It turns on keep-alives every 15 s and a 60 s peer timeout for itself, so a
-departed client's address is not handed out. Relay allocations are capped at
-64 in total and 4 per client IP address, forward at most 1 MiB/s each, and go
-after 60 s of forwarding nothing.
+quiet wants `set_keepalive` below that. At most `MAX_INTRODUCTIONS` (16)
+outstanding at once, each given up on after `INTRODUCTION_DEADLINE` (90 s).
+Public-key mode only: a rendezvous knows its clients by their keys.
 
 ### Sending
 
@@ -258,6 +243,27 @@ without limit. Progress happens inside `poll`.
 | `max_payload(peer)` | Largest `send` to one peer now. Moves with path MTU discovery. |
 | `unacknowledged(peer)` | Reliable messages still in flight to one peer. |
 | `outstanding_tickets()` | Resumption tickets issued and not yet redeemed. |
+
+---
+
+## Rendezvous
+
+The third party two NATed peers both reach (SPEC Appendix A). An endpoint
+underneath, driven the same way.
+
+| | |
+|---|---|
+| `bind(addr, identity)` | Serves `identity`; clients must know its public key. |
+| `set_relay_address(ip)` | Where clients reach this host, for relay ports to be advertised at. Bound to `0.0.0.0`, it refuses to relay until told. Behind a NAT of its own, set it too: it cannot tell, and would advertise its private address. |
+| `poll(timeout)` | Does whatever is due, returning within a second whatever `timeout` says. Call it in a loop. A client cannot make it fail. |
+| `set_policy(allow)` | Which pairs may be introduced, and so relayed. Every pair that asked, by default. |
+| `set_introduction_window(d)` | How long one side's request waits for the other's. 30 s by default. |
+| `clients()` / `relays()` | Registered now; relay allocations held now. |
+
+It turns on keep-alives every 15 s and a 60 s peer timeout for itself, so a
+departed client's address is not handed out. Relay allocations are capped at
+64 in total and 4 per client IP address, forward at most 1 MiB/s each, and go
+after 60 s of forwarding nothing.
 
 ---
 

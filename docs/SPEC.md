@@ -1373,16 +1373,22 @@ rendezvous that will relay for a pair it introduced recently allocates two UDP
 ports, one for each party, and sends each a `RELAY_OFFER`: the other's key,
 the address of *its own* port, and a token of 16 random bytes for that port
 alone. It allocates at most once per pair; a second `RELAY` for the same pair
-has the offers sent again. Otherwise it sends `UNAVAILABLE` reason 2 to
-**both** parties — each is waiting on the relay, and the one that did not ask
-would otherwise hear only its own deadline — or reason 0 to the asker if the
-other has gone. A client MUST ignore a `RELAY_OFFER` for a key it has no
+has the offers sent again. Otherwise it answers `UNAVAILABLE` reason 2: to
+**both** parties when it refuses a pair it did introduce — each is waiting on
+the relay, and the one that did not ask would otherwise hear only its own
+deadline — and to the asker alone for a pair it did not introduce recently,
+or with reason 0 if the other has gone. A request over the per-address bound
+is answered to the asker alone, with reason 1: telling the other side too
+would turn a flood of requests into a flood of messages to whoever they
+named. A client MUST ignore a `RELAY_OFFER` for a key it has no
 introduction with.
 
 A port is advertised at an address clients can send to. A rendezvous bound to
-a wildcard address, or reached through a NAT of its own, has to be told what
-that address is, and MUST refuse to relay rather than advertise one nobody
-can reach.
+a wildcard address MUST be told what that address is, and MUST refuse to relay
+until it has, rather than advertise one nobody can reach. One bound to a
+specific address but reached through a NAT of its own SHOULD be told too; it
+cannot tell on its own that the address it is bound to is not the one clients
+see.
 
 **A port records its party's address only once the address has proved it can
 receive there.** A bind (A.5) carrying the port's token draws a check, sent to
@@ -1421,9 +1427,10 @@ proof : 0xF0 || 0x44 || nonce[16]   (18 bytes)  client → relay port
 ```
 
 A punch carries nothing and is never answered; it exists to be sent. A client
-answers a check with a proof only if it came from a relay port it was offered,
-and goes on binding and answering until its session through the port is up:
-a proof can be lost, and the port checks again on the next bind. A client
+answers a check with a proof only if it came from a relay port it was offered.
+It goes on answering until its session through the port is up, and binding,
+up to a bound it chooses: a proof can be lost, and the port checks again on
+the next bind. A client
 cannot know when it has been recorded, and a port discards what follows.
 
 ### A.6 What this does not provide

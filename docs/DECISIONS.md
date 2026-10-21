@@ -4537,7 +4537,8 @@ own mapping, so the address any third party saw is of no use to anyone else.
 side on `Endpoint` (SPEC Appendix A). Everything between them rides on an
 ordinary FECTP session as reliable messages, so **no frame changed**: what is
 new is what those messages say, and four small datagrams that are not frames
-and that every existing receiver rejects at the version check.
+and that every existing receiver rejects — the punch for being shorter than a
+header, the rest at the version check.
 
 - **Registration is a message, not a handshake.** A client registers by
   sending `REGISTER`. A completed handshake proves nothing about the address
@@ -4604,7 +4605,16 @@ side, a session already up was later reported as a failed introduction, and
 two send paths let a rendezvous end a client's poll loop. Each now has a test
 that fails with the old behaviour put back — for the overtaking request, only
 once the test's socket loses the registration's first transmission, since
-loopback reorders nothing on its own.
+loopback reorders nothing on its own. A second reading found three of those
+fixes with no test reaching them, and they have one now: a client that goes
+silent until its window is full, a request for a peer already connected, and
+an introduction naming an address the socket cannot send to.
+
+**Who hears a refused relay.** Both sides, when the pair was introduced: each
+is waiting on the relay. Only the asker, when the pair was not, or when the
+request was over the rate bound — otherwise a flood of requests naming
+someone would become a flood of messages to them, which is the one thing the
+bound exists to prevent.
 
 **What it does not do.** Learning which key to ask for is the application's.
 A relayed session does not follow a NAT re-mapping. A relay sees who talks to

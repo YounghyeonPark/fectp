@@ -662,7 +662,10 @@ impl Endpoint {
     /// endpoint ([`observed_addr`](Self::observed_addr)). Messages on that
     /// session are the rendezvous's own and are not raised as
     /// [`Event::Message`]. One rendezvous at a time; connecting to another
-    /// replaces it.
+    /// replaces it, and the old one's session stays open as an ordinary
+    /// peer's until it is disconnected. Fails with
+    /// [`Error::MissingPeerKey`] on a pre-shared-key endpoint, which has no
+    /// static key for a rendezvous to know it by.
     pub fn connect_rendezvous(
         &mut self,
         addr: impl ToSocketAddrs,
@@ -825,7 +828,7 @@ impl Endpoint {
                     }
                     continue;
                 }
-                // Binds keep going after a check, until the session is up: a
+                // Binds keep going after a check, up to `BINDS` of them: a
                 // proof can be lost, and the next bind draws a new check.
                 *sent += 1;
                 *next_bind = now + rendezvous::BIND_INTERVAL;

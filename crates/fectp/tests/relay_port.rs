@@ -348,3 +348,41 @@ fn a_relay_forwards_no_faster_than_its_cap() {
     );
     assert!(received > 0, "the control: some of it is forwarded");
 }
+
+/// A client that stops acknowledging cannot stop the rendezvous.
+///
+/// Its session's reliable window fills — 32 messages unacknowledged — and
+/// every send to it after that is refused. That refusal used to be an error
+/// out of `Rendezvous::poll`, so one silent client ended service for all of
+/// them. Here the client goes silent after an introduction, and its peer asks
+/// for a relay over and over, each request having the offer sent to both.
+#[test]
+fn a_client_that_stops_answering_does_not_stop_the_rendezvous() {
+    let (addr, public, stop, handle) = spawn();
+    let mut x = Raw::connect(addr, &public);
+    let mut y = Raw::connect(addr, &public);
+    x.say(REGISTER, &[]);
+    y.say(REGISTER, &[]);
+    x.listen(Duration::from_millis(200));
+    y.listen(Duration::from_millis(200));
+    let (kx, ky) = (x.key, y.key);
+    x.say(INTRODUCE, &ky);
+    y.say(INTRODUCE, &kx);
+    x.listen(Duration::from_millis(300));
+    y.listen(Duration::from_millis(300));
+
+    // Silent from here on: nothing it is sent is acknowledged.
+    drop(x);
+    // Each request costs one of the rate bound's 4 a second, and has an offer
+    // sent to the silent client; 48 of them fill its window and then some.
+    for _ in 0..48 {
+        y.say(RELAY, &kx);
+        y.listen(Duration::from_millis(260));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let rendezvous = handle
+        .join()
+        .expect("the rendezvous's poll must not have failed");
+    assert_eq!(rendezvous.relays(), 1, "and it was serving all along");
+}

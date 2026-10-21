@@ -855,6 +855,7 @@ pub enum Error {
     UnknownTicket,               // stale or already-redeemed resumption ticket
     UnknownPeer,                 // no such connected peer (endpoint only)
     MissingPeerKey,              // public-key mode needs the peer's key
+    NoRendezvous,                // an introduction with no rendezvous connected
 }
 ```
 

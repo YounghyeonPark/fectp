@@ -551,3 +551,82 @@ fn asking_before_registration_is_done_still_works() {
         b.failed
     );
 }
+
+/// Asking again for a peer already connected asks nothing: the session is
+/// the answer. It used to register a fresh request, which the other side,
+/// having no reason to ask again, never matched — and the window's close
+/// reported a failed introduction for a session that was up.
+#[test]
+fn asking_for_a_peer_already_connected_reports_nothing() {
+    let server = Server::spawn(|r| r.set_introduction_window(Duration::from_millis(500)));
+    let mut a = Client::behind(Kind::PortRestricted, &server);
+    let mut b = Client::behind(Kind::PortRestricted, &server);
+    introduce(&mut a, &mut b);
+    let kb = b.key;
+    a.endpoint.introduce(&kb).expect("introduce");
+    run(&mut a, &mut b, Duration::from_secs(3), |_, _| false);
+    assert!(a.failed.is_empty(), "nothing failed: {:?}", a.failed);
+}
+
+/// An address the client's socket cannot send to — here IPv6, to an IPv4
+/// socket — fails that introduction and nothing else. A rendezvous chooses
+/// the address, and it is not trusted to end a client's poll loop.
+#[test]
+fn an_address_that_cannot_be_sent_to_fails_only_its_introduction() {
+    let mut liar = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let liar_addr = liar.local_addr().expect("addr");
+    let liar_key = *liar.public_key().expect("identity");
+    // The smallest key there is, so the client is the side that starts and
+    // sends the most.
+    let named = [0xFFu8; 32];
+    let mut client = Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    client
+        .connect_rendezvous(liar_addr, &liar_key)
+        .expect("connect");
+    client.introduce(&named).expect("introduce");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut registered = None;
+    while registered.is_none() {
+        assert!(Instant::now() < deadline, "never registered");
+        client
+            .poll(Some(Duration::from_millis(2)))
+            .expect("client poll");
+        if let Event::Message { peer, data } =
+            liar.poll(Some(Duration::from_millis(2))).expect("poll")
+        {
+            if data == [0x01] {
+                registered = Some(peer);
+            }
+        }
+    }
+    let peer = registered.expect("registered");
+    // OBSERVED, so the client counts as registered and acts on what follows.
+    let mut observed = vec![0x81, 4, 127, 0, 0, 1];
+    observed.extend_from_slice(&client.local_addr().expect("addr").port().to_le_bytes());
+    liar.send_reliable(peer, &observed, PayloadType::Opaque)
+        .expect("send");
+    let mut introduction = vec![0x82];
+    introduction.extend_from_slice(&named);
+    introduction.push(6);
+    introduction.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+    introduction.extend_from_slice(&9u16.to_le_bytes());
+    liar.send_reliable(peer, &introduction, PayloadType::Opaque)
+        .expect("send");
+
+    let mut failed = Vec::new();
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until && failed.is_empty() {
+        if let Event::IntroductionFailed {
+            peer_public,
+            reason,
+        } = client
+            .poll(Some(Duration::from_millis(2)))
+            .expect("the client's poll must not fail")
+        {
+            failed.push((peer_public, reason));
+        }
+        let _ = liar.poll(Some(Duration::from_millis(2)));
+    }
+    assert_eq!(failed, vec![(named, Unavailable::Unreachable)]);
+}
