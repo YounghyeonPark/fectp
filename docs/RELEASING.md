@@ -157,6 +157,16 @@ so the packages could, and the crates were not republished, because
 crates.io then simply has no 0.2.2, and the next crate release takes the next
 number; Cargo minds a gap in version numbers no more than anyone else does.
 
+The next one was 0.3.0, and the reason it was not 0.2.3 belongs here, since
+the rule above would have said patch: the public items only grew. But 0.3.0
+also held data sent with a handshake to what fits in 1200 bytes, so a 0-RTT
+payload of 1083 to 1200 bytes that had been accepted is refused. No signature
+changed, and Cargo compares nothing but signatures — it would take a 0.2.x
+release into an existing build on `cargo update` and the call would start
+failing. **A change that turns a working call into an error is a minor
+release in `0.x`**, whatever the public items say. Comparing them is how to
+find the API breaks; it does not find this kind.
+
 Publishing is a tag:
 
 ```bash

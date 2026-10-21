@@ -10,6 +10,18 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.0 — 2026-10-21
+
+**The crates.** crates.io goes from 0.2.1 to 0.3.0: 0.2.2 was the bindings'
+alone, built from earlier source, and the crates skip the number rather than
+let `fectp` 0.2.2 mean two different things. Minor rather than patch because
+of the 0-RTT limit below: a call that worked can now be refused, and Cargo
+would take a 0.2.x release into an existing build without asking. Wire
+version 1. The Python and npm packages are not republished: the C ABI they
+wrap has not changed.
+
 **Path MTU discovery, up to a ceiling you raise.** With `set_max_datagram`
 above 1200, a session whose peer supports it starts at 1200, probes upward,
 and uses the largest size answered. It falls back to 1200 when a large reliable
