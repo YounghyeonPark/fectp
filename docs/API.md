@@ -32,6 +32,12 @@ they all use `HANDSHAKE_TIMEOUT`, and all return `Result<Self>`.
 There is no way to connect without encryption. Every constructor above
 encrypts; they differ in who gets authenticated.
 
+`first` shares the opening datagram with the handshake, and that datagram is
+held to 1200 bytes whatever the ceiling, since nothing is known about the path
+yet: **at most 1082 bytes** with a public key, 1122 resuming or with a
+pre-shared key. More is refused with `Error::PayloadTooLarge`, whose `limit`
+says how much fits. An `Endpoint`'s `connect_and_send` is held to the same.
+
 > Data sent with the handshake is encrypted but **replayable** — an attacker
 > who captures the packet can send it again — and has no forward secrecy. Send
 > only what is safe to repeat. A sensor reading is; "open the valve" is not.

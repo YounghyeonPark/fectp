@@ -560,6 +560,28 @@ impl std::fmt::Debug for Identity {
 /// The core transforms are always available: they are pure integer code with
 /// no allocator and no tables, so every profile can reverse them. Zstandard is
 /// advertised only when this build actually has it.
+/// A buffer for an opening handshake frame carrying `zero_rtt`, or the reason
+/// it cannot have one.
+///
+/// The whole frame has to fit in `budget`, overhead included. The buffer used
+/// to be `budget` *plus* the overhead, so the payload alone could fill the
+/// budget and the frame went out 118 bytes over it: 1318 at the default, past
+/// the 1200 that is the reason for the default and past IPv6's 1280 minimum.
+/// Nothing about the path is known while a handshake runs, so this is the one
+/// frame that most needs to fit. Too large a payload was refused only by the
+/// buffer running out, as `BufferTooSmall`; it is refused here, saying how much
+/// would have fitted.
+pub(crate) fn opening_frame(budget: usize, overhead: usize, zero_rtt: &[u8]) -> Result<Vec<u8>> {
+    let limit = budget.saturating_sub(overhead);
+    if zero_rtt.len() > limit {
+        return Err(Error::PayloadTooLarge {
+            len: zero_rtt.len(),
+            limit,
+        });
+    }
+    Ok(vec![0u8; overhead + zero_rtt.len()])
+}
+
 pub(crate) fn local_capabilities() -> Capabilities {
     let has_zstd = cfg!(feature = "compress");
     Capabilities {
@@ -816,7 +838,11 @@ impl Core {
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + ResumeInitiator::OVERHEAD];
+        let mut tx = opening_frame(
+            size.min(udp::BASE_DATAGRAM),
+            ResumeInitiator::OVERHEAD,
+            zero_rtt,
+        )?;
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 
@@ -871,7 +897,11 @@ impl Core {
         transport.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
         let size = transport.max_datagram_size();
-        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + ResumeInitiator::OVERHEAD];
+        let mut tx = opening_frame(
+            size.min(udp::BASE_DATAGRAM),
+            ResumeInitiator::OVERHEAD,
+            zero_rtt,
+        )?;
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 
@@ -914,7 +944,7 @@ impl Core {
         // Sized for a path nothing is known about yet; `rx` stays at the
         // ceiling, because that is what this side has told the peer it can
         // receive.
-        let mut tx = vec![0u8; size.min(udp::BASE_DATAGRAM) + INITIATOR_OVERHEAD];
+        let mut tx = opening_frame(size.min(udp::BASE_DATAGRAM), INITIATOR_OVERHEAD, zero_rtt)?;
         let mut rx = vec![0u8; size];
         let mut scratch = vec![0u8; size];
 

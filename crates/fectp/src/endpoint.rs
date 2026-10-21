@@ -699,7 +699,11 @@ impl Endpoint {
         let addr = crate::resolve(addr)?;
         let session_id = OsRng.next_u32();
         let caps = local_capabilities();
-        let mut frame = vec![0u8; crate::udp::handshake_datagram() + INITIATOR_OVERHEAD];
+        let overhead = match &self.mode {
+            Mode::PublicKey(_) => INITIATOR_OVERHEAD,
+            Mode::Psk(_) => ResumeInitiator::OVERHEAD,
+        };
+        let mut frame = crate::opening_frame(crate::udp::handshake_datagram(), overhead, zero_rtt)?;
 
         let (handshake, len) = match &self.mode {
             Mode::PublicKey(key) => {

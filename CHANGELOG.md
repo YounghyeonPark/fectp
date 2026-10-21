@@ -29,6 +29,15 @@ session. `Connection::max_payload` and its siblings move the same way.
 including a handshake reply and data sent with the opening frame: nothing
 about the path is known while a handshake runs.
 
+**Data sent with a handshake fits in 1200 bytes with the handshake.** The
+opening datagram had been allowed 1200 bytes of payload *plus* the handshake's
+118, so it could go out at 1318 bytes at the default ceiling — past the 1200
+the default exists for, and past the 1280 an IPv6 link need carry. The payload
+is now held to 1082 bytes with a public key and 1122 resuming or with a
+pre-shared key, and a larger one is refused with `PayloadTooLarge` stating the
+limit, where it had failed as "output buffer too small". Opening frames of the
+old size from older peers are still accepted.
+
 **A retransmission is resealed at the size it was first sent at.** It had been
 resealed at the session's current limit, which never moved before; lowered, it
 refused the frame and the error ended `Endpoint::poll` for every peer.

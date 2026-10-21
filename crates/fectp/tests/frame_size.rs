@@ -226,3 +226,89 @@ fn a_raised_ceiling_does_not_raise_a_handshake() {
         "a connection's opening frame must not grow with the ceiling"
     );
 }
+
+/// The largest payload `connect_and_send` accepts, and the datagram it makes.
+///
+/// Found by trying downwards from well past any limit, so the test does not
+/// need to know the handshake's overhead to check what it adds up to.
+fn largest_opening(
+    client: &mut fectp::Endpoint,
+    sink: &std::net::UdpSocket,
+    public: Option<&[u8; 32]>,
+) -> (usize, usize, fectp::Error) {
+    let to = sink.local_addr().expect("addr");
+    let mut refused = None;
+    for len in (0..=1400).rev() {
+        match client.connect_and_send(to, public, &incompressible(len)) {
+            Ok(_) => {
+                let mut buf = [0u8; 65535];
+                let (n, _) = sink.recv_from(&mut buf).expect("the opening frame");
+                return (len, n, refused.expect("1400 bytes cannot have fitted"));
+            }
+            Err(e) => refused = Some(e),
+        }
+    }
+    panic!("not even an empty payload was accepted");
+}
+
+/// An opening frame carrying data fits in 1200 bytes, all of it.
+///
+/// It used to be the payload that had to fit, with the handshake's 118 bytes
+/// added on top: a 1200-byte payload went out as a 1318-byte datagram at the
+/// default ceiling, past the 1200 the default exists for and past the 1280 an
+/// IPv6 link need carry. And the payload one byte too large was refused only
+/// by a buffer running out, as "output buffer too small".
+#[test]
+fn an_opening_frame_with_data_fits_in_what_any_path_carries() {
+    let _guard = exclusive();
+    assert_eq!(fectp::max_datagram(), fectp::DEFAULT_MAX_DATAGRAM);
+    let sink = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    sink.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+
+    let server = fectp::Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let public = *server.public_key().expect("identity");
+    let mut keyed = fectp::Endpoint::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+    let mut shared = fectp::Endpoint::bind_psk("127.0.0.1:0", b"a group secret").expect("bind");
+
+    for (mode, client, key) in [
+        ("public-key", &mut keyed, Some(&public)),
+        ("pre-shared-key", &mut shared, None),
+    ] {
+        let (largest, datagram, refused) = largest_opening(client, &sink, key);
+        assert!(
+            datagram <= 1200,
+            "{mode}: a {largest}-byte payload went out as a {datagram}-byte datagram"
+        );
+        assert!(
+            matches!(refused, fectp::Error::PayloadTooLarge { len, limit }
+                if len == largest + 1 && limit == largest),
+            "{mode}: one byte more must be refused saying what fits, not {refused:?}"
+        );
+
+        // A connection has the same limit, and says so the same way. Refused
+        // before anything is sent, so nothing has to be listening.
+        let too_large = incompressible(largest + 1);
+        let to = sink.local_addr().expect("addr");
+        let refused = match key {
+            Some(key) => Connection::connect_and_send(to, key, &Identity::generate(), &too_large),
+            None => Connection::connect_psk_and_send(to, b"a group secret", &too_large),
+        }
+        .expect_err("refused");
+        assert!(
+            matches!(refused, fectp::Error::PayloadTooLarge { limit, .. } if limit == largest),
+            "{mode}: a connection must refuse the same payload the same way, not {refused:?}"
+        );
+    }
+
+    // The control: a connection carrying the largest payload does connect.
+    let echo = Echo::start();
+    let (largest, _, _) = largest_opening(&mut keyed, &sink, Some(&public));
+    Connection::connect_and_send(
+        echo.addr(),
+        &echo.public(),
+        &Identity::generate(),
+        &incompressible(largest),
+    )
+    .expect("the largest payload that fits is still accepted");
+}
