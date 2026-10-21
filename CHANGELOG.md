@@ -12,7 +12,7 @@ which is the long form: this file says what changed, that one says why.
 
 Nothing yet.
 
-## 0.3.1 — 2026-10-21
+## 0.3.1 — 2026-10-22
 
 **The crates only**, with new public items and nothing changed under existing
 ones, so a patch release (RELEASING.md). Wire version 1; every frame is as it
