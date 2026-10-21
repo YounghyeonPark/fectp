@@ -295,7 +295,11 @@ def public_names() -> set[str]:
         re.M,
     )
     for source in (ROOT / "crates").rglob("*.rs"):
-        if "target" in source.parts or source.parts[-2] == "tests":
+        # Anywhere under a tests directory, not only directly in it: a helper
+        # module in tests/common is a test's, and its `pub` is for the test
+        # binaries beside it. Checking only the parent directory let
+        # tests/common/nat.rs make "nat" a word of the public API.
+        if "target" in source.parts or "tests" in source.parts:
             continue
         text = source.read_text(encoding="utf-8")
         for name in pattern.findall(text):

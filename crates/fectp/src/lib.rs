@@ -180,8 +180,8 @@ pub use fectp_core::{
     StaticKey, DHLEN,
 };
 pub use udp::{
-    max_datagram, path_mtu_discovery, set_max_datagram, set_path_mtu_discovery, UdpTransport,
-    DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
+    max_datagram, path_mtu_discovery, set_max_datagram, set_path_mtu_discovery, DatagramSocket,
+    UdpTransport, DEFAULT_MAX_DATAGRAM, MIN_MAX_DATAGRAM,
 };
 
 /// Whether an I/O error is a receive timeout rather than a real failure.

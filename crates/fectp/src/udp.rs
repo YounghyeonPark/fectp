@@ -301,6 +301,69 @@ pub(crate) fn recv_from(
     }
 }
 
+/// What an [`Endpoint`](crate::Endpoint) sends and receives its datagrams
+/// through.
+///
+/// A UDP socket, ordinarily, and [`Endpoint::bind`](crate::Endpoint::bind)
+/// makes one. Anything else that carries whole datagrams between addresses
+/// can stand in: a socket with options this crate does not set, a transport
+/// of your own, or a simulated network in a test — this crate's own tests put
+/// endpoints behind emulated NATs that way, which a real socket on loopback
+/// cannot be.
+///
+/// `Send + Sync` because an `Endpoint` is, and an endpoint built on a socket
+/// that was not would quietly stop being either.
+pub trait DatagramSocket: Send + Sync {
+    /// Sends one datagram to `to`.
+    fn send_to(&self, buf: &[u8], to: SocketAddr) -> io::Result<usize>;
+
+    /// Waits for one datagram, for at most `timeout`, or for as long as it
+    /// takes if `None`, and returns its length and where it came from.
+    ///
+    /// On timeout it must fail with [`io::ErrorKind::WouldBlock`] or
+    /// [`io::ErrorKind::TimedOut`]: that is how the endpoint tells "nothing
+    /// arrived" from a socket that has failed, and any other error ends
+    /// [`poll`](crate::Endpoint::poll). A datagram larger than `buf` may be
+    /// truncated or refused, as a UDP socket's is.
+    fn recv_from(
+        &self,
+        buf: &mut [u8],
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<(usize, SocketAddr)>;
+
+    /// The address this socket is bound to.
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+}
+
+/// A UDP socket in the mode [`recv_from`] and [`send_to`] expect, which is
+/// what [`Endpoint::bind`](crate::Endpoint::bind) runs on.
+pub(crate) struct Prepared(UdpSocket);
+
+impl Prepared {
+    pub(crate) fn new(socket: UdpSocket) -> io::Result<Self> {
+        prepare(&socket)?;
+        Ok(Self(socket))
+    }
+}
+
+impl DatagramSocket for Prepared {
+    fn send_to(&self, buf: &[u8], to: SocketAddr) -> io::Result<usize> {
+        send_to(&self.0, buf, to)
+    }
+
+    fn recv_from(
+        &self,
+        buf: &mut [u8],
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<(usize, SocketAddr)> {
+        recv_from(&self.0, buf, || Ok(timeout))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+}
+
 /// Puts a socket into the mode [`recv_from`] and [`send_to`] expect.
 ///
 /// Non-blocking on Windows, for the reason `recv_from` gives; untouched

@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod nat;
+
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};

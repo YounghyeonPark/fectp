@@ -63,7 +63,7 @@ use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::pmtu::Pmtu;
-use crate::udp::BASE_DATAGRAM;
+use crate::udp::{DatagramSocket, BASE_DATAGRAM};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
     PayloadType, Result, SharedKey, MAX_RETRIES,
@@ -384,7 +384,7 @@ enum Mode {
 
 /// Serves many FECTP peers from one UDP socket.
 pub struct Endpoint {
-    socket: UdpSocket,
+    socket: Box<dyn DatagramSocket>,
     mode: Mode,
     tickets: TicketStore,
 
@@ -468,8 +468,8 @@ pub struct Endpoint {
 /// See [`is_stale_unreachable`]. Everything an endpoint sends goes through
 /// here, because every one of those sends can be the one that draws the
 /// report, and only the peer it was aimed at is affected.
-fn send_datagram(socket: &UdpSocket, buf: &[u8], addr: SocketAddr) -> Result<()> {
-    match crate::udp::send_to(socket, buf, addr) {
+fn send_datagram(socket: &dyn DatagramSocket, buf: &[u8], addr: SocketAddr) -> Result<()> {
+    match socket.send_to(buf, addr) {
         Ok(_) => Ok(()),
         Err(e) if is_stale_unreachable(&e) => Ok(()),
         Err(e) => Err(Error::Io(e)),
@@ -590,9 +590,21 @@ impl Endpoint {
         Self::with_mode(addr, Mode::Psk(preshared_key(secret)))
     }
 
+    /// Serves the given identity over a socket of the caller's making.
+    ///
+    /// [`bind`](Self::bind) is this with a UDP socket bound to an address,
+    /// which is what almost every caller wants. The trait says what a socket
+    /// has to do; see [`DatagramSocket`].
+    pub fn bind_socket(socket: impl DatagramSocket + 'static, identity: Identity) -> Result<Self> {
+        Self::on_socket(Box::new(socket), Mode::PublicKey(identity.into()))
+    }
+
     fn with_mode(addr: impl ToSocketAddrs, mode: Mode) -> Result<Self> {
-        let socket = UdpSocket::bind(addr)?;
-        crate::udp::prepare(&socket)?;
+        let socket = crate::udp::Prepared::new(UdpSocket::bind(addr)?)?;
+        Self::on_socket(Box::new(socket), mode)
+    }
+
+    fn on_socket(socket: Box<dyn DatagramSocket>, mode: Mode) -> Result<Self> {
         let size = max_datagram() + INITIATOR_OVERHEAD;
         Ok(Self {
             socket,
@@ -720,7 +732,7 @@ impl Endpoint {
             }
         };
         frame.truncate(len);
-        send_datagram(&self.socket, &frame, addr)?;
+        send_datagram(&*self.socket, &frame, addr)?;
 
         let peer_id = PeerId(self.next_id);
         self.next_id += 1;
@@ -920,7 +932,7 @@ impl Endpoint {
             // is the opposite of what is meant here.
             let wait = wait.map(|w| w.max(Duration::from_millis(1)));
 
-            match crate::udp::recv_from(&self.socket, &mut self.rx, || Ok(wait)) {
+            match self.socket.recv_from(&mut self.rx, wait) {
                 Ok((n, from)) => {
                     if let Some(event) = self.dispatch(n, from)? {
                         return Ok(event);
@@ -1112,7 +1124,7 @@ impl Endpoint {
 
         if established {
             if ack_len > 0 {
-                send_datagram(&self.socket, &self.ack[..ack_len], from)?;
+                send_datagram(&*self.socket, &self.ack[..ack_len], from)?;
                 if let Some(entry) = self.peers.get_mut(&peer_id) {
                     entry.last_sent = Instant::now();
                 }
@@ -1210,7 +1222,7 @@ impl Endpoint {
             probe.sent += 1;
             probe.last = now;
         }
-        send_datagram(&self.socket, &self.ack[..len], addr)?;
+        send_datagram(&*self.socket, &self.ack[..len], addr)?;
         if let Some(entry) = self.peers.get_mut(&peer_id) {
             entry.last_sent = Instant::now();
         }
@@ -1341,7 +1353,7 @@ impl Endpoint {
         let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
         self.handshake_reply = reply;
         let (session, sent) = written?;
-        send_datagram(&self.socket, &self.tx[..sent], from)?;
+        send_datagram(&*self.socket, &self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(session, from, zero_rtt, false);
         self.remember_reply(&event, reply);
@@ -1372,7 +1384,7 @@ impl Endpoint {
         let written = responder.write_response(&mut OsRng, &reply, &mut self.tx);
         self.handshake_reply = reply;
         let (session, sent) = written?;
-        send_datagram(&self.socket, &self.tx[..sent], from)?;
+        send_datagram(&*self.socket, &self.tx[..sent], from)?;
         let reply = self.tx[..sent].to_vec();
         let event = self.register(session, from, zero_rtt, true);
         self.remember_reply(&event, reply);
@@ -1611,7 +1623,7 @@ impl Endpoint {
             // need. Either way this is not a handshake to answer.
             return Ok(true);
         };
-        send_datagram(&self.socket, &reply, from)?;
+        send_datagram(&*self.socket, &reply, from)?;
         if let Some(entry) = self.peers.get_mut(&peer_id) {
             entry.handshake_reply = left.checked_sub(1).map(|left| (reply, left));
         }
@@ -1817,7 +1829,7 @@ impl Endpoint {
                 continue;
             };
             let addr = entry.addr;
-            let socket = &self.socket;
+            let socket = &*self.socket;
             let stamp = &mut entry.last_sent;
             let finished = entry.peer.drive_queue(now, &mut self.tx, |frame| {
                 send_datagram(socket, frame, addr)?;
@@ -1874,7 +1886,7 @@ impl Endpoint {
                 outbound.next_attempt = next;
                 outbound.last_sent = now;
             }
-            send_datagram(&self.socket, &frame, addr)?;
+            send_datagram(&*self.socket, &frame, addr)?;
         }
         Ok(None)
     }
@@ -2009,7 +2021,7 @@ impl Endpoint {
             let mut token = [0u8; PATH_TOKEN_LEN];
             OsRng.fill_bytes(&mut token);
             let n = entry.peer.challenge(&token, &mut self.ack)?;
-            send_datagram(&self.socket, &self.ack[..n], addr)?;
+            send_datagram(&*self.socket, &self.ack[..n], addr)?;
             if let Some(entry) = self.peers.get_mut(&id) {
                 entry.last_sent = Instant::now();
             }
@@ -2040,7 +2052,7 @@ impl Endpoint {
                 let Ok(n) = entry.peer.probe(&send.token, send.size, &mut self.tx) else {
                     continue;
                 };
-                if crate::udp::send_to(&self.socket, &self.tx[..n], entry.addr).is_ok() {
+                if self.socket.send_to(&self.tx[..n], entry.addr).is_ok() {
                     entry.last_sent = now;
                 }
             }
@@ -2067,7 +2079,7 @@ impl Endpoint {
                 continue;
             };
             let addr = entry.addr;
-            let socket = &self.socket;
+            let socket = &*self.socket;
             let stamp = &mut entry.last_sent;
             let mut large_resent = false;
             entry.peer.drive_retransmits(now, &mut self.tx, |frame| {
@@ -2125,7 +2137,7 @@ impl Endpoint {
         let n = entry
             .peer
             .seal(data, payload_type, None, None, limit, &mut self.tx)?;
-        send_datagram(&self.socket, &self.tx[..n], addr)?;
+        send_datagram(&*self.socket, &self.tx[..n], addr)?;
         entry.last_sent = Instant::now();
         Ok(())
     }
@@ -2163,7 +2175,7 @@ impl Endpoint {
             let n = entry
                 .peer
                 .seal(data, payload_type, Some(id), None, limit, &mut self.tx)?;
-            send_datagram(&self.socket, &self.tx[..n], addr)?;
+            send_datagram(&*self.socket, &self.tx[..n], addr)?;
             let entry = self.peers.get_mut(&peer).ok_or(Error::UnknownPeer)?;
             entry.last_sent = Instant::now();
             entry.peer.pending.push(Pending {

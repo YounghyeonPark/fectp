@@ -140,6 +140,7 @@ Many peers, one socket, one event loop. Peers are named by `PeerId`.
 |---|---|
 | `bind(addr, identity)` | Public-key mode. |
 | `bind_psk(addr, secret)` | Pre-shared-key mode. |
+| `bind_socket(socket, identity)` | Public-key mode over any `DatagramSocket`: a socket with options of your own, a transport of your own, a simulated network. |
 
 ### Setting
 
