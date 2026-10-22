@@ -346,7 +346,8 @@ use goes unanswered; otherwise the ten-minute re-check is what notices, so large
 ceiling from the start, as is everyone with discovery off.
 
 **On Windows, an answer proves arrival, not wholeness.** On Linux, Android and
-Apple platforms the don't-fragment bit is set while discovery is on, so an
+Apple platforms the don't-fragment bit is set while discovery is searching —
+on and the ceiling raised — so an
 answered probe crossed whole
 ([D89](DECISIONS.md#d89--the-dont-fragment-bit-where-a-safe-crate-can-set-it)).
 On Windows nothing safe can set it, and a size split on the way can still be

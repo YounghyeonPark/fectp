@@ -10,6 +10,16 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.2 — 2026-10-22
+
+**The crates only**, with new public items and nothing changed under
+existing ones at the default settings, so a patch release (RELEASING.md).
+Wire version 1. New dependencies, target-specific: `rustix` on Linux and
+Android, `nix` on Apple platforms. The Python and npm packages are not
+republished: the C ABI has not changed.
+
 **A relayed session follows a client whose NAT moves it.** A relay port used
 to keep the first address it recorded, so a NAT that gave a client a new
 mapping ended the session. A client now proves its address with a MAC keyed
@@ -26,7 +36,8 @@ rendezvous cannot forge. The secret must be sixteen random bytes or more
 (`Error::GroupSecretTooShort`). D88, SPEC A.7.
 
 **Path MTU discovery measures what crosses whole, on Linux, Android and Apple
-platforms.** While discovery is on, sockets forbid fragmenting —
+platforms.** While discovery is on and the ceiling raised, sockets forbid
+fragmenting —
 `IP_PMTUDISC_PROBE` through `rustix`, `IP_DONTFRAG` through `nix`, each a
 target-specific dependency — so a probe too large for the path is dropped
 rather than split and answered. Windows is unchanged. A datagram too long for

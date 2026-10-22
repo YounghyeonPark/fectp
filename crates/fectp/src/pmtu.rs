@@ -6,7 +6,7 @@
 //! can be driven by a clock the tests control.
 //!
 //! **What an answer proves depends on the platform.** On Linux, Android and
-//! Apple platforms the socket forbids fragmenting while discovery is on
+//! Apple platforms the socket forbids fragmenting while discovery is searching
 //! ([`forbid_fragmentation`](crate::udp::forbid_fragmentation), D89), so a
 //! probe too large for the path is dropped and an answer proves the size
 //! crosses whole. On Windows nothing safe can set the bit, a probe may be

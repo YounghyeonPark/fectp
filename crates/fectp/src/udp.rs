@@ -98,7 +98,7 @@ pub fn max_datagram() -> usize {
 /// this says, since nothing about the path is known while one runs.
 ///
 /// On Linux, Android and Apple platforms an answered probe crossed whole: the
-/// socket forbids fragmenting while discovery is on (D89). On Windows nothing
+/// socket forbids fragmenting while discovery is searching (D89). On Windows nothing
 /// safe can, so an answered probe may have been split on the way, and a
 /// session there can settle on frames that cross in pieces: delivered, but
 /// lost whenever either piece is (D85).
@@ -161,7 +161,7 @@ impl UdpTransport {
         };
         let socket = UdpSocket::bind(bind)?;
         socket.connect(peer)?;
-        if path_mtu_discovery() {
+        if searches_above_base() {
             forbid_fragmentation(&socket);
         }
         Ok(Self::new(socket))
@@ -374,6 +374,19 @@ pub(crate) fn forbid_fragmentation(socket: &UdpSocket) -> bool {
     }
 }
 
+/// Whether a socket made now will search for sizes above the base, and so
+/// should forbid fragmenting: discovery on, and a ceiling raised above
+/// [`BASE_DATAGRAM`].
+///
+/// Not discovery alone. It is on by default, and at the default ceiling there
+/// is nothing to search for — and forbidding fragmenting there would change
+/// what a default endpoint does on the rare IPv4 path whose MTU is under
+/// 1228 bytes, where Linux, left to itself, splits a 1200-byte frame once an
+/// ICMP error has told it to, and `PROBE` would have it dropped instead.
+pub(crate) fn searches_above_base() -> bool {
+    path_mtu_discovery() && max_datagram() > BASE_DATAGRAM
+}
+
 /// Whether a send failed because the datagram is larger than the path, as
 /// the system knows it, will take: what the don't-fragment bit turns an
 /// oversize datagram into, at the sender, instead of a silent drop further
@@ -402,7 +415,7 @@ pub(crate) struct Prepared(UdpSocket);
 impl Prepared {
     pub(crate) fn new(socket: UdpSocket) -> io::Result<Self> {
         prepare(&socket)?;
-        if path_mtu_discovery() {
+        if searches_above_base() {
             forbid_fragmentation(&socket);
         }
         Ok(Self(socket))
@@ -498,39 +511,54 @@ mod fragmentation {
         false
     }
 
-    /// The bit is set on an endpoint's socket while discovery is on, where
-    /// the platform allows it safely, and left alone while it is off — a
-    /// ceiling the operator raised by hand is one they vouch for, and
-    /// fragmenting is what it did before.
+    /// The bit is set on an endpoint's socket while there is something to
+    /// search for — discovery on and the ceiling raised — where the platform
+    /// allows it safely, and left alone otherwise: at the default ceiling, so
+    /// a default endpoint does what it always did, and with discovery off,
+    /// where a ceiling raised by hand is one the operator vouches for.
     ///
-    /// One test, because discovery is process-wide and a second would race it.
+    /// One test, because both settings are process-wide and a second would
+    /// race it.
     #[test]
-    fn an_endpoint_socket_forbids_fragmenting_only_while_discovery_is_on() {
+    fn a_socket_forbids_fragmenting_only_when_there_is_a_size_to_search_for() {
         let supported = cfg!(any(
             target_os = "linux",
             target_os = "android",
             target_vendor = "apple"
         ));
+        let made =
+            || Prepared::new(UdpSocket::bind("127.0.0.1:0").expect("bind")).expect("prepare");
+        let original = max_datagram();
 
         set_path_mtu_discovery(true);
-        let on = Prepared::new(UdpSocket::bind("127.0.0.1:0").expect("bind")).expect("prepare");
-        assert_eq!(forbidden(&on.0), supported, "discovery on");
-
-        set_path_mtu_discovery(false);
-        let off = Prepared::new(UdpSocket::bind("127.0.0.1:0").expect("bind")).expect("prepare");
-        set_path_mtu_discovery(true);
-        assert!(
-            !forbidden(&off.0),
-            "discovery off: left as the system had it"
-        );
-
-        // And a connection's socket, the same way.
+        set_max_datagram(BASE_DATAGRAM);
+        let default = made();
+        set_max_datagram(1472);
+        let searching = made();
         let peer = UdpSocket::bind("127.0.0.1:0").expect("bind");
         let transport = UdpTransport::connect(peer.local_addr().expect("addr")).expect("connect");
+        set_path_mtu_discovery(false);
+        let told = made();
+        set_path_mtu_discovery(true);
+        set_max_datagram(original);
+
+        assert!(
+            !forbidden(&default.0),
+            "the default ceiling: left as the system had it"
+        );
+        assert_eq!(
+            forbidden(&searching.0),
+            supported,
+            "a raised ceiling, discovery on"
+        );
         assert_eq!(
             forbidden(&transport.socket),
             supported,
             "a connection's socket"
+        );
+        assert!(
+            !forbidden(&told.0),
+            "discovery off: left as the system had it"
         );
     }
 

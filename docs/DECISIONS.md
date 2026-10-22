@@ -4758,7 +4758,8 @@ frames a router or the sending host split in two — delivered, but lost
 whenever either piece is.
 
 **Decision**: take the dependencies, one per platform, and set the bit on
-every socket an endpoint or a connection makes while discovery is on.
+every socket an endpoint or a connection makes while there is a size to search
+for: discovery on and the ceiling raised above 1200.
 
 - **Linux and Android: `rustix`**, `IP_MTU_DISCOVER` and `IPV6_MTU_DISCOVER`
   set to `PROBE`. Not `DO`: `PROBE` sets the bit and also ignores what the
@@ -4772,8 +4773,13 @@ every socket an endpoint or a connection makes while discovery is on.
 - **Windows: nothing.** Its option needs `unsafe` through `windows-sys`, which
   this crate would have to write. D85's gap stands there, and the default
   ceiling stays at 1200 everywhere rather than differ by platform.
-- **Only while discovery is on.** A ceiling raised with discovery off is one
-  the operator vouches for, and it behaves as it always did.
+- **Only while there is a size to search for.** A ceiling raised with
+  discovery off is one the operator vouches for, and it behaves as it always
+  did. And at the default ceiling nothing is searched for, so nothing is
+  changed: the first version set the bit whenever discovery was on, which is
+  by default, and that would have had a default Linux endpoint drop a
+  1200-byte frame on the rare IPv4 path under 1228 bytes, where the kernel
+  had split it before. Caught reading the change over before releasing it.
 
 `#![forbid(unsafe_code)]` still holds in this crate. The `unsafe` is in
 `rustix` and `nix`, two of the most used crates there are for exactly this,
