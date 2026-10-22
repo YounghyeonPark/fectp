@@ -498,6 +498,9 @@ fn send_datagram(socket: &dyn DatagramSocket, buf: &[u8], addr: SocketAddr) -> R
     match socket.send_to(buf, addr) {
         Ok(_) => Ok(()),
         Err(e) if is_stale_unreachable(&e) => Ok(()),
+        // Larger than the path takes, with fragmenting forbidden (D89): a
+        // datagram lost, and reliable data is resent like any other loss.
+        Err(e) if crate::udp::is_too_long(&e) => Ok(()),
         Err(e) => Err(Error::Io(e)),
     }
 }

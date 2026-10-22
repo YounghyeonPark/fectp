@@ -25,6 +25,14 @@ every member's key comes with a certificate made from the secret, which the
 rendezvous cannot forge. The secret must be sixteen random bytes or more
 (`Error::GroupSecretTooShort`). D88, SPEC A.7.
 
+**Path MTU discovery measures what crosses whole, on Linux, Android and Apple
+platforms.** While discovery is on, sockets forbid fragmenting —
+`IP_PMTUDISC_PROBE` through `rustix`, `IP_DONTFRAG` through `nix`, each a
+target-specific dependency — so a probe too large for the path is dropped
+rather than split and answered. Windows is unchanged. A datagram too long for
+the local interface is now a lost datagram rather than an error out of
+`Endpoint::poll`. D89.
+
 ## 0.3.1 — 2026-10-22
 
 **The crates only**, with new public items and nothing changed under existing

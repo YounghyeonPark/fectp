@@ -97,11 +97,11 @@ pub fn max_datagram() -> usize {
 /// frames lost in between are lost silently. Handshakes stay at 1200 whatever
 /// this says, since nothing about the path is known while one runs.
 ///
-/// What an answered probe proves is that a frame that size *arrived*. This
-/// crate does not control the don't-fragment bit, so it may have been split on
-/// the way — by a router, or by the sending host once it has learned the
-/// path's MTU, on IPv6 as on IPv4 — and a session can settle on frames that
-/// cross in pieces: delivered, but lost whenever either piece is.
+/// On Linux, Android and Apple platforms an answered probe crossed whole: the
+/// socket forbids fragmenting while discovery is on (D89). On Windows nothing
+/// safe can, so an answered probe may have been split on the way, and a
+/// session there can settle on frames that cross in pieces: delivered, but
+/// lost whenever either piece is (D85).
 /// With discovery off, or with a peer that does not answer probes, sessions
 /// send at the ceiling from the start, and a value the path cannot carry means
 /// datagrams that vanish with no error anywhere.
@@ -161,6 +161,9 @@ impl UdpTransport {
         };
         let socket = UdpSocket::bind(bind)?;
         socket.connect(peer)?;
+        if path_mtu_discovery() {
+            forbid_fragmentation(&socket);
+        }
         Ok(Self::new(socket))
     }
 
@@ -335,6 +338,63 @@ pub trait DatagramSocket: Send + Sync {
     fn local_addr(&self) -> io::Result<SocketAddr>;
 }
 
+/// Asks the system not to fragment what `socket` sends, where that can be
+/// asked without `unsafe`. Returns whether it was.
+///
+/// With it, a probe too large for the path is dropped on the way rather than
+/// split and reassembled, so an answered probe proves the size crosses
+/// whole (D89). On Linux the mode is `IP_PMTUDISC_PROBE`, which sets the bit
+/// *and* ignores what the kernel has cached about the path — so it does not
+/// split a large datagram itself either, which the default, `WANT`, does once
+/// an ICMP error has told it the path's MTU. On Apple platforms it is
+/// `IP_DONTFRAG`.
+/// Both families are set, since a socket may carry either; the one that does
+/// not apply fails, and that is fine.
+pub(crate) fn forbid_fragmentation(socket: &UdpSocket) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use rustix::net::sockopt::{
+            set_ip_mtu_discover, set_ipv6_mtu_discover, Ipv4PathMtuDiscovery, Ipv6PathMtuDiscovery,
+        };
+        let v4 = set_ip_mtu_discover(socket, Ipv4PathMtuDiscovery::PROBE).is_ok();
+        let v6 = set_ipv6_mtu_discover(socket, Ipv6PathMtuDiscovery::PROBE).is_ok();
+        v4 || v6
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        use nix::sys::socket::{setsockopt, sockopt};
+        let v4 = setsockopt(socket, sockopt::IpDontFrag, &true).is_ok();
+        let v6 = setsockopt(socket, sockopt::Ipv6DontFrag, &true).is_ok();
+        v4 || v6
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = socket;
+        false
+    }
+}
+
+/// Whether a send failed because the datagram is larger than the path, as
+/// the system knows it, will take: what the don't-fragment bit turns an
+/// oversize datagram into, at the sender, instead of a silent drop further
+/// on. It is a datagram lost, not a socket failing.
+pub(crate) fn is_too_long(e: &io::Error) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const EMSGSIZE: i32 = 90;
+    #[cfg(target_vendor = "apple")]
+    const EMSGSIZE: i32 = 40;
+    #[cfg(windows)]
+    const EMSGSIZE: i32 = 10040;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    const EMSGSIZE: i32 = -1;
+    e.raw_os_error() == Some(EMSGSIZE)
+}
+
 /// A UDP socket in the mode [`recv_from`] and [`send_to`] expect, which is
 /// what [`Endpoint::bind`](crate::Endpoint::bind) runs on.
 pub(crate) struct Prepared(UdpSocket);
@@ -342,6 +402,9 @@ pub(crate) struct Prepared(UdpSocket);
 impl Prepared {
     pub(crate) fn new(socket: UdpSocket) -> io::Result<Self> {
         prepare(&socket)?;
+        if path_mtu_discovery() {
+            forbid_fragmentation(&socket);
+        }
         Ok(Self(socket))
     }
 }
@@ -410,4 +473,85 @@ fn recv_from_peeking(socket: &UdpSocket, buf: &mut [u8]) -> io::Result<(usize, S
         }
     }
     socket.recv_from(buf)
+}
+
+#[cfg(test)]
+mod fragmentation {
+    use super::*;
+
+    /// Whether the system says fragmenting is forbidden on `socket`, read
+    /// back from it rather than taken from what was asked for.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn forbidden(socket: &UdpSocket) -> bool {
+        use rustix::net::sockopt::{ip_mtu_discover, Ipv4PathMtuDiscovery};
+        ip_mtu_discover(socket).expect("getsockopt") == Ipv4PathMtuDiscovery::PROBE
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn forbidden(socket: &UdpSocket) -> bool {
+        use nix::sys::socket::{getsockopt, sockopt};
+        getsockopt(socket, sockopt::IpDontFrag).expect("getsockopt")
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    fn forbidden(_: &UdpSocket) -> bool {
+        false
+    }
+
+    /// The bit is set on an endpoint's socket while discovery is on, where
+    /// the platform allows it safely, and left alone while it is off — a
+    /// ceiling the operator raised by hand is one they vouch for, and
+    /// fragmenting is what it did before.
+    ///
+    /// One test, because discovery is process-wide and a second would race it.
+    #[test]
+    fn an_endpoint_socket_forbids_fragmenting_only_while_discovery_is_on() {
+        let supported = cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple"
+        ));
+
+        set_path_mtu_discovery(true);
+        let on = Prepared::new(UdpSocket::bind("127.0.0.1:0").expect("bind")).expect("prepare");
+        assert_eq!(forbidden(&on.0), supported, "discovery on");
+
+        set_path_mtu_discovery(false);
+        let off = Prepared::new(UdpSocket::bind("127.0.0.1:0").expect("bind")).expect("prepare");
+        set_path_mtu_discovery(true);
+        assert!(
+            !forbidden(&off.0),
+            "discovery off: left as the system had it"
+        );
+
+        // And a connection's socket, the same way.
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let transport = UdpTransport::connect(peer.local_addr().expect("addr")).expect("connect");
+        assert_eq!(
+            forbidden(&transport.socket),
+            supported,
+            "a connection's socket"
+        );
+    }
+
+    #[test]
+    fn only_a_datagram_too_long_counts_as_too_long() {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let code = 90;
+        #[cfg(target_vendor = "apple")]
+        let code = 40;
+        #[cfg(windows)]
+        let code = 10040;
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            windows
+        ))]
+        assert!(is_too_long(&io::Error::from_raw_os_error(code)));
+        assert!(!is_too_long(&io::Error::from(io::ErrorKind::TimedOut)));
+        assert!(!is_too_long(&io::Error::from(
+            io::ErrorKind::ConnectionReset
+        )));
+    }
 }

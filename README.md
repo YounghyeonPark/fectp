@@ -340,7 +340,7 @@ records what each one would cost to change.
 | **Following a moved peer costs a round trip** | An `Endpoint` follows a peer that changes address, but only after challenging the new address and being answered — nothing is sent there before that. A `Connection` does not follow a *server* that moves: its socket is connected to one address. Measured: a NAT rebind no longer ends the session. |
 | **A silent peer must be told to speak** | A NAT forgets an idle mapping — thirty seconds on plenty of equipment — after which inbound datagrams have nowhere to go, with both ends still holding a good session. `set_keepalive` sends a 38-byte frame through the quiet, and is off by default so a sleeping sensor is not woken by its own transport. |
 | **Silence is not evidence of death** | `set_peer_timeout` releases a peer nothing authenticated has been heard from, but a quiet peer and a departed one look identical unless keep-alives are on to make the silence mean something. Both are off by default, and turning on the timeout alone will drop peers that are merely asleep. |
-| **Path MTU discovery runs only where asked, and cannot see fragmentation** | The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame. Raise the ceiling with `set_max_datagram` and each session starts at 1200, probes upward, and falls back to 1200 when a large reliable frame has to be resent and a check of the size in use goes unanswered, or at the next ten-minute re-check. But fectp does not control the don't-fragment bit, so a probe split on the way — by a router or by the sending host, on IPv4 or IPv6 — still comes back answered, and a session can settle on frames that cross in pieces ([D85](docs/DECISIONS.md#d85--path-mtu-discovery-without-the-dont-fragment-bit)). |
+| **Path MTU discovery runs only where asked, and on Windows cannot see fragmentation** | The 1200-byte default is safe anywhere and gives up a fifth of an ethernet frame. Raise the ceiling with `set_max_datagram` and each session starts at 1200, probes upward, and falls back to 1200 when a large reliable frame has to be resent and a check of the size in use goes unanswered, or at the next ten-minute re-check. On Linux, Android and Apple platforms the don't-fragment bit is set, so an answered probe crossed whole ([D89](docs/DECISIONS.md#d89--the-dont-fragment-bit-where-a-safe-crate-can-set-it)). On Windows nothing safe can set it, and a probe split on the way still comes back answered, so a session there can settle on frames that cross in pieces ([D85](docs/DECISIONS.md#d85--path-mtu-discovery-without-the-dont-fragment-bit)). |
 | **One loop serves every peer** | A message arriving behind a burst waits for it. With 23 busy peers the median grows about half again and p95 about sevenfold — 280 µs against 43 idle. |
 
 ### Scope
@@ -386,7 +386,7 @@ sits: in the crate description crates.io shows in search results, and as a
 warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
 the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 427 of them and they pass. Linked for
+`cargo test --workspace` runs 429 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.4 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.

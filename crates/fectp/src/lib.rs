@@ -72,8 +72,9 @@
 //!
 //! Path MTU discovery runs only up to a ceiling the application raises
 //! ([`set_max_datagram`]); at the default, 1200 bytes, which any path carries,
-//! there is nothing to discover. It does not control the don't-fragment bit,
-//! so a size it settles on may be one that crosses the path in pieces (D85).
+//! there is nothing to discover. On Windows, where the don't-fragment bit
+//! cannot be set safely, a size it settles on may be one that crosses the path
+//! in pieces (D85, D89).
 //!
 //! A `Connection` does not follow a *server* that changes address — its socket
 //! is connected to one — though an [`Endpoint`] follows a peer that does.
@@ -214,6 +215,17 @@ pub(crate) fn is_stale_unreachable(e: &io::Error) -> bool {
         e.kind(),
         io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
     )
+}
+
+/// Sends one frame of a reliable message, treating one too large for the path
+/// as lost rather than as the connection failing: with fragmenting forbidden
+/// (D89) that is what an oversize datagram becomes at the sender, and the
+/// message is resent, or given up on, like any other loss.
+fn send_frame(transport: &mut UdpTransport, frame: &[u8]) -> Result<()> {
+    match transport.send(frame) {
+        Err(e) if udp::is_too_long(&e) => Ok(()),
+        other => other.map(drop).map_err(Error::Io),
+    }
 }
 
 /// How long to wait for a handshake reply before sending the opening frame again.
@@ -1108,7 +1120,7 @@ impl Core {
         let mut large_resent = false;
         self.peer.drive_retransmits(now, &mut self.tx, |frame| {
             large_resent |= frame.len() > udp::BASE_DATAGRAM;
-            transport.send(frame).map_err(Error::Io)?;
+            send_frame(transport, frame)?;
             *stamp = now;
             Ok(())
         })?;
@@ -1421,7 +1433,7 @@ impl Connection {
             ..
         } = &mut *core;
         peer.drive_queue(now, tx, |frame| {
-            transport.send(frame).map_err(Error::Io)?;
+            send_frame(transport, frame)?;
             *stamp = now;
             Ok(())
         })?;

@@ -578,7 +578,7 @@ These are unimplemented, not overlooked.
 | **A relay of version 0.3.1 does not follow a move** | A relay port follows a client its NAT has moved ([D87](#d87--a-relay-follows-its-party-because-the-token-stays-off-the-wire)), but not one that bound the 0.3.1 way, with its token in the clear: on such a port the token is anybody's, and moving would hand the session to them. | A client falls back to that bind only for a port that answers nothing else, which is a rendezvous of that version. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
-| **Fragmentation is invisible to the frame-size search** | Sessions search for a frame size up to a raised ceiling ([D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)), but this crate does not control the don't-fragment bit, so a probe split on the way — by a router or by the sending host, on IPv4 or IPv6 — still comes back answered. | Setting the bit takes `setsockopt`, which needs `unsafe` this crate forbids, or a dependency that holds it, and on Windows none is safe. The default ceiling stays at 1200, where the question does not arise. |
+| **On Windows, fragmentation is invisible to the frame-size search** | Sessions search for a frame size up to a raised ceiling ([D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)). On Linux, Android and Apple platforms the don't-fragment bit is set ([D89](#d89--the-dont-fragment-bit-where-a-safe-crate-can-set-it)); on Windows no crate sets it without `unsafe` this crate would have to write, so a probe split on the way still comes back answered. | The default ceiling stays at 1200 on every platform, where the question does not arise. |
 | **Tail latency under load** | One socket and one loop serve every peer, so a request arriving behind a burst waits for it. A consequence of [D14](#d14--many-peers-share-one-socket-through-an-event-loop), not a defect in it. | What a datagram costs no longer grows with the number of peers ([D62](#d62--the-loop-was-charging-every-datagram-for-the-whole-peer-table)), so what is left is the queueing itself. Measured since, once BENCHMARKS.md §11's table was given a same-run control and its conditions interleaved: two dozen busy neighbours cost the median about half again (1.47x) and the tail about sevenfold (280 us against 43 idle), on a run whose control landed at 1.00x. The earlier reading here — no control, a conclusion that did not reproduce — was not evidence either way, and is what prompted the rework. |
 | **Counter exhaustion ends a session** | A session ends after 2^64 frames. Keys are replaced along the way ([D50](#d50--one-key-does-not-last-a-whole-session)), but the counter is never reset — it is the nonce. | Not reachable in practice: at a million frames a second it is half a million years. The error path exists (`Error::NonceExhausted`) because a bound with no code behind it is a comment. |
 | **QUIC backend** | Only UDP exists. | The `Transport` trait is the seam, and QUIC fits it: it carries datagrams and preserves their boundaries. TCP does not fit it — see [D40](#d40--tcp-is-not-a-backend-it-is-a-different-protocol). |
@@ -4747,3 +4747,48 @@ only two members filed, and was the test's mistake, not the bound's.
 **What it does not do.** Find a peer that shares no secret: there is nothing
 to check a stranger's key against, and this does not pretend otherwise.
 Remove a member: anyone holding the secret is one, until the secret changes.
+
+## D89 — The don't-fragment bit, where a safe crate can set it
+
+**Problem**: D85 left path MTU discovery measuring that a size *arrives*, not
+that it arrives whole, because nothing set the don't-fragment bit: setting it
+is `setsockopt`, which is `unsafe`, which this crate forbids, and it was
+decided then not to take a dependency that wraps it. A session could settle on
+frames a router or the sending host split in two — delivered, but lost
+whenever either piece is.
+
+**Decision**: take the dependencies, one per platform, and set the bit on
+every socket an endpoint or a connection makes while discovery is on.
+
+- **Linux and Android: `rustix`**, `IP_MTU_DISCOVER` and `IPV6_MTU_DISCOVER`
+  set to `PROBE`. Not `DO`: `PROBE` sets the bit and also ignores what the
+  kernel has cached about the path, so the kernel does not split a large
+  datagram itself either — which the default, `WANT`, does once an ICMP error
+  has told it the path's MTU, and which is how a Linux host came to answer an
+  oversize probe on its second try.
+- **Apple platforms: `nix`**, `IP_DONTFRAG` and `IPV6_DONTFRAG`. `rustix` has
+  no Apple option, and `nix` has no Linux IPv4 one, so neither alone covers
+  both.
+- **Windows: nothing.** Its option needs `unsafe` through `windows-sys`, which
+  this crate would have to write. D85's gap stands there, and the default
+  ceiling stays at 1200 everywhere rather than differ by platform.
+- **Only while discovery is on.** A ceiling raised with discovery off is one
+  the operator vouches for, and it behaves as it always did.
+
+`#![forbid(unsafe_code)]` still holds in this crate. The `unsafe` is in
+`rustix` and `nix`, two of the most used crates there are for exactly this,
+and target-specific: a Windows build has neither.
+
+**A datagram too long becomes a loss, not an error.** With the bit set, one
+larger than the local interface takes fails at the sender with `EMSGSIZE`
+rather than vanishing further on. That error had nowhere to go but out of
+`Endpoint::poll`, ending service to every peer, or out of a connection's
+`recv`. It is a lost datagram now, and a reliable one is resent or given up on
+like any other.
+
+**Verified by asking the socket.** Loopback carries 65,535 bytes, so no probe
+on it is ever too large and the bit changes nothing that can be observed
+there. The test reads the option back from the system instead — on an
+endpoint's socket and a connection's, with discovery on and off — on Linux
+and macOS in CI, and checks Windows reports nothing set.
+

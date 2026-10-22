@@ -70,6 +70,10 @@ ALLOWED = {
         "`relay` matches RELAY_REFRESH and the relay constants, which are the "
         "following that does exist; what is absent is following on a port "
         "that saw its token in the clear.",
+    "on windows, fragmentation is invisible to the frame-size search":
+        "`fragmentation` matches forbid_fragmentation, which sets the "
+        "don't-fragment bit on Linux, Android and Apple platforms; what is "
+        "absent is the same on Windows.",
     "finding peers who share no secret":
         "`peers` and `secret` match the group items (PeerDiscovered, "
         "GroupSecretTooShort), which find peers who do share one; what is "

@@ -26,6 +26,19 @@ rand_core = { workspace = true, features = ["std", "getrandom"] }
 zeroize = { workspace = true }
 zstd = { version = "0.13", optional = true }
 
+# Setting the don't-fragment bit, so path MTU discovery measures what a path
+# carries whole (D89). `setsockopt` is `unsafe`, which this crate forbids, so
+# each platform's option comes from a crate that wraps it safely: rustix has
+# Linux's IP_PMTUDISC_PROBE and no Apple option, nix has Apple's IP_DONTFRAG
+# and no Linux IPv4 one. Windows has no safe route, and goes without.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+# `time` only because rustix's `net` does not build without it: its socket
+# timeout options refer to a module that `time` switches on.
+rustix = { version = "1", default-features = false, features = ["std", "net", "time"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["socket", "net"] }
+
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
 # Tests that build frames a cooperating peer never sends need the session

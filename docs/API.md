@@ -345,11 +345,14 @@ use goes unanswered; otherwise the ten-minute re-check is what notices, so large
 1200. A peer that does not answer probes — any before this — is sent at the
 ceiling from the start, as is everyone with discovery off.
 
-**An answer proves arrival, not wholeness.** fectp does not control the
-don't-fragment bit, so a size split on the way — by a router, or by the sending
-host, on IPv4 or IPv6 — can still be answered, and settled on
-([D85](DECISIONS.md#d85--path-mtu-discovery-without-the-dont-fragment-bit)).
-Where that matters, set the ceiling to what the path carries whole.
+**On Windows, an answer proves arrival, not wholeness.** On Linux, Android and
+Apple platforms the don't-fragment bit is set while discovery is on, so an
+answered probe crossed whole
+([D89](DECISIONS.md#d89--the-dont-fragment-bit-where-a-safe-crate-can-set-it)).
+On Windows nothing safe can set it, and a size split on the way can still be
+answered and settled on
+([D85](DECISIONS.md#d85--path-mtu-discovery-without-the-dont-fragment-bit));
+where that matters there, set the ceiling to what the path carries whole.
 
 ---
 

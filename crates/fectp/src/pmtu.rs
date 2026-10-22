@@ -5,14 +5,13 @@
 //! sizes to try and when, and what to conclude; it sends nothing itself, so it
 //! can be driven by a clock the tests control.
 //!
-//! **What an answer proves is that the frame arrived, not that it arrived
-//! whole.** This crate does not control the don't-fragment bit: `std` and
-//! `socket2` cannot set it, Windows has no safe way to, and the crate forbids
-//! `unsafe`. So a probe too large for the path may be split — by a router on
-//! IPv4 where the sending system leaves the bit clear, as macOS and Windows
-//! do, or by the sending host itself once it has learned the path's MTU from
-//! an ICMP error, on IPv4 under Linux and on IPv6 — and the pieces arrive and
-//! are answered. Neither family is exempt. See D85.
+//! **What an answer proves depends on the platform.** On Linux, Android and
+//! Apple platforms the socket forbids fragmenting while discovery is on
+//! ([`forbid_fragmentation`](crate::udp::forbid_fragmentation), D89), so a
+//! probe too large for the path is dropped and an answer proves the size
+//! crosses whole. On Windows nothing safe can set the bit, a probe may be
+//! split on the way and its pieces answered, and an answer proves only that
+//! it arrived (D85).
 //!
 //! The search sends every candidate size at once, each with its own token, and
 //! keeps the largest that is answered: one round trip in the usual case, where
