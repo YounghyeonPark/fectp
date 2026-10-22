@@ -316,6 +316,9 @@ pub enum Error {
     MissingPeerKey,
     /// An introduction was asked for with no rendezvous connected.
     NoRendezvous,
+    /// A group secret shorter than
+    /// [`MIN_GROUP_SECRET`](crate::rendezvous::MIN_GROUP_SECRET).
+    GroupSecretTooShort,
 }
 
 impl std::fmt::Display for Error {
@@ -341,6 +344,9 @@ impl std::fmt::Display for Error {
             Error::UnknownPeer => f.write_str("no such connected peer"),
             Error::MissingPeerKey => f.write_str("public-key mode requires the peer's public key"),
             Error::NoRendezvous => f.write_str("no rendezvous is connected"),
+            Error::GroupSecretTooShort => {
+                f.write_str("the group secret is too short to be guessed at")
+            }
             Error::Closed => f.write_str("the connection is closed"),
         }
     }

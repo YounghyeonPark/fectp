@@ -361,11 +361,12 @@ reliable delivery, messages split across frames, congestion control, session
 resumption, many peers on one socket, outbound dialling on that same socket,
 two security modes, address migration, key replacement within a session,
 path MTU discovery up to a raised ceiling, optional NAT keep-alive, NAT traversal through a
-rendezvous with a relay to fall back on, optional peer timeouts, optional
+rendezvous with a relay to fall back on, finding peers by a shared group
+secret, optional peer timeouts, optional
 length-masking padding, typed payload codecs, optional Zstandard compression.
 
-**Not built:** ordered delivery, peer discovery, a QUIC backend, bit-packed
-deltas —
+**Not built:** ordered delivery, finding peers who share no secret, a QUIC
+backend, bit-packed deltas —
 each with its consequence under [Limitations](#limitations).
 
 **Not audited.** This is `#![forbid(unsafe_code)]`, cross-validated against an
@@ -385,7 +386,7 @@ sits: in the crate description crates.io shows in search results, and as a
 warning block at the top of docs.rs. [THREAT-MODEL.md](docs/THREAT-MODEL.md) is
 the long form of what is and is not claimed.
 
-`cargo test --workspace` runs 419 of them and they pass. Linked for
+`cargo test --workspace` runs 427 of them and they pass. Linked for
 `thumbv7em-none-eabihf`, the whole protocol costs
 **23.4 KiB of flash** and needs 358 bytes of session state — 1,414 with reliable
 delivery — plus the caller's buffers.

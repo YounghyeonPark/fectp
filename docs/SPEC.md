@@ -1315,6 +1315,9 @@ with a 4-byte `ip` or 6 with a 16-byte one.
 | 0x82 | rendezvous → client | `INTRODUCTION` | `key[32] \|\| addr` |
 | 0x83 | rendezvous → client | `UNAVAILABLE` | `key[32] \|\| reason(1)` |
 | 0x84 | rendezvous → client | `RELAY_OFFER` | `key[32] \|\| addr \|\| token[16]` |
+| 0x04 | client → rendezvous | `JOIN` | `tag[16] \|\| certificate[16]` |
+| 0x05 | client → rendezvous | `LEAVE` | `tag[16]` |
+| 0x85 | rendezvous → client | `MEMBERS` | `tag[16] \|\| (key[32] \|\| certificate[16])*` |
 
 `reason` is 0 when the key is not registered here, 1 when this rendezvous will
 not introduce the pair, 2 when it will not relay for it, and 3 when the key's
@@ -1456,6 +1459,46 @@ up to a bound it chooses — an answer can be lost, and the port checks again
 on the next hello — and then again from time to time for as long as the
 session lasts, and whenever it has had to resend through the port: that is
 how a port finds out its party has moved.
+
+### A.7 Groups
+
+A client can find the keys to ask for by sharing a secret with them. The
+secret never reaches the rendezvous; two values derived from it do the work:
+
+```
+tag         = BLAKE2s("fectp group tag"    || secret)[0..16]
+group key   = BLAKE2s("fectp group key"    || secret)
+certificate = BLAKE2s("fectp group member" || group key || static key)[0..16]
+```
+
+A client joins a group by sending `JOIN` with the group's tag and its own
+certificate, and leaves it with `LEAVE`. The rendezvous files the client's
+static key — the one the handshake authenticated — with the certificate under
+the tag, and whenever the group changes sends every member `MEMBERS`: the tag
+and every member's key and certificate. A client MUST NOT send `JOIN` before
+its registration is done (A.1).
+
+**A client MUST check every certificate it is sent** against the group key,
+and treat a key whose certificate does not check out as not a member. The
+rendezvous sees the tag and the certificates but not the group key, so it
+cannot make a certificate for a key of its own choosing, and the check is what
+stops it adding one to a group. It can leave a member out, and it learns which
+keys share a group.
+
+The secret MUST be at least 16 bytes and SHOULD be random. The rendezvous
+holds the tag and may try guesses against it; a secret it guesses gives it the
+group key, and with that it can certify any key. Anyone holding the secret is
+a member, and there is no removing one but replacing the secret.
+
+A rendezvous MUST bound how many members a group may have — `MEMBERS` goes to
+every member whenever the group changes, so the bound is on every such
+message — and how many groups one client may be in. A `MEMBERS` longer than a
+receiver's bound is ignored, as a body of the wrong length is.
+
+What a client does with a member it has found is its own affair. The
+reference implementation raises it to the application, which asks for an
+introduction (A.3) — and since each member finds the others the same way,
+both sides of every pair ask.
 
 ### A.6 What this does not provide
 

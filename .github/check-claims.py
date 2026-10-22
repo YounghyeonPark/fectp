@@ -70,10 +70,10 @@ ALLOWED = {
         "`relay` matches RELAY_REFRESH and the relay constants, which are the "
         "following that does exist; what is absent is following on a port "
         "that saw its token in the clear.",
-    "peer discovery":
-        "`discovery` matches set_path_mtu_discovery, which finds a frame size "
-        "for a peer already connected, and `peer` matches every per-peer "
-        "item; what is absent is learning which key to ask a rendezvous for.",
+    "finding peers who share no secret":
+        "`peers` and `secret` match the group items (PeerDiscovered, "
+        "GroupSecretTooShort), which find peers who do share one; what is "
+        "absent is finding a stranger's key with nothing in common.",
     "ordering":
         "`order` matches nothing built; reordering *tolerance* is a different "
         "property and is in the Working list under its own name.",

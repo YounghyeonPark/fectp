@@ -18,6 +18,13 @@ record a new one; it does so on the client's next resend and every 20 s
 (`RELAY_REFRESH`). Clients and rendezvous of 0.3.1 still work with this
 version both ways, without the following (D87, SPEC A.4–A.5).
 
+**Finding peers by a shared secret.** `Endpoint::join_group` joins a group at
+the rendezvous; its other members are raised as `Event::PeerDiscovered`, ready
+to be introduced. The rendezvous sees only a tag derived from the secret, and
+every member's key comes with a certificate made from the secret, which the
+rendezvous cannot forge. The secret must be sixteen random bytes or more
+(`Error::GroupSecretTooShort`). D88, SPEC A.7.
+
 ## 0.3.1 — 2026-10-22
 
 **The crates only**, with new public items and nothing changed under existing

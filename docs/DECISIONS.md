@@ -559,8 +559,9 @@ is the property they depend on.
 
 *Since [D86](#d86--rendezvous-and-relay-both-sides-must-ask)*: address
 reflection and hole punching exist, through a rendezvous, with a relay for the
-NATs that cannot be punched through. Peer discovery — learning which key to ask
-for — is still absent.
+NATs that cannot be punched through. *Since
+[D88](#d88--peers-find-each-other-by-a-secret-the-rendezvous-never-sees)*: so does
+learning which key to ask for, among peers that share a secret.
 
 ---
 
@@ -4694,3 +4695,55 @@ and fails again with the bug back.
 Until then the other side's traffic goes to the old mapping and is resent
 like any loss — a minute's worth at most, since the periodic hello comes
 round in twenty seconds and a relay drops a session idle for sixty.
+
+## D88 — Peers find each other by a secret the rendezvous never sees
+
+**Problem**: D86 left one half of reaching a peer to the application — knowing
+its key. Every way of learning a key is a way of trusting one, and the choice
+is whom: the first key seen, a directory, a short code typed in, or a secret
+held in common.
+
+**Decision**: a secret held in common, for the case this transport is built
+for — one owner's or one organisation's devices finding each other. A device
+joins a group at the rendezvous by sending a tag derived from the secret and a
+certificate over its own static key, keyed by another value derived from it
+(SPEC A.7). The rendezvous sends each member the whole group; each member
+checks every certificate and raises only the keys that pass, as
+`Event::PeerDiscovered`. Introducing them is then the usual step, and both
+sides take it, since each has found the other.
+
+- **The rendezvous cannot add a member.** It holds the tag and every
+  certificate, but not the key they are made with, so a key it inserts has no
+  certificate that checks. It can leave members out, and it learns which keys
+  share a group: it is trusted to be available, not to be honest about
+  membership, which is the trust it would otherwise have needed.
+- **Why not the others.** The first key seen on a LAN is anybody's who
+  answers first. A directory of names asks the rendezvous to be honest about
+  whose name is whose, the trust this design avoids. A short code is the best
+  experience and needs a PAKE — new cryptography, here, unaudited, in the
+  place where a mistake is most expensive. A secret needs nothing new: one
+  BLAKE2s, which the handshake already uses.
+- **Length is the only check on the secret.** The tag is a hash of it, and
+  the rendezvous can try guesses against the tag offline; a guessed secret
+  lets it certify any key. So the secret must be sixteen bytes or more and
+  should be random, which the documentation says wherever a secret is asked
+  for — a password would not survive the guessing.
+- **Bounded.** A group is sent whole to every member whenever it changes, so
+  it holds at most 64 members, and a client is in at most 8 groups; joins
+  spend the same per-address budget as every other request.
+
+**Verified by breaking it.** Three members find each other and not a fourth
+in another group; two behind port-restricted NATs find each other, introduce
+themselves and connect; one that leaves drops out of the other's view; a
+rendezvous that lies — a key with no certificate, a key with someone else's —
+has neither raised, while a certified key in the same list is. Skipping the
+certificate check, raising the client's own key, raising every member on every
+update, not telling the group of a leave, and leaving either bound unenforced
+each fail a test. The bounds are tested inside the crate, because every
+client on loopback shares one address and the per-address limits on
+registering and asking stop them first — a test that tried over the wire found
+only two members filed, and was the test's mistake, not the bound's.
+
+**What it does not do.** Find a peer that shares no secret: there is nothing
+to check a stranger's key against, and this does not pretend otherwise.
+Remove a member: anyone holding the secret is one, until the secret changes.

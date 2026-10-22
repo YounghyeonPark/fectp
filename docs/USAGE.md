@@ -824,6 +824,36 @@ key it did not ask for. Learning which key to ask for is not part of this.
 A relay releases a session that has carried nothing for a minute, so if a
 relayed one may fall quiet, turn on `set_keepalive` below that.
 
+### Finding them
+
+Knowing which key to ask for is the other half. Devices that share a secret
+find each other through the same rendezvous: each joins the group, and each is
+told the others' keys. The rendezvous sees only a tag derived from the secret,
+and every key comes with a certificate made from the secret, which the
+rendezvous cannot forge — so it can leave a member out, but not add one.
+
+```rust
+let mut node = Endpoint::bind("0.0.0.0:0", identity)?;
+node.connect_rendezvous(addr, &server_public)?;
+// Sixteen random bytes, shared with the other devices out of band: set up
+// once, the way a Wi-Fi password is.
+let group_secret = [0x5Au8; 16];
+node.join_group(&group_secret)?;
+
+loop {
+    match node.poll(Some(Duration::from_millis(100)))? {
+        Event::PeerDiscovered { peer_public, .. } => node.introduce(&peer_public)?,
+        Event::Connected { peer, .. } => println!("connected to {peer:?}"),
+        _ => {}
+    }
+}
+```
+
+Each member finds the others, so both sides of every pair call `introduce`,
+which is what an introduction needs. Make the secret random: the rendezvous
+can try guesses against the tag, and one it guesses lets it certify keys of
+its own.
+
 ## Length masking
 
 Frame sizes reveal payload lengths. If the lengths themselves are sensitive:

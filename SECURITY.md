@@ -57,6 +57,11 @@ nothing to measure.
   runs, which is by default from 32 bytes up — a compression side channel.
 - A handshake reply's sequence bytes and known flag bits are not authenticated
   (nothing reads them; the set is pinned by a test).
+- A rendezvous, where one is used, sees which keys ask for each other and
+  share a group, and the volume of what it relays; caps on relays are per IP
+  address, so someone with many addresses can hold them all.
+- A group's secret is only checked for length: a rendezvous can guess a weak
+  one from the tag it sees, and then certify keys of its own as members.
 
 ## What is checked mechanically
 

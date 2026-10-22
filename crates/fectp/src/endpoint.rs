@@ -48,7 +48,7 @@
 //! # }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,9 @@ use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::pmtu::Pmtu;
-use crate::rendezvous::{self, Ask, ClientState, Control, Link, Stage, Unavailable};
+use crate::rendezvous::{
+    self, Ask, ClientState, Control, Group, GroupTag, Link, Stage, Unavailable,
+};
 use crate::udp::{DatagramSocket, BASE_DATAGRAM};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
@@ -75,7 +77,7 @@ use crate::{
 /// Handles are never reused, so one belonging to a peer that has gone away
 /// stops resolving rather than silently addressing somebody else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PeerId(u64);
+pub struct PeerId(pub(crate) u64);
 
 /// Something that happened while polling.
 #[derive(Debug)]
@@ -160,6 +162,17 @@ pub enum Event {
     PeerLost {
         /// The handle, which no longer resolves.
         peer: PeerId,
+    },
+    /// A member of a group joined with [`Endpoint::join_group`] has been
+    /// found: its key is certified by the group's secret, so a rendezvous
+    /// could not have made it up. Raised once per key per group, as it is
+    /// first seen. Asking to be introduced is the next step, and the member,
+    /// having found this endpoint the same way, will be asking too.
+    PeerDiscovered {
+        /// The member's static key.
+        peer_public: PublicKey,
+        /// The group it was found in.
+        group: GroupTag,
     },
     /// An introduction asked for with [`Endpoint::introduce`] did not end in
     /// a session.
@@ -742,6 +755,73 @@ impl Endpoint {
         self.rv.relayed.contains_key(&peer)
     }
 
+    /// Joins the group whose secret is `secret`, at the rendezvous, so its
+    /// other members are found and raised as [`Event::PeerDiscovered`].
+    ///
+    /// The rendezvous files the group under a tag derived from the secret and
+    /// never sees the secret. Each member files its key with a certificate
+    /// keyed by the secret, and a member checks every certificate it is sent,
+    /// so a rendezvous cannot add a key of its own to a group (SPEC A.7). It
+    /// does learn which keys share a group.
+    ///
+    /// **The secret must be random**, sixteen bytes or more from a CSPRNG:
+    /// the rendezvous sees the tag and can try guesses against it, and a
+    /// secret it guesses is one it can forge members with. Anyone holding the
+    /// secret is a member, and there is no removing one but changing it.
+    ///
+    /// Fails with [`Error::GroupSecretTooShort`] below
+    /// [`MIN_GROUP_SECRET`](crate::rendezvous::MIN_GROUP_SECRET), with
+    /// [`Error::NoRendezvous`] with none connected, and with
+    /// [`Error::Protocol`] wrapping `WindowFull` in
+    /// [`MAX_GROUPS`](crate::rendezvous::MAX_GROUPS) groups already.
+    pub fn join_group(&mut self, secret: &[u8]) -> Result<GroupTag> {
+        if secret.len() < rendezvous::MIN_GROUP_SECRET {
+            return Err(Error::GroupSecretTooShort);
+        }
+        if self.rv.rendezvous.is_none() {
+            return Err(Error::NoRendezvous);
+        }
+        let Some(own) = self.own_key() else {
+            return Err(Error::MissingPeerKey);
+        };
+        let tag = rendezvous::group_tag(secret);
+        if !self.rv.groups.contains_key(&tag) && self.rv.groups.len() >= rendezvous::MAX_GROUPS {
+            return Err(Error::Protocol(fectp_core::Error::WindowFull));
+        }
+        let key = rendezvous::group_key(secret);
+        let mac = rendezvous::member_mac(&key, &own);
+        self.rv.groups.insert(
+            tag,
+            Group {
+                key,
+                mac,
+                members: HashSet::new(),
+            },
+        );
+        if self.rv.registered {
+            self.tell_rendezvous(&Control::Join(tag, mac));
+        }
+        Ok(tag)
+    }
+
+    /// Leaves a group. Returns whether this endpoint was in it.
+    pub fn leave_group(&mut self, group: &GroupTag) -> bool {
+        let was = self.rv.groups.remove(group).is_some();
+        if was {
+            self.tell_rendezvous(&Control::Leave(*group));
+        }
+        was
+    }
+
+    /// The members of a group found so far, this endpoint not among them.
+    pub fn group_members(&self, group: &GroupTag) -> Vec<PublicKey> {
+        self.rv
+            .groups
+            .get(group)
+            .map(|g| g.members.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Whether a session with `key` is open or a full handshake to it is
     /// under way.
     fn has_session_with(&self, key: &PublicKey) -> bool {
@@ -783,6 +863,11 @@ impl Endpoint {
         self.rv.rendezvous = None;
         self.rv.registered = false;
         self.rv.observed = None;
+        // What it said about groups was its to say; another rendezvous will
+        // say it again, and the members it names will be raised again.
+        for group in self.rv.groups.values_mut() {
+            group.members.clear();
+        }
         let keys: Vec<PublicKey> = self.rv.asks.keys().copied().collect();
         for key in keys {
             self.fail_introduction(key, Unavailable::Unreachable);
@@ -1010,6 +1095,15 @@ impl Endpoint {
                     for key in waiting {
                         self.tell_rendezvous(&Control::Introduce(key));
                     }
+                    let joins: Vec<Control> = self
+                        .rv
+                        .groups
+                        .iter()
+                        .map(|(tag, g)| Control::Join(*tag, g.mac))
+                        .collect();
+                    for join in joins {
+                        self.tell_rendezvous(&join);
+                    }
                 }
             }
             Control::Unavailable(key, reason) => {
@@ -1069,8 +1163,39 @@ impl Endpoint {
                     self.wake_at(Instant::now());
                 }
             }
+            Control::Members(tag, list) => {
+                let own = self.own_key();
+                let Some(group) = self.rv.groups.get_mut(&tag) else {
+                    return;
+                };
+                // Only certified keys: the rendezvous assembled this list, and
+                // it cannot make a certificate, so a key without a good one is
+                // one it added.
+                let checked: HashSet<PublicKey> = list
+                    .into_iter()
+                    .filter(|(key, mac)| {
+                        Some(*key) != own
+                            && rendezvous::same(mac, &rendezvous::member_mac(&group.key, key))
+                    })
+                    .map(|(key, _)| key)
+                    .collect();
+                let mut found: Vec<PublicKey> =
+                    checked.difference(&group.members).copied().collect();
+                found.sort_unstable();
+                group.members = checked;
+                for peer_public in found {
+                    self.events.push_back(Event::PeerDiscovered {
+                        peer_public,
+                        group: tag,
+                    });
+                }
+            }
             // Not ours to receive.
-            Control::Register | Control::Introduce(_) | Control::Relay(_) => {}
+            Control::Register
+            | Control::Introduce(_)
+            | Control::Relay(_)
+            | Control::Join(..)
+            | Control::Leave(_) => {}
         }
     }
 

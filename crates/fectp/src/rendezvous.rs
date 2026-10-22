@@ -80,6 +80,47 @@ pub const RELAY_BYTES_PER_SECOND: usize = 1 << 20;
 /// allowed.
 pub const INTRODUCTIONS_PER_SECOND: f32 = 4.0;
 
+/// What a group is known by at a rendezvous: derived from its secret, and
+/// all the rendezvous learns of it (SPEC A.7).
+pub type GroupTag = [u8; 16];
+
+/// The shortest group secret accepted.
+///
+/// The rendezvous sees each group's tag, which is a hash of the secret, and
+/// can try guesses against it at its leisure; a secret it guesses is one it
+/// can forge members with. Length is the only thing this can check. Make the
+/// secret random — sixteen bytes from a CSPRNG, not a password.
+pub const MIN_GROUP_SECRET: usize = 16;
+
+/// Members one group may have at one rendezvous.
+pub const MAX_GROUP_MEMBERS: usize = 64;
+
+/// Groups one client may be in at once.
+pub const MAX_GROUPS: usize = 8;
+
+/// A group's tag: what the rendezvous files it under.
+pub(crate) fn group_tag(secret: &[u8]) -> GroupTag {
+    let digest = fectp_core::noise::hash(&[b"fectp group tag", secret]);
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&digest[..16]);
+    tag
+}
+
+/// A group's member key: what members' certificates are keyed with. Never
+/// leaves the client, so the rendezvous cannot make a certificate.
+pub(crate) fn group_key(secret: &[u8]) -> [u8; 32] {
+    fectp_core::noise::hash(&[b"fectp group key", secret])
+}
+
+/// The certificate a member files with its key: the first half of BLAKE2s
+/// over a label, the group's member key and the member's static key.
+pub(crate) fn member_mac(group_key: &[u8; 32], member: &Key) -> [u8; 16] {
+    let digest = fectp_core::noise::hash(&[b"fectp group member", group_key, member]);
+    let mut mac = [0u8; 16];
+    mac.copy_from_slice(&digest[..16]);
+    mac
+}
+
 /// Why a rendezvous would not introduce or relay (SPEC A.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -132,6 +173,9 @@ pub(crate) enum Control {
     Introduction(Key, SocketAddr),
     Unavailable(Key, u8),
     RelayOffer(Key, SocketAddr, [u8; SECRET_LEN]),
+    Join(GroupTag, [u8; 16]),
+    Leave(GroupTag),
+    Members(GroupTag, Vec<(Key, [u8; 16])>),
 }
 
 fn put_addr(out: &mut Vec<u8>, addr: SocketAddr) {
@@ -209,6 +253,23 @@ impl Control {
                 put_addr(&mut out, *addr);
                 out.extend_from_slice(token);
             }
+            Control::Join(tag, mac) => {
+                out.push(0x04);
+                out.extend_from_slice(tag);
+                out.extend_from_slice(mac);
+            }
+            Control::Leave(tag) => {
+                out.push(0x05);
+                out.extend_from_slice(tag);
+            }
+            Control::Members(tag, members) => {
+                out.push(0x85);
+                out.extend_from_slice(tag);
+                for (key, mac) in members {
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(mac);
+                }
+            }
         }
         out
     }
@@ -252,6 +313,29 @@ impl Control {
                 let (addr, rest) = take_addr(rest)?;
                 let token: [u8; SECRET_LEN] = rest.try_into().ok()?;
                 Control::RelayOffer(key, addr, token)
+            }
+            0x04 if body.len() == 32 => {
+                let tag: GroupTag = body[..16].try_into().ok()?;
+                let mac: [u8; 16] = body[16..].try_into().ok()?;
+                Control::Join(tag, mac)
+            }
+            0x05 => Control::Leave(body.try_into().ok()?),
+            0x85 if body.len() >= 16 && (body.len() - 16) % 48 == 0 => {
+                let tag: GroupTag = body[..16].try_into().ok()?;
+                let members: Vec<(Key, [u8; 16])> = body[16..]
+                    .chunks_exact(48)
+                    .map(|m| {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&m[..32]);
+                        let mut mac = [0u8; 16];
+                        mac.copy_from_slice(&m[32..]);
+                        (key, mac)
+                    })
+                    .collect();
+                if members.len() > MAX_GROUP_MEMBERS {
+                    return None;
+                }
+                Control::Members(tag, members)
             }
             _ => return None,
         };
@@ -321,6 +405,8 @@ pub struct Rendezvous {
     /// The address relay ports are advertised at, when it is not the one the
     /// rendezvous is bound to.
     relay_ip: Option<IpAddr>,
+    /// Members of each group, by tag, with the certificates they filed.
+    groups: HashMap<GroupTag, Vec<(PeerId, Key, [u8; 16])>>,
 }
 
 impl Rendezvous {
@@ -353,6 +439,7 @@ impl Rendezvous {
             window: INTRODUCTION_WINDOW,
             public,
             relay_ip: None,
+            groups: HashMap::new(),
         })
     }
 
@@ -436,6 +523,68 @@ impl Rendezvous {
                 self.by_key.remove(&client.key);
             }
         }
+        // A client that has gone leaves its groups, and the rest are told.
+        let left: Vec<GroupTag> = self
+            .groups
+            .iter()
+            .filter(|(_, members)| members.iter().any(|(p, _, _)| *p == peer))
+            .map(|(tag, _)| *tag)
+            .collect();
+        for tag in left {
+            self.leave(peer, tag);
+        }
+    }
+
+    /// Files `peer` in a group, or refiles it, and tells the group.
+    fn join(&mut self, peer: PeerId, key: Key, tag: GroupTag, mac: [u8; 16]) {
+        let groups_of_peer = self
+            .groups
+            .iter()
+            .filter(|(t, members)| **t != tag && members.iter().any(|(p, _, _)| *p == peer))
+            .count();
+        let members = self.groups.entry(tag).or_default();
+        members.retain(|(p, k, _)| *p != peer && *k != key);
+        // Bounded both ways: a group is sent to every member whenever it
+        // changes, so its size is the size of every message about it.
+        if members.len() >= MAX_GROUP_MEMBERS || groups_of_peer >= MAX_GROUPS {
+            if members.is_empty() {
+                self.groups.remove(&tag);
+            }
+            return;
+        }
+        members.push((peer, key, mac));
+        self.tell_group(tag);
+    }
+
+    fn leave(&mut self, peer: PeerId, tag: GroupTag) {
+        let Some(members) = self.groups.get_mut(&tag) else {
+            return;
+        };
+        let before = members.len();
+        members.retain(|(p, _, _)| *p != peer);
+        if members.len() == before {
+            return;
+        }
+        if members.is_empty() {
+            self.groups.remove(&tag);
+        } else {
+            self.tell_group(tag);
+        }
+    }
+
+    /// Sends every member of a group the whole of it. Each checks the
+    /// certificates itself; this rendezvous cannot make one, and cannot tell
+    /// a good one from a bad.
+    fn tell_group(&mut self, tag: GroupTag) {
+        let Some(members) = self.groups.get(&tag) else {
+            return;
+        };
+        let list: Vec<(Key, [u8; 16])> = members.iter().map(|(_, k, m)| (*k, *m)).collect();
+        let to: Vec<PeerId> = members.iter().map(|(p, _, _)| *p).collect();
+        let message = Control::Members(tag, list);
+        for peer in to {
+            self.send(peer, &message);
+        }
     }
 
     /// Takes one request's worth from an address's budget, if it has one.
@@ -466,6 +615,18 @@ impl Rendezvous {
             return;
         };
         let (from, ip) = (client.key, client.addr.ip());
+        match control {
+            Control::Join(tag, mac) => {
+                // From the same budget as every other request: each join
+                // sends the whole group to every member of it.
+                if self.spend(ip) {
+                    self.join(peer, from, tag, mac);
+                }
+                return;
+            }
+            Control::Leave(tag) => return self.leave(peer, tag),
+            _ => {}
+        }
         let target = match control {
             Control::Introduce(target) | Control::Relay(target) => target,
             _ => return,
@@ -742,7 +903,7 @@ impl Port {
 }
 
 /// Equality that takes as long whatever the bytes, for comparing a MAC.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -962,6 +1123,10 @@ mod tests {
             Control::Introduction(key, v6),
             Control::Unavailable(key, 3),
             Control::RelayOffer(key, v6, [9u8; SECRET_LEN]),
+            Control::Join([3u8; 16], [4u8; 16]),
+            Control::Leave([3u8; 16]),
+            Control::Members([3u8; 16], Vec::new()),
+            Control::Members([3u8; 16], vec![(key, [5u8; 16]), ([8u8; 32], [6u8; 16])]),
         ] {
             assert_eq!(Control::decode(&message.encode()), Some(message));
         }
@@ -986,6 +1151,66 @@ mod tests {
         let mut bad_family = good;
         bad_family[33] = 5;
         assert_eq!(Control::decode(&bad_family), None);
+    }
+
+    #[test]
+    fn a_members_list_longer_than_a_group_may_be_is_ignored() {
+        let full = vec![([1u8; 32], [2u8; 16]); MAX_GROUP_MEMBERS];
+        let message = Control::Members([3u8; 16], full.clone()).encode();
+        assert!(
+            Control::decode(&message).is_some(),
+            "the largest a group may be"
+        );
+        let mut over = full;
+        over.push(([1u8; 32], [2u8; 16]));
+        let message = Control::Members([3u8; 16], over).encode();
+        assert_eq!(Control::decode(&message), None, "one more is not a group's");
+        let mut ragged = Control::Members([3u8; 16], Vec::new()).encode();
+        ragged.push(0);
+        assert_eq!(Control::decode(&ragged), None, "a partial entry");
+    }
+
+    #[test]
+    fn a_certificate_names_both_the_group_and_the_key() {
+        let (a, b) = (group_key(&[1u8; 16]), group_key(&[2u8; 16]));
+        let member = [7u8; 32];
+        assert_ne!(member_mac(&a, &member), member_mac(&b, &member));
+        assert_ne!(member_mac(&a, &member), member_mac(&a, &[8u8; 32]));
+        assert_ne!(
+            group_tag(&[1u8; 16])[..],
+            group_key(&[1u8; 16])[..16],
+            "the tag gives nothing of the key"
+        );
+    }
+
+    /// A group is sent whole to every member whenever it changes, so its
+    /// size bounds every message about it, and a client's groups bound how
+    /// many such messages it can be the cause of. Tested here rather than over
+    /// the wire: on loopback every client shares one address, and the
+    /// per-address bounds on registering and asking stop them first.
+    #[test]
+    fn a_group_and_a_client_s_groups_are_bounded() {
+        let mut rendezvous = Rendezvous::bind("127.0.0.1:0", Identity::generate()).expect("bind");
+        let tag = [1u8; 16];
+        for i in 0..=MAX_GROUP_MEMBERS as u64 {
+            rendezvous.join(PeerId(i), [i as u8; 32], tag, [0u8; 16]);
+        }
+        assert_eq!(rendezvous.groups[&tag].len(), MAX_GROUP_MEMBERS);
+
+        let busy = PeerId(1000);
+        for g in 0..=MAX_GROUPS as u8 {
+            rendezvous.join(busy, [0xAA; 32], [100 + g; 16], [0u8; 16]);
+        }
+        let joined = rendezvous
+            .groups
+            .values()
+            .filter(|members| members.iter().any(|(p, _, _)| *p == busy))
+            .count();
+        assert_eq!(joined, MAX_GROUPS);
+
+        // Joining a group it is already in replaces its entry, not adds one.
+        rendezvous.join(busy, [0xAA; 32], [100; 16], [9u8; 16]);
+        assert_eq!(rendezvous.groups[&[100u8; 16]].len(), 1);
     }
 
     #[test]
@@ -1064,6 +1289,18 @@ pub(crate) struct ClientState {
     pub observed: Option<SocketAddr>,
     pub asks: HashMap<Key, Ask>,
     pub relayed: HashMap<PeerId, Link>,
+    pub groups: HashMap<GroupTag, Group>,
+}
+
+/// A group this client is in.
+#[derive(Debug)]
+pub(crate) struct Group {
+    /// What members' certificates are keyed with.
+    pub key: [u8; 32],
+    /// This client's own certificate, filed when it joins.
+    pub mac: [u8; 16],
+    /// Members whose certificates checked out, this client excepted.
+    pub members: HashSet<Key>,
 }
 
 /// A relayed session's port, kept so this side can prove its address to it

@@ -290,6 +290,15 @@ session. An attacker with many IP addresses can hold every relay allocation —
 the caps are per address, because keys are free — and a rendezvous serving
 strangers has no further defence of its own against that.
 
+### A group's secret is only as strong as it is random
+
+A rendezvous sees each group's tag, a hash of the group secret, and can try
+guesses against it at leisure (D88). A secret it guesses lets it certify keys
+of its own as members, which is the one thing the certificates exist to stop.
+Only the length is checked — sixteen bytes — so a sixteen-character password
+passes and would not survive the guessing. It also sees which keys share a
+group.
+
 ## Assumptions
 
 If any of these does not hold, the claims above do not either.

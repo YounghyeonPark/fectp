@@ -172,6 +172,7 @@ match endpoint.poll(Some(Duration::from_millis(50)))? {
     Event::PeerMoved { peer, from, to } => {}  // the peer changed address
     Event::PeerLost { peer } => {}             // gave up on the peer
     Event::IntroductionFailed { peer_public, reason } => {} // see below
+    Event::PeerDiscovered { peer_public, group } => {}      // a group member
     Event::Idle => {}                          // nothing arrived
 }
 ```
@@ -206,6 +207,8 @@ hole punching possible at all.
 | `introduce(their_public)` | Asks to be introduced. Nothing happens until they ask for this endpoint too. |
 | `observed_addr()` | Where the rendezvous sees this endpoint: outside its NAT. |
 | `is_relayed(peer)` | Whether a session runs through the relay rather than directly. |
+| `join_group(secret)` | Finds the other holders of `secret` through the rendezvous, as `Event::PeerDiscovered`. Returns the group's tag. The secret must be 16 random bytes or more. |
+| `leave_group(tag)` / `group_members(tag)` | Leaves; the members found so far. |
 
 Success is an ordinary `Event::Connected` for a peer whose `peer_public_key`
 is the one asked for; failure is `Event::IntroductionFailed { peer_public,
