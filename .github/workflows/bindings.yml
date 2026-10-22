@@ -176,9 +176,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Python 3.9 is the oldest pyproject.toml accepts, so it is tested; on
+        # a pinned image, because ubuntu-latest moved to 26.04, which
+        # setup-python has no 3.9 build for, and the job failed before
+        # installing anything.
         include:
           - { name: Windows, id: windows, os: windows-latest, python: "3.13" }
-          - { name: Linux x64, id: linux-x64, os: ubuntu-latest, python: "3.9" }
+          - { name: Linux x64, id: linux-x64, os: ubuntu-24.04, python: "3.9" }
           - { name: Linux x64, id: linux-x64, os: ubuntu-latest, python: "3.13" }
           - { name: Linux arm64, id: linux-arm64, os: ubuntu-24.04-arm, python: "3.9" }
           - { name: Linux arm64, id: linux-arm64, os: ubuntu-24.04-arm, python: "3.13" }
