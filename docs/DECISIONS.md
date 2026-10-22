@@ -574,7 +574,7 @@ These are unimplemented, not overlooked.
 | **Resumption after a long sleep** | A ticket expires after an hour by default, so a device that sleeps longer pays for a full handshake. | Deliberate ([D43](#d43--a-ticket-stops-being-worth-stealing)); `set_ticket_lifetime` raises it where the trade is worth making. |
 | **Pre-shared-key mode misuse** | A group secret cannot tell two holders apart, and nothing stops an operator using one across administrative domains where per-peer identity is what they actually need. | The API and documentation steer towards public-key mode; a protocol cannot enforce judgement. The unencrypted mode that used to sit in this row was removed outright ([D46](#d46--the-mode-that-was-not-encrypted-is-gone)) — that footgun was removable, this one is a genuine trade. |
 | **A peer timeout needs keep-alives to mean anything** | `set_peer_timeout` releases a peer nothing authenticated has been heard from ([D51](#d51--giving-up-on-a-peer-and-the-bug-that-found)). On its own it is an idle timeout and will drop a peer that is alive and quiet; it is evidence of death only when keep-alives were being sent for it to ignore. | Both are off by default, and the pairing is documented rather than enforced — an idle timeout without keep-alives is occasionally exactly what a caller wants, and a transport that refused to configure it would be guessing. |
-| **A relayed session does not follow a move** | A relay port records its party's address once ([D86](#d86--rendezvous-and-relay-both-sides-must-ask)), so a client whose NAT re-maps it toward the relay loses the session and must be introduced again. | Following it would mean re-proving an address mid-session, which is the check a forged bind is stopped by; done carelessly, it is the hole the check closes. |
+| **A relay of version 0.3.1 does not follow a move** | A relay port follows a client its NAT has moved ([D87](#d87--a-relay-follows-its-party-because-the-token-stays-off-the-wire)), but not one that bound the 0.3.1 way, with its token in the clear: on such a port the token is anybody's, and moving would hand the session to them. | A client falls back to that bind only for a port that answers nothing else, which is a rendezvous of that version. |
 | **Address migration for a `Connection`** | An `Endpoint` follows a peer that changes address ([D47](#d47--a-session-follows-its-peer-but-only-after-being-shown)); a `Connection` does not follow a *server* that changes address. | Its socket is connected to one address, so a frame from anywhere else never reaches it. The case that occurs in practice is the other one — a client behind a NAT, or moving between networks — and that is the one that is handled. |
 | **A reply that depends on the request** | `set_handshake_reply` carries the same bytes to every peer ([D44](#d44--the-responders-half-of-0-rtt)). | The response is written inside `poll`, before the application is told anything, so a payload chosen per peer would need a callback the event loop does not have. |
 | **Fragmentation is invisible to the frame-size search** | Sessions search for a frame size up to a raised ceiling ([D85](#d85--path-mtu-discovery-without-the-dont-fragment-bit)), but this crate does not control the don't-fragment bit, so a probe split on the way — by a router or by the sending host, on IPv4 or IPv6 — still comes back answered. | Setting the bit takes `setsockopt`, which needs `unsafe` this crate forbids, or a dependency that holds it, and on Windows none is safe. The default ceiling stays at 1200, where the question does not arise. |
@@ -4624,3 +4624,73 @@ because the handshake authenticates the key each asked for. An attacker with
 many IP addresses can still hold every relay allocation; the caps make that
 cost addresses rather than keys, which is the most a rendezvous that serves
 strangers can do on its own.
+
+## D87 — A relay follows its party, because the token stays off the wire
+
+**Problem**: D86's relay port kept the first address it recorded for the life
+of the allocation. A client whose NAT gave it a new mapping toward the port —
+a reboot, a lease change, a quiet spell longer than the NAT keeps mappings —
+was then cut off, and had to be introduced again. The reason was sound: the
+only thing a client could prove itself with was the token, the token crossed
+the wire in the clear in the bind, and a port that let a later bind move it
+would let anyone who had seen one take the session.
+
+**Decision**: the token no longer crosses the wire. A client sends a *hello*,
+which carries nothing; the port answers with a check carrying a nonce; the
+client answers with the nonce and a MAC over it keyed by the token — the
+first half of BLAKE2s over a label, the token and the nonce. An observer who
+saw every answer a party ever sent has nothing it can answer a check of its
+own with, because a check's nonce is bound to the address it was sent to and
+the MAC is bound to the nonce. So a port can safely record a *new* address
+for its party, which is all following a move is.
+
+- **The nonce is stateless.** A port derives it from a secret of its own, the
+  address checked, and the ten-second period, rather than remembering checks
+  it has sent. The first version remembered one, and a flood of forged hellos
+  could have kept overwriting it while the real party's answer was on its
+  way. Checks are bounded at 50 a second per port and 2 per address.
+- **When a client proves itself again.** Every 20 seconds while the session
+  lasts, and whenever it has had to resend through the port, at most once a
+  second. The resend is the usual signal: a NAT that moved it silently drops
+  what the port sends to the old mapping, and the client finds out by not
+  being acknowledged.
+- **Version 0.3.1, which shipped the day before.** Its clients bind with the
+  token in the clear, and a port still honours that for a first address —
+  after which the token is anybody's, and the port neither answers a hello
+  nor records another address for good. A new client whose hellos draw no
+  check falls back to that bind, since only a port of that version ignores
+  hellos. Each half of this was checked: the old-style tests pass unchanged
+  against the new port, and the new client still connects through a port
+  made to ignore hellos.
+
+**Verified by breaking it.** Through an emulated NAT that forgets its
+mappings, a relayed session carries on both ways after a move, with no new
+handshake. On the port: recording only a first address, skipping the MAC
+check, accepting a nonce not bound to the answering address, and following a
+move on a port whose token went out in the clear each fail a test. On the
+client: not sending a hello on a resend fails the follow test, which runs
+well inside the 20-second refresh so that the resend has to be what prompts
+it.
+
+**A test that passed alone and failed beside its neighbours.** Run on its
+own, the follow test passed; run with the rest of its file, it failed five
+times in six. Instrumented, the resends were there and the hello was not:
+the one-second floor between hellos was counted from the moment the session
+came up, as if binding had been a hello, so a move inside the first second
+waited out the floor — and on loopback, where the retransmission timeout is
+a few milliseconds, all five resends went in that second and the message was
+given up before the port knew where to send it. The floor now starts already
+spent. Nothing was flaky; the run beside other tests was simply the one that
+landed in the window.
+
+And a test that had stopped testing. The one for a lost answer dropped the
+first datagram starting 0xF0 0x44 — version 0.3.1's proof — and once clients
+answered with the keyed 0x46 it dropped nothing and passed regardless. Putting
+back the bug it was written for, a client that stops binding once checked,
+showed it: nothing failed. It loses whichever kind of answer comes first now,
+and fails again with the bug back.
+
+**What it does not do.** A move is noticed when the moved side next sends.
+Until then the other side's traffic goes to the old mapping and is resent
+like any loss — a minute's worth at most, since the periodic hello comes
+round in twenty seconds and a relay drops a session idle for sixty.

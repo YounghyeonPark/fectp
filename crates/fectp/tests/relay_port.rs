@@ -386,3 +386,116 @@ fn a_client_that_stops_answering_does_not_stop_the_rendezvous() {
         .expect("the rendezvous's poll must not have failed");
     assert_eq!(rendezvous.relays(), 1, "and it was serving all along");
 }
+
+/// The keyed answer a port expects to a check carrying `nonce` (SPEC A.5).
+fn keyed_answer(token: &[u8; 16], nonce: &[u8]) -> Vec<u8> {
+    let digest = fectp_core::noise::hash(&[b"fectp relay answer", token, nonce]);
+    let mut answer = vec![0xF0, 0x46];
+    answer.extend_from_slice(nonce);
+    answer.extend_from_slice(&digest[..16]);
+    answer
+}
+
+/// Proves `socket`'s address to `port` the keyed way: a hello, the check it
+/// draws, and an answer only the token's holder can make. Returns the answer
+/// sent, which an observer on the path would have seen.
+fn hello_and_answer(socket: &UdpSocket, port: SocketAddr, token: &[u8; 16]) -> Option<Vec<u8>> {
+    let mut hello = vec![0xF0, 0x45];
+    hello.extend_from_slice(&[0u8; 16]);
+    socket.send_to(&hello, port).expect("hello");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
+    let mut buf = [0u8; 64];
+    let (n, from) = socket.recv_from(&mut buf).ok()?;
+    if from != port || n != 18 || buf[..2] != [0xF0, 0x43] {
+        return None;
+    }
+    let answer = keyed_answer(token, &buf[2..18]);
+    socket.send_to(&answer, port).expect("answer");
+    Some(answer)
+}
+
+/// What `to` receives of a datagram sent through the relay from `via`.
+fn delivered(from: &UdpSocket, via: SocketAddr, to: &UdpSocket) -> bool {
+    drain(to);
+    from.send_to(b"through the relay", via).expect("send");
+    to.set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("timeout");
+    let mut buf = [0u8; 64];
+    matches!(to.recv_from(&mut buf), Ok((n, _)) if &buf[..n] == b"through the relay")
+}
+
+/// A party can move, and nobody else can move it.
+///
+/// The token never crosses the wire on this path: an answer is a MAC over the
+/// check's nonce, and a check's nonce is bound to the address it was sent to.
+/// So the holder of the token can prove a new address, and an observer who
+/// saw every answer so far cannot prove theirs — neither by replaying one nor
+/// by reusing its MAC on a nonce of their own.
+#[test]
+fn a_keyed_answer_moves_a_binding_and_nothing_else_does() {
+    let relayed = Relayed::set_up();
+    let [(port_x, token_x), (port_y, token_y)] = relayed.offers;
+    let x = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let y = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    assert!(hello_and_answer(&x, port_x, &token_x).is_some());
+    let seen = hello_and_answer(&y, port_y, &token_y).expect("y answers");
+    thread::sleep(Duration::from_millis(100));
+    assert!(delivered(&x, port_x, &y), "both recorded, the keyed way");
+
+    // An observer on the path has the answer `y` sent. Replayed from its own
+    // address, it names a nonce that was never sent there.
+    let observer = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    observer.send_to(&seen, port_y).expect("replay");
+    // Its own hello draws a check of its own; the MAC it saw does not fit it.
+    let mut hello = vec![0xF0, 0x45];
+    hello.extend_from_slice(&[0u8; 16]);
+    observer.send_to(&hello, port_y).expect("hello");
+    observer
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
+    let mut buf = [0u8; 64];
+    let (n, _) = observer.recv_from(&mut buf).expect("checked");
+    assert_eq!(n, 18);
+    let mut forged = vec![0xF0, 0x46];
+    forged.extend_from_slice(&buf[2..18]);
+    forged.extend_from_slice(&seen[18..34]);
+    observer.send_to(&forged, port_y).expect("forged");
+    thread::sleep(Duration::from_millis(100));
+    assert!(delivered(&x, port_x, &y), "y keeps its binding");
+    assert!(drain(&observer).is_empty(), "and the observer gets nothing");
+
+    // The control: `y` itself, from a new address, is followed.
+    let moved = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    assert!(hello_and_answer(&moved, port_y, &token_y).is_some());
+    thread::sleep(Duration::from_millis(100));
+    assert!(delivered(&x, port_x, &moved), "the move is followed");
+    assert!(
+        !delivered(&x, port_x, &y),
+        "and the old address hears nothing"
+    );
+}
+
+/// A port whose token went over the wire in a version-0.3.1 bind has had it
+/// seen by anyone on the path, so a keyed answer from it proves nothing: such
+/// a port keeps its first address for good, as every port did in 0.3.1.
+#[test]
+fn a_port_that_saw_its_token_in_the_clear_never_moves() {
+    let relayed = Relayed::set_up();
+    let [(port_x, token_x), (port_y, token_y)] = relayed.offers;
+    let x = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let y = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    assert!(hello_and_answer(&x, port_x, &token_x).is_some());
+    bind(&y, port_y, &token_y);
+    assert!(prove(&y, port_y), "recorded the 0.3.1 way");
+    thread::sleep(Duration::from_millis(100));
+    assert!(delivered(&x, port_x, &y));
+
+    let thief = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    assert!(
+        hello_and_answer(&thief, port_y, &token_y).is_none(),
+        "no check is offered for a keyed answer"
+    );
+    assert!(delivered(&x, port_x, &y), "y keeps its binding");
+}

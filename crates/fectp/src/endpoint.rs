@@ -63,7 +63,7 @@ use rand_core::{OsRng, RngCore};
 
 use crate::pipeline::{decoded_capacity, deliver, Ingested, Peer, Pending, TicketStore};
 use crate::pmtu::Pmtu;
-use crate::rendezvous::{self, Ask, ClientState, Control, Stage, Unavailable};
+use crate::rendezvous::{self, Ask, ClientState, Control, Link, Stage, Unavailable};
 use crate::udp::{DatagramSocket, BASE_DATAGRAM};
 use crate::{
     is_stale_unreachable, is_timeout, local_capabilities, max_datagram, Error, Identity,
@@ -739,7 +739,7 @@ impl Endpoint {
     /// may fall quiet wants [`set_keepalive`](Self::set_keepalive) at less
     /// than that.
     pub fn is_relayed(&self, peer: PeerId) -> bool {
-        self.rv.relayed.contains(&peer)
+        self.rv.relayed.contains_key(&peer)
     }
 
     /// Whether a session with `key` is open or a full handshake to it is
@@ -811,6 +811,7 @@ impl Endpoint {
                 port,
                 token,
                 checked,
+                legacy,
                 binds: sent,
                 next_bind,
                 ..
@@ -820,6 +821,16 @@ impl Endpoint {
                     continue;
                 }
                 if *sent == rendezvous::BINDS {
+                    if !*checked && !*legacy {
+                        // No hello answered: a port of version 0.3.1, which
+                        // knows only the bind with the token in the clear.
+                        // It cannot follow a move, and nothing is lost by
+                        // telling it the token, which is all it can check.
+                        *legacy = true;
+                        *sent = 0;
+                        *next_bind = now;
+                        continue;
+                    }
                     // Every bind sent. Never checked means the port is not
                     // there for us; checked, the session decides.
                     *sent += 1;
@@ -828,13 +839,27 @@ impl Endpoint {
                     }
                     continue;
                 }
-                // Binds keep going after a check, up to `BINDS` of them: a
-                // proof can be lost, and the next bind draws a new check.
+                // Binds keep going after a check, up to `BINDS` of them: an
+                // answer can be lost, and the next bind draws a new check.
                 *sent += 1;
                 *next_bind = now + rendezvous::BIND_INTERVAL;
-                let mut bind = vec![rendezvous::NOT_A_FRAME, rendezvous::BIND];
-                bind.extend_from_slice(token);
+                let bind = if *legacy {
+                    let mut bind = vec![rendezvous::NOT_A_FRAME, rendezvous::BIND];
+                    bind.extend_from_slice(token);
+                    bind
+                } else {
+                    rendezvous::hello()
+                };
                 binds.push((bind, *port));
+            }
+        }
+        // A relayed session proves its address again from time to time, so
+        // a NAT that moves it is followed rather than ending the session.
+        for link in self.rv.relayed.values_mut() {
+            if !link.legacy && now >= link.next_refresh {
+                link.last_hello = now;
+                link.next_refresh = now + rendezvous::RELAY_REFRESH;
+                binds.push((rendezvous::hello(), link.port));
             }
         }
         for key in abandoned {
@@ -849,16 +874,19 @@ impl Endpoint {
 
     /// When an introduction next needs attention.
     fn next_introduction_deadline(&self) -> Option<Instant> {
-        self.rv
-            .asks
+        let asks = self.rv.asks.values().map(|ask| match &ask.stage {
+            Stage::Relaying {
+                binds, next_bind, ..
+            } if *binds <= rendezvous::BINDS => *next_bind,
+            _ => ask.since + rendezvous::INTRODUCTION_DEADLINE,
+        });
+        let links = self
+            .rv
+            .relayed
             .values()
-            .map(|ask| match &ask.stage {
-                Stage::Relaying {
-                    binds, next_bind, ..
-                } if *binds <= rendezvous::BINDS => *next_bind,
-                _ => ask.since + rendezvous::INTRODUCTION_DEADLINE,
-            })
-            .min()
+            .filter(|l| !l.legacy)
+            .map(|l| l.next_refresh);
+        asks.chain(links).min()
     }
 
     /// Takes the events that belong to the rendezvous machinery, acting on
@@ -882,9 +910,34 @@ impl Endpoint {
                 // authenticated that key: the waiting side accepts any
                 // opening frame (SPEC A.3).
                 if let Some(ask) = self.rv.asks.remove(&key) {
-                    if let Stage::Relaying { port, .. } = ask.stage {
+                    if let Stage::Relaying {
+                        port,
+                        token,
+                        legacy,
+                        ..
+                    } = ask.stage
+                    {
                         if self.peer_addr(peer) == Some(port) {
-                            self.rv.relayed.insert(peer);
+                            let now = Instant::now();
+                            self.rv.relayed.insert(
+                                peer,
+                                Link {
+                                    port,
+                                    token,
+                                    legacy,
+                                    next_refresh: now + rendezvous::RELAY_REFRESH,
+                                    // As if the last hello were a floor ago:
+                                    // binding was not a hello a resend asked
+                                    // for, and the first resend after it must
+                                    // not wait. It used to, and a move in the
+                                    // first second of a session lost the
+                                    // message that noticed it.
+                                    last_hello: now
+                                        .checked_sub(rendezvous::REFRESH_FLOOR)
+                                        .unwrap_or(now),
+                                },
+                            );
+                            self.wake_at(now + rendezvous::RELAY_REFRESH);
                         }
                     }
                 }
@@ -1008,6 +1061,7 @@ impl Endpoint {
                         port,
                         token,
                         checked: false,
+                        legacy: false,
                         binds: 0,
                         next_bind: Instant::now(),
                         outbound: None,
@@ -1032,17 +1086,27 @@ impl Endpoint {
         if nonce.len() != rendezvous::SECRET_LEN {
             return;
         }
-        let mut proof = vec![rendezvous::NOT_A_FRAME, rendezvous::PROOF];
-        proof.extend_from_slice(nonce);
+        // A relayed session's port, checking an address this side proved
+        // again: answered, and that is all.
+        if let Some(link) = self.rv.relayed.values().find(|l| l.port == from) {
+            let answer = rendezvous::answer(&link.token, nonce, link.legacy);
+            let _ = self.socket.send_to(&answer, from);
+            return;
+        }
         let ours = self.own_key();
         let owner = self.rv.asks.iter().find_map(|(key, ask)| match &ask.stage {
-            Stage::Relaying { port, .. } if *port == from => Some(*key),
+            Stage::Relaying {
+                port,
+                token,
+                legacy,
+                ..
+            } if *port == from => Some((*key, rendezvous::answer(token, nonce, *legacy))),
             _ => None,
         });
-        let Some(key) = owner else {
+        let Some((key, answer)) = owner else {
             return;
         };
-        let _ = self.socket.send_to(&proof, from);
+        let _ = self.socket.send_to(&answer, from);
         let first = matches!(
             self.rv.asks.get(&key).map(|a| &a.stage),
             Some(Stage::Relaying { checked: false, .. })
@@ -1316,6 +1380,7 @@ impl Endpoint {
         if self.outbound.remove(&peer).is_some() {
             return true;
         }
+        self.rv.relayed.remove(&peer);
         match self.peers.remove(&peer) {
             Some(entry) => {
                 self.routes.remove(&(entry.addr, entry.session_id));
@@ -1340,7 +1405,7 @@ impl Endpoint {
         loop {
             // Introductions have timers of their own, and some events are
             // theirs to consume; neither may cost the caller their timeout.
-            if !self.rv.asks.is_empty() {
+            if !self.rv.asks.is_empty() || !self.rv.relayed.is_empty() {
                 self.drive_introductions();
             }
             if let Some(event) = self.events.pop_front() {
@@ -1446,7 +1511,7 @@ impl Endpoint {
         // Not a frame (SPEC A.5): a punch, which is never answered, or a relay
         // port checking an address this endpoint bound.
         if self.rx[..n].first() == Some(&rendezvous::NOT_A_FRAME) {
-            if !self.rv.asks.is_empty() {
+            if !self.rv.asks.is_empty() || !self.rv.relayed.is_empty() {
                 self.not_a_frame(n, from);
             }
             return Ok(None);
@@ -2567,8 +2632,10 @@ impl Endpoint {
             let socket = &*self.socket;
             let stamp = &mut entry.last_sent;
             let mut large_resent = false;
+            let mut resent = false;
             entry.peer.drive_retransmits(now, &mut self.tx, |frame| {
                 large_resent |= frame.len() > BASE_DATAGRAM;
+                resent = true;
                 send_datagram(socket, frame, addr)?;
                 *stamp = Instant::now();
                 Ok(())
@@ -2578,6 +2645,20 @@ impl Endpoint {
             if large_resent {
                 if let Some(pmtu) = &mut entry.pmtu {
                     pmtu.suspect(Instant::now());
+                }
+            }
+            // Through a relay, a resend may mean this side's NAT has moved it
+            // and the port no longer knows where it is. Proving the address
+            // again costs a hello, and is how the port finds out.
+            if resent {
+                if let Some(link) = self.rv.relayed.get_mut(&id) {
+                    let soonest = link.last_hello + rendezvous::REFRESH_FLOOR;
+                    if !link.legacy && link.next_refresh > soonest {
+                        link.next_refresh = soonest;
+                        // `wake_at`, written out: `entry` still borrows the
+                        // peer table.
+                        self.next_wake = Some(self.next_wake.map_or(soonest, |w| w.min(soonest)));
+                    }
                 }
             }
 

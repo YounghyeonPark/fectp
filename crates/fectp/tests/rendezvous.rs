@@ -67,6 +67,8 @@ impl Drop for Server {
 /// A client behind a NAT of `kind`, registered with the rendezvous.
 struct Client {
     endpoint: Endpoint,
+    /// The NAT it is behind, to move it.
+    nat: Arc<common::nat::NatSocket>,
     key: [u8; 32],
     /// Sessions that came up, by the key they authenticated.
     sessions: Vec<(PeerId, [u8; 32])>,
@@ -81,7 +83,7 @@ impl Client {
 
     /// As `behind`, with a chosen identity and the given faults.
     fn with(kind: Kind, server: &Server, identity: Identity, faults: Faults) -> Self {
-        let (socket, _nat) = behind(kind);
+        let (socket, nat) = behind(kind);
         let key = *identity.public();
         let socket = Faulty {
             inner: socket,
@@ -95,6 +97,7 @@ impl Client {
             .expect("connect");
         Self {
             endpoint,
+            nat,
             key,
             sessions: Vec::new(),
             failed: Vec::new(),
@@ -387,7 +390,7 @@ fn an_introduction_nobody_asked_for_sends_nothing() {
 /// Faults a test can ask a client's socket for.
 #[derive(Clone, Copy, Default)]
 struct Faults {
-    /// Drop the first relay proof sent.
+    /// Drop the first answer to a relay port's check.
     lose_proof: bool,
     /// Drop the first data frame sent to this address: with the rendezvous's
     /// address, that is the registration, which then arrives late.
@@ -404,8 +407,12 @@ struct Faulty {
 
 impl fectp::DatagramSocket for Faulty {
     fn send_to(&self, buf: &[u8], to: std::net::SocketAddr) -> std::io::Result<usize> {
+        // Whichever kind of answer it is: a keyed one (0x46) or version
+        // 0.3.1's proof (0x44). Matching only the second, as this once did,
+        // lost nothing once clients stopped sending it, and the test went on
+        // passing without testing anything.
         if self.faults.lose_proof
-            && buf.starts_with(&[0xF0, 0x44])
+            && (buf.starts_with(&[0xF0, 0x46]) || buf.starts_with(&[0xF0, 0x44]))
             && !self.lost_proof.swap(true, Ordering::SeqCst)
         {
             return Ok(buf.len());
@@ -629,4 +636,51 @@ fn an_address_that_cannot_be_sent_to_fails_only_its_introduction() {
         let _ = liar.poll(Some(Duration::from_millis(2)));
     }
     assert_eq!(failed, vec![(named, Unavailable::Unreachable)]);
+}
+
+/// A relayed session follows its client when the client's NAT gives it a new
+/// mapping toward the relay port. The port stops hearing it at the old
+/// address; the client's next resend prompts a hello from the new one, the
+/// port checks it and records the move once a keyed answer comes back, and
+/// the session — the same one, no new handshake — carries on both ways. This
+/// used to end the session: a port kept the first address it recorded for
+/// good, because the token was all a client could prove itself with and it
+/// travelled in the clear.
+#[test]
+fn a_relayed_session_follows_a_nat_that_moves_it() {
+    let server = Server::spawn(|_| {});
+    let mut a = Client::behind(Kind::Symmetric, &server);
+    let mut b = Client::behind(Kind::Symmetric, &server);
+    let (ab, ba) = introduce(&mut a, &mut b);
+    assert!(a.endpoint.is_relayed(ab) && b.endpoint.is_relayed(ba));
+    talk(&mut a, &mut b, ab, ba);
+    let sessions = (a.sessions.len(), b.sessions.len());
+
+    a.nat.remap();
+    a.endpoint
+        .send_reliable(ab, b"after the move", PayloadType::Opaque)
+        .expect("send");
+    // Well inside the twenty-second periodic refresh, so it is the resend
+    // that has to prompt the hello.
+    assert!(
+        run(&mut a, &mut b, Duration::from_secs(10), |_, b| {
+            b.messages.iter().any(|m| m == b"after the move")
+        }),
+        "the message sent from the new mapping should reach the other side"
+    );
+    b.endpoint
+        .send_reliable(ba, b"and back", PayloadType::Opaque)
+        .expect("send");
+    assert!(
+        run(&mut a, &mut b, Duration::from_secs(10), |a, _| {
+            a.messages.iter().any(|m| m == b"and back")
+        }),
+        "and the other side's reply reaches the new mapping"
+    );
+    assert_eq!(
+        (a.sessions.len(), b.sessions.len()),
+        sessions,
+        "the same session throughout, with no new handshake"
+    );
+    assert!(a.endpoint.is_relayed(ab) && b.endpoint.is_relayed(ba));
 }

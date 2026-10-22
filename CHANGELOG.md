@@ -10,7 +10,13 @@ which is the long form: this file says what changed, that one says why.
 
 ## Unreleased
 
-Nothing yet.
+**A relayed session follows a client whose NAT moves it.** A relay port used
+to keep the first address it recorded, so a NAT that gave a client a new
+mapping ended the session. A client now proves its address with a MAC keyed
+by the relay token rather than the token itself, so the port can safely
+record a new one; it does so on the client's next resend and every 20 s
+(`RELAY_REFRESH`). Clients and rendezvous of 0.3.1 still work with this
+version both ways, without the following (D87, SPEC A.4–A.5).
 
 ## 0.3.1 — 2026-10-22
 

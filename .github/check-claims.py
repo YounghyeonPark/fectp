@@ -66,10 +66,10 @@ ALLOWED = {
         "`probe` matches CAP_PMTU_PROBE, the capability for the probe frame "
         "that SPEC 5.8.7 does specify; what section 10 leaves open is the "
         "schedule, which has no name of its own to collide with.",
-    "a relayed session does not follow a move":
-        "`relayed` matches is_relayed, which says a session runs through a "
-        "relay; what is absent is a relayed session following its client to a "
-        "new address.",
+    "a relay of version 0.3.1 does not follow a move":
+        "`relay` matches RELAY_REFRESH and the relay constants, which are the "
+        "following that does exist; what is absent is following on a port "
+        "that saw its token in the clear.",
     "peer discovery":
         "`discovery` matches set_path_mtu_discovery, which finds a frame size "
         "for a peer already connected, and `peer` matches every per-peer "

@@ -45,6 +45,8 @@ struct Mapping {
     socket: UdpSocket,
     /// Addresses the host has sent to through this mapping.
     sent_to: Arc<Mutex<HashSet<SocketAddr>>>,
+    /// Set when the NAT forgets this mapping.
+    forgotten: Arc<AtomicBool>,
 }
 
 /// A host's socket, behind a NAT of the given kind.
@@ -102,6 +104,7 @@ impl NatSocket {
 
         let socket = UdpSocket::bind("127.0.0.1:0")?;
         let sent_to = Arc::new(Mutex::new(HashSet::new()));
+        let forgotten = Arc::new(AtomicBool::new(false));
         // What arrives at the mapping, filtered as this kind of NAT does.
         // Blocking reads, woken on drop, for the reason every relay in these
         // tests uses them (D80, D81).
@@ -111,12 +114,13 @@ impl NatSocket {
             let deliver = self.deliver.clone();
             let stop = Arc::clone(&self.stop);
             let refused = Arc::clone(&self.refused);
+            let forgotten = Arc::clone(&forgotten);
             let kind = self.kind;
             thread::spawn(move || {
                 let mut buf = vec![0u8; 65535];
                 loop {
                     let got = socket.recv_from(&mut buf);
-                    if stop.load(Ordering::Relaxed) {
+                    if stop.load(Ordering::Relaxed) || forgotten.load(Ordering::Relaxed) {
                         break;
                     }
                     let Ok((n, from)) = got else {
@@ -139,8 +143,37 @@ impl NatSocket {
             });
         }
         let handle = (socket.try_clone()?, Arc::clone(&sent_to));
-        mappings.insert(key, Mapping { socket, sent_to });
+        mappings.insert(
+            key,
+            Mapping {
+                socket,
+                sent_to,
+                forgotten,
+            },
+        );
         Ok(handle)
+    }
+}
+
+impl NatSocket {
+    /// Forgets every mapping, as a NAT does after a reboot, a lease change,
+    /// or a quiet spell longer than it keeps them. The host's next datagram
+    /// leaves through a new one, from a new outside port, and nothing that
+    /// arrives at an old one is let in.
+    pub fn remap(&self) {
+        let old: Vec<Mapping> = self
+            .mappings
+            .lock()
+            .expect("lock")
+            .drain()
+            .map(|(_, m)| m)
+            .collect();
+        for mapping in old {
+            mapping.forgotten.store(true, Ordering::Relaxed);
+            if let Ok(addr) = mapping.socket.local_addr() {
+                super::wake(addr);
+            }
+        }
     }
 }
 

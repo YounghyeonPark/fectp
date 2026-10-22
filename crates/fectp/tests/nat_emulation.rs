@@ -130,3 +130,32 @@ fn a_symmetric_nat_shows_each_destination_a_different_address() {
     let (_, from_b) = b.recv_from(&mut buf).expect("b");
     assert_eq!(from_a, from_b, "a cone shows everyone the same address");
 }
+
+/// A remapped NAT sends from a new outside port, and lets nothing in at the
+/// old one: what the relay tests rely on when a host's mapping moves.
+#[test]
+fn a_remap_moves_the_host_and_forgets_the_old_mapping() {
+    let (_, nat) = behind(Kind::PortRestricted);
+    let peer = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let to = peer.local_addr().expect("addr");
+    let mut buf = [0u8; 64];
+
+    nat.send_to(b"before", to).expect("send");
+    let (_, before) = peer.recv_from(&mut buf).expect("before");
+    nat.remap();
+    nat.send_to(b"after", to).expect("send");
+    let (_, after) = peer.recv_from(&mut buf).expect("after");
+    assert_ne!(before, after, "a new mapping, from a new outside port");
+
+    peer.send_to(b"to the old one", before).expect("send");
+    assert!(
+        nat.recv_from(&mut buf, Some(Duration::from_millis(300)))
+            .is_err(),
+        "the old mapping is forgotten"
+    );
+    peer.send_to(b"to the new one", after).expect("send");
+    let (n, _) = nat
+        .recv_from(&mut buf, Some(Duration::from_millis(300)))
+        .expect("the control: the new mapping lets it in");
+    assert_eq!(&buf[..n], b"to the new one");
+}

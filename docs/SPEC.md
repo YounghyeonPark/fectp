@@ -1391,13 +1391,28 @@ cannot tell on its own that the address it is bound to is not the one clients
 see.
 
 **A port records its party's address only once the address has proved it can
-receive there.** A bind (A.5) carrying the port's token draws a check, sent to
-the bind's source address and no larger than the bind, carrying a nonce. A
-proof carrying that nonce, from that address, records it. The first address
-recorded is the party's for the life of the allocation; binds and proofs after
-it are discarded. Without the check, anyone holding a token — which is anyone
-who asked for a relay — could bind it from a forged source address and have
-the other party's traffic sent there.
+receive there, and that it holds the token.** A hello (A.5) draws a check,
+sent to the hello's source address and no larger than the hello, carrying a
+nonce. An answer from that address, carrying that nonce and a MAC over it
+keyed by the port's token, records the address — the party's first, or a new
+one when its NAT has moved it, in which case the old address hears nothing
+more. The nonce MUST be unpredictable and MUST be one the port sent to the
+address the answer comes from; a port SHOULD derive it from a secret and that
+address rather than keep a record, so that forged hellos have nothing to
+overwrite while a real answer is on its way.
+
+The token itself never crosses the wire on this path. Seeing every answer a
+party sends gives an observer nothing it can answer a check of its own with,
+so following a party to a new address is safe. Without the check, anyone
+holding a token — which is anyone who asked for a relay — could claim a
+forged source address and have the other party's traffic sent there.
+
+Version 0.3.1 of the reference implementation bound with the token in the
+clear, and a port SHOULD still honour that bind — 0x42, then a proof echoing
+the nonce — for a first address. Once it has, the token is anybody's on the
+path, and the port MUST NOT record another address for the life of the
+allocation, nor answer a hello. A client whose hellos draw no check MAY fall
+back to it, since a port that does not know hellos is one of that version.
 
 Once both have recorded an address, a datagram from one party is sent on,
 unchanged, from the *other* port to the other party's address. Anything else
@@ -1420,27 +1435,39 @@ does not implement (§1.1). The punch is rejected even sooner, being shorter
 than a header.
 
 ```
-punch : 0xF0 || 0x50                (2 bytes)   client → peer
-bind  : 0xF0 || 0x42 || token[16]   (18 bytes)  client → relay port
-check : 0xF0 || 0x43 || nonce[16]   (18 bytes)  relay port → client
-proof : 0xF0 || 0x44 || nonce[16]   (18 bytes)  client → relay port
+punch  : 0xF0 || 0x50                            (2 bytes)   client → peer
+hello  : 0xF0 || 0x45 || random[16]              (18 bytes)  client → relay port
+check  : 0xF0 || 0x43 || nonce[16]               (18 bytes)  relay port → client
+answer : 0xF0 || 0x46 || nonce[16] || mac[16]    (34 bytes)  client → relay port
+bind   : 0xF0 || 0x42 || token[16]               (18 bytes)  client → relay port, 0.3.1
+proof  : 0xF0 || 0x44 || nonce[16]               (18 bytes)  client → relay port, 0.3.1
+
+mac = BLAKE2s("fectp relay answer" || token || nonce)[0..16]
 ```
 
+BLAKE2s is not open to length extension, so a hash over the key and the
+message is a MAC as it stands. The answer is larger than the check, but it
+goes from the client to the port: nothing a third party sends makes it.
+
 A punch carries nothing and is never answered; it exists to be sent. A client
-answers a check with a proof only if it came from a relay port it was offered.
-It goes on answering until its session through the port is up, and binding,
-up to a bound it chooses: a proof can be lost, and the port checks again on
-the next bind. A client
-cannot know when it has been recorded, and a port discards what follows.
+answers a check only if it came from a relay port it was offered or has a
+session through. It sends hellos until its session through the port is up,
+up to a bound it chooses — an answer can be lost, and the port checks again
+on the next hello — and then again from time to time for as long as the
+session lasts, and whenever it has had to resend through the port: that is
+how a port finds out its party has moved.
 
 ### A.6 What this does not provide
 
 - **Privacy of addresses between the pair.** Once both have asked for each
   other, each learns where the other is. A rendezvous may further restrict
   which pairs it introduces.
-- **Following a move through a relay.** A port records its party's address
-  once. A party whose NAT gives it a new mapping toward the port loses the
-  relayed session and must be introduced again.
+- **Hearing of a move before the party speaks.** A port follows a party to a
+  new address when the party next proves it, which it does when it next has
+  to resend, or on its periodic hello. Until then the other side's traffic
+  goes to the old address and is resent like any loss. A port of version
+  0.3.1, or one whose party fell back to that version's bind, does not follow
+  at all.
 - **A relay that cannot observe.** Integrity and confidentiality hold end to
   end, but a relay sees who talks to whom, when, and how much, and can drop or
   delay anything.

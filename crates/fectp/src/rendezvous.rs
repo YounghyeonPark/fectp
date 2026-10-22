@@ -45,6 +45,8 @@ pub(crate) const PUNCH: u8 = 0x50;
 pub(crate) const BIND: u8 = 0x42;
 pub(crate) const CHECK: u8 = 0x43;
 pub(crate) const PROOF: u8 = 0x44;
+pub(crate) const HELLO: u8 = 0x45;
+pub(crate) const ANSWER: u8 = 0x46;
 /// A bind's token and a check's nonce.
 pub(crate) const SECRET_LEN: usize = 16;
 
@@ -688,14 +690,67 @@ struct Port {
     token: [u8; SECRET_LEN],
     /// The address its party proved it can receive at, once it has.
     party: Mutex<Option<SocketAddr>>,
-    /// The check outstanding, if one is: where it went, and its nonce.
-    checking: Mutex<Option<(SocketAddr, [u8; SECRET_LEN], Instant)>>,
+    /// What a check's nonce is derived from, so a port keeps no record of
+    /// the checks it has sent: there is no slot for a flood of forged hellos
+    /// to keep overwriting while the real party's answer is on its way.
+    secret: [u8; SECRET_LEN],
+    opened: Instant,
+    /// Set once a bind carrying the token in the clear has been seen. The
+    /// token is then anybody's on the path, a keyed answer proves nothing,
+    /// and the port keeps the first address it records for good.
+    exposed: AtomicBool,
 }
 
-/// Checks a port will send in a second. A bind costs whoever sends it as much
-/// as the check it draws, but a forged source address makes the check
-/// somebody else's, and this bounds how much of that one port does.
-const CHECKS_PER_SECOND: u32 = 10;
+/// What a keyed answer carries: the first half of BLAKE2s over a label, the
+/// port's token and the check's nonce. The token never crosses the wire this
+/// way, so seeing an answer gives nobody what they need to make the next one.
+/// BLAKE2 is not open to length extension, so a hash over the key and the
+/// message is a MAC as it stands.
+pub(crate) fn relay_answer(token: &[u8; SECRET_LEN], nonce: &[u8]) -> [u8; SECRET_LEN] {
+    let digest = fectp_core::noise::hash(&[b"fectp relay answer", token, nonce]);
+    let mut mac = [0u8; SECRET_LEN];
+    mac.copy_from_slice(&digest[..SECRET_LEN]);
+    mac
+}
+
+impl Port {
+    /// The nonce a check to `to` carries in the ten-second period `epoch`.
+    fn nonce(&self, to: SocketAddr, epoch: u64) -> [u8; SECRET_LEN] {
+        let mut addr = Vec::with_capacity(19);
+        put_addr(&mut addr, to);
+        let digest = fectp_core::noise::hash(&[
+            b"fectp relay check",
+            &self.secret,
+            &addr,
+            &epoch.to_le_bytes(),
+        ]);
+        let mut nonce = [0u8; SECRET_LEN];
+        nonce.copy_from_slice(&digest[..SECRET_LEN]);
+        nonce
+    }
+
+    fn epoch(&self) -> u64 {
+        self.opened.elapsed().as_secs() / 10
+    }
+
+    /// Whether `nonce` is one this port sent to `from`, this period or the
+    /// last: an answer can straddle the boundary.
+    fn sent(&self, from: SocketAddr, nonce: &[u8]) -> bool {
+        let now = self.epoch();
+        same(nonce, &self.nonce(from, now)) || (now > 0 && same(nonce, &self.nonce(from, now - 1)))
+    }
+}
+
+/// Equality that takes as long whatever the bytes, for comparing a MAC.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Checks a port will send in a second, in all.
+const CHECKS_PER_SECOND: u32 = 50;
+
+/// Checks a port will send one address in a second.
+const CHECKS_PER_ADDRESS: u32 = 2;
 
 /// Two ports and the threads forwarding between them.
 struct Allocation {
@@ -720,7 +775,13 @@ impl Allocation {
                 advertised: SocketAddr::new(advertised, local.port()),
                 token,
                 party: Mutex::new(None),
-                checking: Mutex::new(None),
+                secret: {
+                    let mut secret = [0u8; SECRET_LEN];
+                    OsRng.fill_bytes(&mut secret);
+                    secret
+                },
+                opened: Instant::now(),
+                exposed: AtomicBool::new(false),
             }))
         };
         let ports = [make()?, make()?];
@@ -771,7 +832,8 @@ impl Drop for Allocation {
     }
 }
 
-/// One port's thread: proves its party's address, then forwards.
+/// One port's thread: proves its party's address, follows it when it moves,
+/// and forwards.
 fn serve_port(
     this: &Port,
     other: &Port,
@@ -780,7 +842,30 @@ fn serve_port(
     budget: &Mutex<(f64, Instant)>,
 ) {
     let mut buf = vec![0u8; 65535];
-    let mut checks = (0u32, Instant::now());
+    // Checks sent this second, in all and to each address. A hello or a bind
+    // costs whoever sends it as much as the check it draws, but a forged
+    // source address makes the check somebody else's: the total bounds how
+    // much of that one port does, and the share per address keeps one
+    // flooded address from spending it all.
+    let mut second = Instant::now();
+    let mut sent_to: HashMap<SocketAddr, u32> = HashMap::new();
+    let mut check = |to: SocketAddr| {
+        let now = Instant::now();
+        if now.duration_since(second) >= Duration::from_secs(1) {
+            second = now;
+            sent_to.clear();
+        }
+        let total: u32 = sent_to.values().sum();
+        let to_this = sent_to.entry(to).or_insert(0);
+        if total >= CHECKS_PER_SECOND || *to_this >= CHECKS_PER_ADDRESS {
+            return;
+        }
+        *to_this += 1;
+        let mut datagram = vec![NOT_A_FRAME, CHECK];
+        datagram.extend_from_slice(&this.nonce(to, this.epoch()));
+        let _ = this.socket.send_to(&datagram, to);
+    };
+
     loop {
         let got = this.socket.recv_from(&mut buf);
         if stop.load(Ordering::Relaxed) {
@@ -792,66 +877,68 @@ fn serve_port(
         let datagram = &buf[..n];
         let party = *lock(&this.party);
 
-        match party {
-            Some(recorded) if recorded == from => {
-                // A bind or proof after the address is recorded is discarded,
-                // never forwarded: it is not the party's traffic.
-                if datagram.first() == Some(&NOT_A_FRAME)
-                    && matches!(datagram.get(1), Some(&BIND) | Some(&PROOF))
+        // Not a frame: the port's own conversation with its party, never
+        // forwarded, whoever it is from.
+        if datagram.first() == Some(&NOT_A_FRAME) {
+            match datagram {
+                // Proving an address, the first time or after a move.
+                [NOT_A_FRAME, HELLO, rest @ ..] if rest.len() == SECRET_LEN => {
+                    if !this.exposed.load(Ordering::Relaxed) {
+                        check(from);
+                    }
+                }
+                [NOT_A_FRAME, ANSWER, rest @ ..] if rest.len() == 2 * SECRET_LEN => {
+                    let (nonce, mac) = rest.split_at(SECRET_LEN);
+                    if !this.exposed.load(Ordering::Relaxed)
+                        && this.sent(from, nonce)
+                        && same(mac, &relay_answer(&this.token, nonce))
+                    {
+                        // The first address, or a new one for the same party:
+                        // only the token's holder could have answered, and
+                        // only at the address the check went to.
+                        *lock(&this.party) = Some(from);
+                    }
+                }
+                // Version 0.3.1's bind, with the token in the clear: still
+                // honoured for a first address, but nothing keyed after it.
+                [NOT_A_FRAME, BIND, token @ ..] if party.is_none() && same(token, &this.token) => {
+                    this.exposed.store(true, Ordering::Relaxed);
+                    check(from);
+                }
+                [NOT_A_FRAME, PROOF, nonce @ ..]
+                    if party.is_none()
+                        && this.exposed.load(Ordering::Relaxed)
+                        && this.sent(from, nonce) =>
                 {
-                    continue;
-                }
-                let Some(to) = *lock(&other.party) else {
-                    continue;
-                };
-                // Bounded per allocation, both directions together.
-                {
-                    let mut budget = lock(budget);
-                    let now = Instant::now();
-                    let refill =
-                        now.duration_since(budget.1).as_secs_f64() * RELAY_BYTES_PER_SECOND as f64;
-                    budget.0 = (budget.0 + refill).min(RELAY_BYTES_PER_SECOND as f64);
-                    budget.1 = now;
-                    if budget.0 < n as f64 {
-                        continue;
-                    }
-                    budget.0 -= n as f64;
-                }
-                if other.socket.send_to(datagram, to).is_ok() {
-                    *lock(last_forward) = Instant::now();
-                }
-            }
-            // Recorded, and this is someone else: discarded, and not counted
-            // as activity.
-            Some(_) => {}
-            None => match datagram {
-                [NOT_A_FRAME, BIND, token @ ..] if token == this.token => {
-                    let now = Instant::now();
-                    if now.duration_since(checks.1) >= Duration::from_secs(1) {
-                        checks = (0, now);
-                    }
-                    if checks.0 >= CHECKS_PER_SECOND {
-                        continue;
-                    }
-                    checks.0 += 1;
-                    let mut nonce = [0u8; SECRET_LEN];
-                    OsRng.fill_bytes(&mut nonce);
-                    *lock(&this.checking) = Some((from, nonce, now));
-                    let mut check = vec![NOT_A_FRAME, CHECK];
-                    check.extend_from_slice(&nonce);
-                    let _ = this.socket.send_to(&check, from);
-                }
-                [NOT_A_FRAME, PROOF, nonce @ ..] => {
-                    let mut checking = lock(&this.checking);
-                    if let Some((asked, expected, _)) = *checking {
-                        if asked == from && nonce == expected {
-                            *lock(&this.party) = Some(from);
-                            *checking = None;
-                        }
-                    }
+                    *lock(&this.party) = Some(from);
                 }
                 _ => {}
-            },
+            }
+            continue;
+        }
+
+        // Anything else is forwarded only from the recorded address; from
+        // anywhere else it is discarded, and not counted as activity.
+        if party != Some(from) {
+            continue;
+        }
+        let Some(to) = *lock(&other.party) else {
+            continue;
+        };
+        // Bounded per allocation, both directions together.
+        {
+            let mut budget = lock(budget);
+            let now = Instant::now();
+            let refill = now.duration_since(budget.1).as_secs_f64() * RELAY_BYTES_PER_SECOND as f64;
+            budget.0 = (budget.0 + refill).min(RELAY_BYTES_PER_SECOND as f64);
+            budget.1 = now;
+            if budget.0 < n as f64 {
+                continue;
+            }
+            budget.0 -= n as f64;
+        }
+        if other.socket.send_to(datagram, to).is_ok() {
+            *lock(last_forward) = Instant::now();
         }
     }
 }
@@ -924,6 +1011,16 @@ pub const INTRODUCTION_DEADLINE: Duration = Duration::from_secs(90);
 pub(crate) const BINDS: u8 = 5;
 pub(crate) const BIND_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How often a client proves its address to its relay port again while a
+/// relayed session is up, so a NAT that gives it a new mapping is followed.
+/// Well inside [`RELAY_IDLE`], and short of the half-minute some NATs forget
+/// an idle mapping in.
+pub const RELAY_REFRESH: Duration = Duration::from_secs(20);
+
+/// The least time between two proofs a client sends one relay port, however
+/// many retransmissions ask for one.
+pub(crate) const REFRESH_FLOOR: Duration = Duration::from_secs(1);
+
 /// Where one introduction a client asked for has got to.
 #[derive(Debug)]
 pub(crate) enum Stage {
@@ -941,6 +1038,10 @@ pub(crate) enum Stage {
         token: [u8; SECRET_LEN],
         /// Whether the port has checked this side's address at least once.
         checked: bool,
+        /// Whether this side has fallen back to version 0.3.1's bind, which
+        /// carries the token in the clear, for a port that never answered a
+        /// hello.
+        legacy: bool,
         binds: u8,
         next_bind: Instant,
         outbound: Option<PeerId>,
@@ -962,5 +1063,40 @@ pub(crate) struct ClientState {
     pub registered: bool,
     pub observed: Option<SocketAddr>,
     pub asks: HashMap<Key, Ask>,
-    pub relayed: HashSet<PeerId>,
+    pub relayed: HashMap<PeerId, Link>,
+}
+
+/// A relayed session's port, kept so this side can prove its address to it
+/// again when its NAT moves it.
+#[derive(Debug)]
+pub(crate) struct Link {
+    pub port: SocketAddr,
+    pub token: [u8; SECRET_LEN],
+    /// Recorded through the 0.3.1 bind: the port will not follow a move.
+    pub legacy: bool,
+    pub next_refresh: Instant,
+    pub last_hello: Instant,
+}
+
+/// A hello: 0xF0, the kind, and sixteen random bytes, so it is the size of
+/// the check it draws.
+pub(crate) fn hello() -> Vec<u8> {
+    let mut hello = vec![NOT_A_FRAME, HELLO];
+    let mut pad = [0u8; SECRET_LEN];
+    OsRng.fill_bytes(&mut pad);
+    hello.extend_from_slice(&pad);
+    hello
+}
+
+/// The datagram answering a check with `nonce`, for a port with `token`.
+pub(crate) fn answer(token: &[u8; SECRET_LEN], nonce: &[u8], legacy: bool) -> Vec<u8> {
+    if legacy {
+        let mut proof = vec![NOT_A_FRAME, PROOF];
+        proof.extend_from_slice(nonce);
+        return proof;
+    }
+    let mut answer = vec![NOT_A_FRAME, ANSWER];
+    answer.extend_from_slice(nonce);
+    answer.extend_from_slice(&relay_answer(token, nonce));
+    answer
 }

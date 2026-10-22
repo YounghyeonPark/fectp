@@ -213,7 +213,9 @@ reason }` — on both sides when the rendezvous refuses to relay for a pair it
 introduced, except for a request over its rate bound, which only the asker
 hears. A relay drops a
 session that carries nothing for a minute, so a relayed one that may fall
-quiet wants `set_keepalive` below that. At most `MAX_INTRODUCTIONS` (16)
+quiet wants `set_keepalive` below that. A relayed session follows this
+endpoint when its NAT moves it: it proves its new address to the relay on its
+next resend, and every `RELAY_REFRESH` (20 s) regardless. At most `MAX_INTRODUCTIONS` (16)
 outstanding at once, each given up on after `INTRODUCTION_DEADLINE` (90 s).
 Public-key mode only: a rendezvous knows its clients by their keys.
 
